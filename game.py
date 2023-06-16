@@ -1,11 +1,14 @@
 import pygame
 import random
+import time
 
 SCREEN_WIDTH = 640
 SCREEN_HEIGHT = 480
 SPACESHIP_SPEED = 5
 SPACESHIP_WIDTH = 60
 ALIEN_WIDTH = 40
+BULLET_SIZE = 5
+MAX_HITS = 3
 
 class Spaceship:
     def __init__(self, window):
@@ -25,8 +28,9 @@ class Spaceship:
             self.x = SCREEN_WIDTH - self.load_spaceship().get_width()
 
     def shoot(self):
-        bullet = Bullet(self.x + self.load_spaceship().get_width()/2 - 2, self.y)
-        self.bullets.append(bullet)  # Add the bullet to the list
+        bullet = Bullet(self.x + self.load_spaceship().get_width() // 2 - 2, self.y)
+        bullet.bullet_speed = -10  # Set the bullet speed to move upward
+        self.bullets.append(bullet)
 
     def load_spaceship(self):
         spaceship_image = pygame.image.load("sprites/space_ship.png")
@@ -64,31 +68,26 @@ class Spaceship:
         for bullet in self.bullets:
             bullet.draw(self.window)
 
-
-
-
-class Bullet:
-    def __init__(self, x, y):
-        self.x = x
-        self.y = y
-        self.size = 5  # Size of the square bullet
-        self.bullet_speed = 20
-
-    def update(self):
-        self.y -= self.bullet_speed
-        
-    def draw(self, surface):
-        pygame.draw.rect(surface, (255, 0, 0), (self.x, self.y, self.size, self.size))
-
-
-
+    def check_bullet_collision(self, aliens):
+        for bullet in self.bullets:
+            for alien in aliens:
+                if bullet.collides_with(alien):
+                    self.bullets.remove(bullet)  # Remove the bullet from the list
+                    alien.hit()
+                    if alien.hits >= MAX_HITS:
+                        aliens.remove(alien)
+                    break
 class Alien:
-    def __init__(self,x ,y, speed):
+    def __init__(self, x, y, speed):
         self.x = x
         self.y = y
         self.speed = speed
         self.direction_x = random.choice([-1, 1])
         self.direction_y = random.choice([-1, 1])
+        self.hits = 0
+        self.shoot_timer = random.randint(0, 10)
+        self.bullets = []
+        self.is_hit = False  # Flag to track if the alien is hit
 
     def move(self):
         self.x += self.speed * self.direction_x
@@ -110,12 +109,65 @@ class Alien:
             self.y = 200
             self.direction_y = -1  # Change vertical direction to move up
 
+    def update(self):
+        self.move()
+        # Removed hit_timer and associated conditions
+        self.shoot_timer -= 1
+        if self.shoot_timer <= 0:
+            self.shoot_bullet()
+            self.shoot_timer = random.randint(100, 200)
+
+    def shoot_bullet(self):
+        bullet = Bullet(self.x + ALIEN_WIDTH // 2 - BULLET_SIZE // 2, self.y + ALIEN_WIDTH)
+        bullet.bullet_speed = 3  # Set the bullet speed to move downward
+        self.bullets.append(bullet)
+
+    def update_bullets(self):
+        for bullet in self.bullets:
+            bullet.update()
+            if bullet.y > SCREEN_HEIGHT:
+                self.bullets.remove(bullet)
+
+    def draw_bullets(self, surface):
+        for bullet in self.bullets:
+            bullet.draw(surface)
+
+    def hit(self):
+        self.hits += 1
+        self.is_hit = True
+        if self.hits >= MAX_HITS:
+            self.is_hit = True
+
     def load_alien(self):
-        alien_image = pygame.image.load("sprites/alien_ok.png")
+        if self.is_hit:
+            alien_image = pygame.image.load("sprites/alien_hit.png")
+        else:
+            alien_image = pygame.image.load("sprites/alien_ok.png")
+
         original_width, original_height = alien_image.get_size()
         alien_height = int(ALIEN_WIDTH * original_height / original_width)
         alien_image = pygame.transform.scale(alien_image, (ALIEN_WIDTH, alien_height))
+
         return alien_image
+    
+class Bullet:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+        self.size = BULLET_SIZE  # Size of the square bullet
+        self.bullet_speed = 20
+
+    def update(self):
+        self.y += self.bullet_speed
+
+    def draw(self, surface):
+        pygame.draw.rect(surface, (255, 0, 0), (self.x, self.y, self.size, self.size))
+
+    def collides_with(self, alien):
+        bullet_rect = pygame.Rect(self.x, self.y, self.size, self.size)
+        alien_rect = pygame.Rect(alien.x, alien.y, ALIEN_WIDTH, ALIEN_WIDTH)
+        return bullet_rect.colliderect(alien_rect)
+    
     
 
 pygame.init()
@@ -127,14 +179,23 @@ clock = pygame.time.Clock()
 while True:
     spaceship.check_events()
     spaceship.move()
+    spaceship.update_bullets()
+    spaceship.check_bullet_collision(aliens)
+
+    for alien in aliens:
+        alien.update()
+        alien.update_bullets()
 
     window.fill((0, 0, 0))
+
+    for alien in aliens:
+        alien.draw_bullets(window)
+        alien_surface = alien.load_alien()
+        window.blit(alien_surface, (alien.x, alien.y))
+
     space_ship = spaceship.load_spaceship()
     window.blit(space_ship, (spaceship.x, spaceship.y))
-    for alien in aliens:
-        window.blit(alien.load_alien(), (alien.x, alien.y))
-        alien.move()
-    spaceship.update_bullets()  # Update and remove off-screen bullets
-    spaceship.draw_bullets()  # Draw all bullets
+    spaceship.draw_bullets()
+
     pygame.display.flip()
     clock.tick(60)
