@@ -19,6 +19,8 @@ class Spaceship:
         self.bullets = []  # List to store bullets
         self.hits = 0  # Number of hits on the spaceship
         self.spaceship_image = self.load_spaceship()
+        self.rect = pygame.Rect(self.x, self.y, SPACESHIP_WIDTH, self.load_spaceship().get_height())
+
 
     def move(self):
         new_x = self.x + self.vel_x
@@ -29,13 +31,15 @@ class Spaceship:
         elif new_x > SCREEN_WIDTH - self.load_spaceship().get_width():
             self.x = SCREEN_WIDTH - self.load_spaceship().get_width()
 
+        self.rect.x = self.x
+
     def shoot(self):
         bullet = Bullet(self.x + self.load_spaceship().get_width() // 2 - 2, self.y)
         bullet.bullet_speed = -10  # Set the bullet speed to move upward
         self.bullets.append(bullet)
 
     def load_spaceship(self):
-        spaceship_image = pygame.image.load("sprites/space_ship.png")
+        spaceship_image = loadify("sprites/space_ship.png")
         original_width, original_height = spaceship_image.get_size()
         spaceship_height = int(SPACESHIP_WIDTH * original_height / original_width)
         spaceship_image = pygame.transform.scale(spaceship_image, (SPACESHIP_WIDTH, spaceship_height))
@@ -98,7 +102,8 @@ class Alien:
         self.alien_ok_image = self.load_alien_ok()
         self.alien_hit_image = self.load_alien_hit()
         self.alien_dead_image = self.load_alien_dead()
-
+        self.rect = pygame.Rect(self.x, self.y, ALIEN_WIDTH, ALIEN_WIDTH)
+        
     def check_bullet_collision(self, spaceship):
         for bullet in self.bullets:
             if bullet.collides_with(spaceship):
@@ -120,7 +125,8 @@ class Alien:
         if not self.is_dead:
             self.x += self.speed * self.direction_x
             self.y += self.speed * self.direction_y
-
+            self.rect.x = self.x
+            self.rect.y = self.y
             # Check if the alien reaches the horizontal window boundaries
             if self.x <= 0:
                 self.x = 0
@@ -136,26 +142,26 @@ class Alien:
             elif self.y >= 200:
                 self.y = 200
                 self.direction_y = -1  # Change vertical direction to move up
-        else:
-            self.y += 2  # Move the dead alien downward
+            elif self.hits >= 3:
+                self.y += 10  # Move the dead alien downward
 
     def update(self):
         if self.hits < MAX_HITS:
             self.move()
-            self.shoot_timer -= 1
+            self.shoot_timer = random.randint(0,1000)
             if self.shoot_timer <= 0:
                 self.shoot_bullet()
-                self.shoot_timer = random.randint(100, 200)
+                self.shoot_timer = random.randint(0, 1000)
         elif self.hits >= MAX_HITS:
             if self.y < SCREEN_HEIGHT:
-                self.y += 2  # Move the dead alien downward
+                self.y += 5  # Move the dead alien downward
             else:
                 self.is_dead = True  # Remove the dead alien from the list
 
     def shoot_bullet(self):
         if not self.is_dead:
             bullet = Bullet(self.x + ALIEN_WIDTH // 2 - BULLET_SIZE // 2, self.y + ALIEN_WIDTH)
-            bullet.bullet_speed = 3  # Set the bullet speed to move downward
+            bullet.bullet_speed = 10  # Set the bullet speed to move downward
             self.bullets.append(bullet)
 
     def update_bullets(self):
@@ -171,11 +177,9 @@ class Alien:
     def hit(self):
         self.hits += 1
         self.is_hit = True
-        if self.hits >= MAX_HITS:
-            self.is_dead = False
 
     def draw_alien(self, filename):
-        alien_image = pygame.image.load(filename)
+        alien_image = loadify(filename)
 
         original_width, original_height = alien_image.get_size()
         alien_height = int(ALIEN_WIDTH * original_height / original_width)
@@ -199,30 +203,30 @@ class Bullet:
         self.y = y
         self.size = BULLET_SIZE  # Size of the square bullet
         self.bullet_speed = 20
+        self.rect = pygame.Rect(self.x, self.y, self.size, self.size)
 
     def update(self):
         self.y += self.bullet_speed
+        self.rect.y = self.y
 
     def draw(self, surface, color):
         pygame.draw.rect(surface, color, (self.x, self.y, self.size, self.size))
 
     def collides_with(self, entity):
         if isinstance(entity, Alien):
-            alien_rect = pygame.Rect(entity.x, entity.y, ALIEN_WIDTH, ALIEN_WIDTH)
-            bullet_rect = pygame.Rect(self.x, self.y, self.size, self.size)
-            return bullet_rect.colliderect(alien_rect)
+            return self.rect.colliderect(entity.rect)
         if isinstance(entity, Spaceship):
-            spaceship_rect = pygame.Rect(entity.x, entity.y, SPACESHIP_WIDTH, entity.load_spaceship().get_height())
-            bullet_rect = pygame.Rect(self.x, self.y, self.size, self.size)
-            return bullet_rect.colliderect(spaceship_rect)
+            return self.rect.colliderect(entity.rect)
     
+def loadify(imgname):
+    return pygame.image.load(imgname).convert_alpha()
 
 pygame.init()
 window = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
 spaceship = Spaceship(window)
 aliens = [Alien(random.randint(40, 600), random.randint(40, 200), 1) for _ in range(10)]
 clock = pygame.time.Clock()
-background_image = pygame.image.load("sprites/background.png")
+background_image = loadify("sprites/background.png")
 background_image = pygame.transform.scale(background_image, (SCREEN_WIDTH, SCREEN_HEIGHT))
 
 while True:
