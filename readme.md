@@ -23,9 +23,10 @@ You need to have Python 3 and Pygame installed on your machine. If Pygame is not
 ```bash
 
 `pip install pygame`
+
 ```
 
-How to Run
+## How to Run
 ----------
 
 1.  Clone the repository or download the files.
