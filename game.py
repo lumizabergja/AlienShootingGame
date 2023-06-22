@@ -10,8 +10,10 @@ ALIEN_WIDTH = 40
 BULLET_SIZE = 5
 MAX_HITS = 3
 
+
 class Spaceship:
-    def __init__(self, window):
+    def __init__(self, window, highscore):
+        self.highscore = highscore
         self.alien_kills = 0
         self.x = SCREEN_WIDTH / 2
         self.y = 400
@@ -21,7 +23,11 @@ class Spaceship:
         self.hits = 0  # Number of hits on the spaceship
         self.spaceship_image = self.load_spaceship()
         self.rect = pygame.Rect(self.x, self.y, SPACESHIP_WIDTH, self.load_spaceship().get_height())
+        self.restart = False
 
+    def update_high_score(self):
+        if self.alien_kills > self.highscore.high_score:
+            self.highscore.save_high_score(self.alien_kills)
 
     def move(self):
         new_x = self.x + self.vel_x
@@ -46,24 +52,7 @@ class Spaceship:
         spaceship_image = pygame.transform.scale(spaceship_image, (SPACESHIP_WIDTH, spaceship_height))
         return spaceship_image
 
-    def check_events(self):
-        for event in pygame.event.get():
-            if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_LEFT:
-                    self.vel_x = -SPACESHIP_SPEED
-                elif event.key == pygame.K_RIGHT:
-                    self.vel_x = SPACESHIP_SPEED
-                elif event.key == pygame.K_SPACE:
-                    self.shoot()
-                elif event.key == pygame.K_ESCAPE:
-                    exit()
-            elif event.type == pygame.KEYUP:
-                if event.key == pygame.K_LEFT and self.vel_x < 0:
-                    self.vel_x = 0
-                elif event.key == pygame.K_RIGHT and self.vel_x > 0:
-                    self.vel_x = 0
-            elif event.type == pygame.QUIT:
-                exit()
+
 
     def update_bullets(self):
         for bullet in self.bullets:
@@ -86,7 +75,8 @@ class Spaceship:
     def hit(self):
         self.hits += 1
         if self.hits >= MAX_HITS:
-            game_over_screen(self.window, self.alien_kills)
+            game_over_screen(self.window, self.alien_kills, self, self.highscore)
+
 
 class Alien:
     def __init__(self, x, y, speed):
@@ -104,14 +94,14 @@ class Alien:
         self.alien_hit_image = self.load_alien_hit()
         self.alien_dead_image = self.load_alien_dead()
         self.rect = pygame.Rect(self.x, self.y, ALIEN_WIDTH, ALIEN_WIDTH)
-        
+
     def check_bullet_collision(self, spaceship):
         for bullet in self.bullets:
             if bullet.collides_with(spaceship):
                 spaceship.hit()
                 self.bullets.remove(bullet)
                 break
-    
+
     def load_alien_ok(self):
         return self.draw_alien("sprites/alien_ok.png")
 
@@ -120,7 +110,6 @@ class Alien:
 
     def load_alien_dead(self):
         return self.draw_alien("sprites/alien_dead.png")
-
 
     def move(self):
         if not self.is_dead:
@@ -149,7 +138,7 @@ class Alien:
     def update(self):
         if self.hits < MAX_HITS:
             self.move()
-            self.shoot_timer = random.randint(0,150)
+            self.shoot_timer = random.randint(0, 150)
             if self.shoot_timer <= 0:
                 self.shoot_bullet()
                 self.shoot_timer = random.randint(0, 150)
@@ -197,7 +186,8 @@ class Alien:
             alien_image = self.alien_ok_image
 
         return alien_image
-    
+
+
 class Bullet:
     def __init__(self, x, y):
         self.x = x
@@ -218,23 +208,34 @@ class Bullet:
             return self.rect.colliderect(entity.rect)
         if isinstance(entity, Spaceship):
             return self.rect.colliderect(entity.rect)
-    
+
+class HighScore:
+    def __init__(self, filename="high_score.txt"):
+        self.filename = filename
+        self.high_score = self.load_high_score()
+
+    def load_high_score(self):
+        try:
+            with open(self.filename, "r") as file:
+                return int(file.read())
+        except FileNotFoundError:
+            return 0
+
+    def save_high_score(self, score):
+        if score > self.high_score:
+            self.high_score = score
+            with open(self.filename, "w") as file:
+                file.write(str(score))
+
 def loadify(imgname):
     return pygame.image.load(imgname).convert_alpha()
 
-def game_over_screen(window, alien_kills):
-    pygame.init() 
-    restart = False
-    while not restart:
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                pygame.quit()
-                sys.exit()
-            elif event.key == pygame.K_ESCAPE:
-                    exit()
-            elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_RETURN:
-                    restart = True
+
+def game_over_screen(window, alien_kills, spaceship, high_score):
+    pygame.init()
+    spaceship.restart = False
+    while not spaceship.restart:
+        handle_events(spaceship)
 
         window.fill((0, 0, 0))  # Clear the window
         font = pygame.font.Font(None, 72)
@@ -246,6 +247,10 @@ def game_over_screen(window, alien_kills):
         score_rect = score_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 100))
         window.blit(score_text, score_rect)
 
+        high_score_text = font.render(f"High Score: {high_score.high_score}", True, (255, 255, 255))
+        high_score_rect = high_score_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 150))
+        window.blit(high_score_text, high_score_rect)
+
         restart_text = font.render("Press Enter to Restart", True, (255, 255, 255))
         restart_rect = restart_text.get_rect(center=(SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 + 200))
         window.blit(restart_text, restart_rect)
@@ -253,19 +258,23 @@ def game_over_screen(window, alien_kills):
         pygame.display.flip()
 
     run_game()
+    high_score.save_high_score(alien_kills)
 
 def run_game():
     pygame.init()
+    highscore = HighScore()
     window = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-    spaceship = Spaceship(window)
+    spaceship = Spaceship(window, highscore)
     aliens = [Alien(random.randint(40, 600), random.randint(40, 200), 1) for _ in range(10)]
     clock = pygame.time.Clock()
     background_image = loadify("sprites/background.png")
     background_image = pygame.transform.scale(background_image, (SCREEN_WIDTH, SCREEN_HEIGHT))
 
+    
+
 
     while True:
-        spaceship.check_events()
+        handle_events(spaceship)
         spaceship.move()
         spaceship.update_bullets()
         spaceship.check_bullet_collision(aliens)
@@ -283,6 +292,7 @@ def run_game():
             if alien.is_dead and alien.y >= SCREEN_HEIGHT:
                 aliens.remove(alien)
                 spaceship.alien_kills += 1
+                spaceship.update_high_score()
                 new_alien = Alien(random.randint(40, 600), 40, 1)
                 aliens.append(new_alien)
 
@@ -303,6 +313,31 @@ def run_game():
         pygame.display.flip()
         clock.tick(60)
     pygame.quit()
-    game_over_screen(window, spaceship.alien_kills)
+    game_over_screen(window, spaceship.alien_kills, spaceship, highscore)
+
+
+def handle_events(spaceship):
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            pygame.quit()
+            sys.exit()
+        elif event.type == pygame.KEYDOWN:
+            if event.key == pygame.K_ESCAPE:
+                pygame.quit()
+                sys.exit()
+            elif event.key == pygame.K_LEFT:
+                spaceship.vel_x = -SPACESHIP_SPEED
+            elif event.key == pygame.K_RIGHT:
+                spaceship.vel_x = SPACESHIP_SPEED
+            elif event.key == pygame.K_SPACE:
+                spaceship.shoot()
+            elif event.key == pygame.K_RETURN:
+                spaceship.restart = True
+        elif event.type == pygame.KEYUP:
+            if event.key == pygame.K_LEFT and spaceship.vel_x < 0:
+                spaceship.vel_x = 0
+            elif event.key == pygame.K_RIGHT and spaceship.vel_x > 0:
+                spaceship.vel_x = 0
+
 
 run_game()
