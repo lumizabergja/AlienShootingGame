@@ -12,6 +12,7 @@ MAX_HITS = 3
 
 class Spaceship:
     def __init__(self, window):
+        self.alien_kills = 0
         self.x = SCREEN_WIDTH / 2
         self.y = 400
         self.vel_x = 0
@@ -85,7 +86,7 @@ class Spaceship:
     def hit(self):
         self.hits += 1
         if self.hits >= MAX_HITS:
-            game_over_screen(window, alien_kills)
+            game_over_screen(self.window, self.alien_kills)
 
 class Alien:
     def __init__(self, x, y, speed):
@@ -229,6 +230,8 @@ def game_over_screen(window, alien_kills):
             if event.type == pygame.QUIT:
                 pygame.quit()
                 sys.exit()
+            elif event.key == pygame.K_ESCAPE:
+                    exit()
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_RETURN:
                     restart = True
@@ -249,51 +252,57 @@ def game_over_screen(window, alien_kills):
 
         pygame.display.flip()
 
-pygame.init()
-window = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
-spaceship = Spaceship(window)
-aliens = [Alien(random.randint(40, 600), random.randint(40, 200), 1) for _ in range(10)]
-clock = pygame.time.Clock()
-background_image = loadify("sprites/background.png")
-background_image = pygame.transform.scale(background_image, (SCREEN_WIDTH, SCREEN_HEIGHT))
+    run_game()
 
-alien_kills = 0
+def run_game():
+    pygame.init()
+    window = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT))
+    spaceship = Spaceship(window)
+    aliens = [Alien(random.randint(40, 600), random.randint(40, 200), 1) for _ in range(10)]
+    clock = pygame.time.Clock()
+    background_image = loadify("sprites/background.png")
+    background_image = pygame.transform.scale(background_image, (SCREEN_WIDTH, SCREEN_HEIGHT))
 
-while True:
-    spaceship.check_events()
-    spaceship.move()
-    spaceship.update_bullets()
-    spaceship.check_bullet_collision(aliens)
 
-    window.blit(background_image, (0, 0))
+    while True:
+        spaceship.check_events()
+        spaceship.move()
+        spaceship.update_bullets()
+        spaceship.check_bullet_collision(aliens)
 
-    for alien in aliens:
-        alien.update()
-        alien.update_bullets()
-        alien.check_bullet_collision(spaceship)
-        alien.draw_bullets(window)
-        alien_surface = alien.load_alien()
-        window.blit(alien_surface, (alien.x, alien.y))
+        window.blit(background_image, (0, 0))
 
-        if alien.is_dead and alien.y >= SCREEN_HEIGHT:
-            aliens.remove(alien)
-            alien_kills += 1
+        for alien in aliens:
+            alien.update()
+            alien.update_bullets()
+            alien.check_bullet_collision(spaceship)
+            alien.draw_bullets(window)
+            alien_surface = alien.load_alien()
+            window.blit(alien_surface, (alien.x, alien.y))
 
-    space_ship = spaceship.load_spaceship()
-    window.blit(space_ship, (spaceship.x, spaceship.y))
-    spaceship.draw_bullets()
+            if alien.is_dead and alien.y >= SCREEN_HEIGHT:
+                aliens.remove(alien)
+                spaceship.alien_kills += 1
+                new_alien = Alien(random.randint(40, 600), 40, 1)
+                aliens.append(new_alien)
 
-    # Display alien kills counter
-    font = pygame.font.Font(None, 36)
-    text = font.render(f"Alien Kills: {alien_kills}", True, (255, 255, 255))
-    text_rect = text.get_rect()
-    text_rect.topright = (SCREEN_WIDTH - 10, 10)
-    window.blit(text, text_rect)
+        space_ship = spaceship.load_spaceship()
+        window.blit(space_ship, (spaceship.x, spaceship.y))
+        spaceship.draw_bullets()
 
-    if spaceship.hits >= MAX_HITS:
-        break
+        # Display alien kills counter
+        font = pygame.font.Font(None, 36)
+        text = font.render(f"Alien Kills: {spaceship.alien_kills}", True, (255, 255, 255))
+        text_rect = text.get_rect()
+        text_rect.topright = (SCREEN_WIDTH - 10, 10)
+        window.blit(text, text_rect)
 
-    pygame.display.flip()
-    clock.tick(60)
-pygame.quit()
-game_over_screen(window, alien_kills)
+        if spaceship.hits >= MAX_HITS:
+            break
+
+        pygame.display.flip()
+        clock.tick(60)
+    pygame.quit()
+    game_over_screen(window, spaceship.alien_kills)
+
+run_game()
