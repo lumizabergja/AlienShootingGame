@@ -32,8 +32,8 @@ jobs:
           $sdk = Get-ChildItem 'C:\VulkanSDK' -Directory | Sort-Object Name -Descending | Select-Object -First 1
           if (-not $sdk) { throw 'Vulkan SDK was not installed' }
           "VULKAN_SDK=$($sdk.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "INCLUDE=$($sdk.FullName)\Include;$env:INCLUDE" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "LIB=$($sdk.FullName)\Lib;$env:LIB" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CL=/I`"$($sdk.FullName)\Include`"" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "LINK=/LIBPATH:`"$($sdk.FullName)\Lib`"" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Clone Magpie 0.12.1
         shell: pwsh
@@ -50,8 +50,10 @@ jobs:
 
           $cpp = 'MagpieVulkan\src\Magpie.Core\AdaptivePresenter.cpp'
           $text = Get-Content $cpp -Raw
-          $text = $text.Replace('#include <vector>', "#include <vector>`r`n#pragma comment(lib, `"vulkan-1.lib`")")
-          Set-Content -Path $cpp -Value $text -Encoding utf8
+          if ($text -notmatch 'vulkan-1.lib') {
+            $text = $text.Replace('#include <vector>', "#include <vector>`r`n#pragma comment(lib, `"vulkan-1.lib`")")
+            Set-Content -Path $cpp -Value $text -Encoding utf8
+          }
 
       - name: Build x64 release
         shell: pwsh
@@ -64,13 +66,13 @@ jobs:
         shell: pwsh
         run: |
           $note = @(
-            'Magpie Vulkan Presenter - experimental build',
+            'Magpie Vulkan Presenter',
             '',
-            'This is Magpie 0.12.1 with its final presentation stage replaced by a native Vulkan swapchain.',
+            'Magpie 0.12.1 with native Vulkan final presentation.',
             'League of Legends is not injected or modified.',
             '',
             'Pipeline:',
-            'League DX11 -> Magpie capture/effects -> D3D11 final texture -> Vulkan upload/present -> NVIDIA Smooth Motion',
+            'League DX11 -> Magpie capture/effects -> Vulkan final present -> NVIDIA Smooth Motion',
             '',
             'Run Magpie.exe normally, scale League, then enable Smooth Motion for Magpie.exe in NVIDIA App.'
           )
