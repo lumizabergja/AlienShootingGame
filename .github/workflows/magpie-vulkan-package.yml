@@ -37,23 +37,21 @@ jobs:
             Copy-Item (Join-Path $x64 'dxgi.dll') (Join-Path $dir 'dxgi.dll') -Force
           }
 
-          @'
-# Magpie Vulkan Portable
-
-This package is Magpie v0.12.1 x64 with DXVK 3.1 placed beside its Windows executables so Magpie's D3D11/DXGI rendering can be translated to Vulkan.
-
-## Use
-1. Run Magpie.exe normally.
-2. Select League of Legends in Magpie and start scaling exactly as you normally would.
-3. In NVIDIA App, add Magpie.exe and enable Smooth Motion for Magpie.
-4. Do not copy any DLLs into the League of Legends folder.
-
-## Important
-DXVK upstream primarily targets Wine/Linux; this Windows-native package is experimental. If Magpie fails to start or scale, remove the bundled d3d11.dll and dxgi.dll files to restore stock Magpie behavior.
-
-Magpie: GPL-3.0 — https://github.com/Blinue/Magpie
-DXVK: zlib — https://github.com/doitsujin/dxvk
-'@ | Set-Content -Path (Join-Path $pkg 'README-VULKAN.txt') -Encoding UTF8
+          $readme = @(
+            'Magpie Vulkan Portable',
+            '',
+            'Magpie v0.12.1 x64 with DXVK 3.1 placed beside its Windows executables.',
+            'League of Legends is not modified.',
+            '',
+            'Use:',
+            '1. Run Magpie.exe.',
+            '2. Select League of Legends and start scaling.',
+            '3. In NVIDIA App add Magpie.exe and enable Smooth Motion for Magpie.',
+            '4. Do not copy these DLLs into the League folder.',
+            '',
+            'If Magpie fails to start, remove d3d11.dll and dxgi.dll to restore stock behavior.'
+          )
+          $readme | Set-Content -Path (Join-Path $pkg 'README-VULKAN.txt') -Encoding UTF8
 
           Compress-Archive -Path (Join-Path $pkg '*') -DestinationPath (Join-Path $work 'Magpie-Vulkan-Portable.zip') -Force
           Copy-Item (Join-Path $work 'Magpie-Vulkan-Portable.zip') (Join-Path $env:GITHUB_WORKSPACE 'Magpie-Vulkan-Portable.zip') -Force
