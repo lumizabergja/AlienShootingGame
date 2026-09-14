@@ -1,0 +1,41 @@
+name: Build DXGI Vulkan WSI Presenter
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [wsi-capture-presenter]
+    paths:
+      - "wsi-presenter/**"
+      - ".github/workflows/build-wsi-capture-presenter.yml"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Download pinned Vulkan presenter core
+        shell: pwsh
+        run: |
+          Invoke-WebRequest "https://raw.githubusercontent.com/Leaps-Bounds/neural-lens/17aa7492c95e7b54222cde36f8c803811d361ec8/lens_presenter.py" -OutFile "wsi-presenter/lens_presenter.py"
+          Invoke-WebRequest "https://raw.githubusercontent.com/Leaps-Bounds/neural-lens/17aa7492c95e7b54222cde36f8c803811d361ec8/LICENSE" -OutFile "wsi-presenter/UPSTREAM-LICENSE"
+      - name: Patch capture backend to DXGI Desktop Duplication
+        run: python wsi-presenter/patch_upstream.py wsi-presenter/lens_presenter.py
+      - name: Install build dependencies
+        run: python -m pip install pyinstaller numpy dxcam glfw vulkan
+      - name: Build executables
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean --onefile --name VulkanPresenterCore --collect-all dxcam --collect-all glfw --collect-all vulkan wsi-presenter/lens_presenter.py
+          pyinstaller --noconfirm --clean --onefile --windowed --name WSICapturePresenter wsi-presenter/launcher.py
+          New-Item -ItemType Directory -Force package
+          Copy-Item dist/VulkanPresenterCore.exe package/
+          Copy-Item dist/WSICapturePresenter.exe package/
+          Copy-Item wsi-presenter/README.md package/
+          Copy-Item wsi-presenter/UPSTREAM-LICENSE package/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WSI-Capture-Presenter-Windows
+          path: package/
