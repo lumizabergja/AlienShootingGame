@@ -4,61 +4,83 @@ on:
   push:
     branches:
       - magpie-vulkan-package
+    paths:
+      - '.github/workflows/magpie-vulkan-package.yml'
+      - 'magpie-vulkan/**'
   workflow_dispatch:
 
 jobs:
-  package:
+  build:
     runs-on: windows-latest
     steps:
-      - name: Prepare package
+      - name: Checkout patch files
+        uses: actions/checkout@v5
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install build dependencies
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $work = Join-Path $env:RUNNER_TEMP 'magpie-vulkan'
-          New-Item -ItemType Directory -Force -Path $work | Out-Null
-          Set-Location $work
+          python -m pip install --upgrade pip
+          pip install conan
+          choco install vulkan-sdk -y --no-progress
 
-          Invoke-WebRequest -Uri 'https://github.com/Blinue/Magpie/releases/download/v0.12.1/Magpie-v0.12.1-x64.zip' -OutFile 'magpie.zip'
-          Expand-Archive -Path 'magpie.zip' -DestinationPath 'Magpie Vulkan' -Force
+          $sdk = Get-ChildItem 'C:\VulkanSDK' -Directory | Sort-Object Name -Descending | Select-Object -First 1
+          if (-not $sdk) { throw 'Vulkan SDK was not installed' }
+          "VULKAN_SDK=$($sdk.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "INCLUDE=$($sdk.FullName)\Include;$env:INCLUDE" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "LIB=$($sdk.FullName)\Lib;$env:LIB" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-          Invoke-WebRequest -Uri 'https://github.com/doitsujin/dxvk/releases/download/v3.1/dxvk-3.1.tar.gz' -OutFile 'dxvk.tar.gz'
-          tar -xzf 'dxvk.tar.gz'
-          $dxvk = Get-ChildItem -Directory | Where-Object { $_.Name -like 'dxvk-*' } | Select-Object -First 1
-          if (-not $dxvk) { throw 'DXVK directory not found' }
-          $x64 = Join-Path $dxvk.FullName 'x64'
-          if (-not (Test-Path (Join-Path $x64 'd3d11.dll'))) { throw 'DXVK d3d11.dll not found' }
-          if (-not (Test-Path (Join-Path $x64 'dxgi.dll'))) { throw 'DXVK dxgi.dll not found' }
+      - name: Clone Magpie 0.12.1
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git clone --depth 1 --branch v0.12.1 https://github.com/Blinue/Magpie.git MagpieVulkan
 
-          $pkg = Join-Path $work 'Magpie Vulkan'
-          $executables = Get-ChildItem -Path $pkg -Filter '*.exe' -Recurse
-          foreach ($exe in $executables) {
-            $dir = $exe.Directory.FullName
-            Copy-Item (Join-Path $x64 'd3d11.dll') (Join-Path $dir 'd3d11.dll') -Force
-            Copy-Item (Join-Path $x64 'dxgi.dll') (Join-Path $dir 'dxgi.dll') -Force
-          }
+      - name: Apply Vulkan presenter
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Copy-Item 'magpie-vulkan\AdaptivePresenter.h' 'MagpieVulkan\src\Magpie.Core\AdaptivePresenter.h' -Force
+          Copy-Item 'magpie-vulkan\AdaptivePresenter.cpp' 'MagpieVulkan\src\Magpie.Core\AdaptivePresenter.cpp' -Force
 
-          $readme = @(
-            'Magpie Vulkan Portable',
+          $cpp = 'MagpieVulkan\src\Magpie.Core\AdaptivePresenter.cpp'
+          $text = Get-Content $cpp -Raw
+          $text = $text.Replace('#include <vector>', "#include <vector>`r`n#pragma comment(lib, `"vulkan-1.lib`")")
+          Set-Content -Path $cpp -Value $text -Encoding utf8
+
+      - name: Build x64 release
+        shell: pwsh
+        working-directory: MagpieVulkan
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python scripts/publish.py --compiler=MSVC --platform=x64
+
+      - name: Add Vulkan build note
+        shell: pwsh
+        run: |
+          $note = @(
+            'Magpie Vulkan Presenter - experimental build',
             '',
-            'Magpie v0.12.1 x64 with DXVK 3.1 placed beside its Windows executables.',
-            'League of Legends is not modified.',
+            'This is Magpie 0.12.1 with its final presentation stage replaced by a native Vulkan swapchain.',
+            'League of Legends is not injected or modified.',
             '',
-            'Use:',
-            '1. Run Magpie.exe.',
-            '2. Select League of Legends and start scaling.',
-            '3. In NVIDIA App add Magpie.exe and enable Smooth Motion for Magpie.',
-            '4. Do not copy these DLLs into the League folder.',
+            'Pipeline:',
+            'League DX11 -> Magpie capture/effects -> D3D11 final texture -> Vulkan upload/present -> NVIDIA Smooth Motion',
             '',
-            'If Magpie fails to start, remove d3d11.dll and dxgi.dll to restore stock behavior.'
+            'Run Magpie.exe normally, scale League, then enable Smooth Motion for Magpie.exe in NVIDIA App.',
+            '',
+            'This first build uses a CPU readback/upload bridge so we can validate Vulkan presentation and Smooth Motion hooking before moving to zero-copy D3D11/Vulkan interop.'
           )
-          $readme | Set-Content -Path (Join-Path $pkg 'README-VULKAN.txt') -Encoding UTF8
-
-          Compress-Archive -Path (Join-Path $pkg '*') -DestinationPath (Join-Path $work 'Magpie-Vulkan-Portable.zip') -Force
-          Copy-Item (Join-Path $work 'Magpie-Vulkan-Portable.zip') (Join-Path $env:GITHUB_WORKSPACE 'Magpie-Vulkan-Portable.zip') -Force
+          $note | Set-Content -Path 'MagpieVulkan\publish\x64\README-VULKAN.txt' -Encoding utf8
 
       - name: Upload portable app
         uses: actions/upload-artifact@v4
         with:
           name: Magpie-Vulkan-Portable
-          path: Magpie-Vulkan-Portable.zip
+          path: MagpieVulkan/publish/x64
           if-no-files-found: error
