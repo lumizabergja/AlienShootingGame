@@ -11,7 +11,7 @@ on:
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: windows-2022
     steps:
       - name: Checkout patch files
         uses: actions/checkout@v5
@@ -72,9 +72,7 @@ jobs:
             'Pipeline:',
             'League DX11 -> Magpie capture/effects -> D3D11 final texture -> Vulkan upload/present -> NVIDIA Smooth Motion',
             '',
-            'Run Magpie.exe normally, scale League, then enable Smooth Motion for Magpie.exe in NVIDIA App.',
-            '',
-            'This first build uses a CPU readback/upload bridge so we can validate Vulkan presentation and Smooth Motion hooking before moving to zero-copy D3D11/Vulkan interop.'
+            'Run Magpie.exe normally, scale League, then enable Smooth Motion for Magpie.exe in NVIDIA App.'
           )
           $note | Set-Content -Path 'MagpieVulkan\publish\x64\README-VULKAN.txt' -Encoding utf8
 
