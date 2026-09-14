@@ -1,5 +1,8 @@
 #pragma once
 #include "PresenterBase.h"
+#ifndef VK_USE_PLATFORM_WIN32_KHR
+#define VK_USE_PLATFORM_WIN32_KHR
+#endif
 #include <vulkan/vulkan.h>
 
 namespace Magpie {
