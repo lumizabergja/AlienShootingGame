@@ -1,6 +1,6 @@
-# Vulkan Capture Prototype — Windows source package
+# Vulkan Capture Prototype — Windows
 
-Status: experimental source; NOT compiled or runtime-tested on Windows. There is no prebuilt EXE in this package.
+Status: experimental; not runtime-tested on an NVIDIA Windows PC. A successful GitHub Actions build provides a Windows x64 EXE. If you downloaded the Actions artifact, extract it and run VulkanCapturePrototype.exe; no local compiler or Vulkan SDK is needed. Source downloads require the build steps below.
 
 ## What it does
 
