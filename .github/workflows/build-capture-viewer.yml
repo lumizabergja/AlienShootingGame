@@ -1,0 +1,29 @@
+name: Build CaptureViewer
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ capture-viewer-app ]
+    paths:
+      - 'CaptureViewer/**'
+      - '.github/workflows/build-capture-viewer.yml'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S CaptureViewer -B CaptureViewer/build -A x64
+      - name: Build
+        run: cmake --build CaptureViewer/build --config Release
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path CaptureViewer/package | Out-Null
+          Copy-Item CaptureViewer/build/Release/CaptureViewer.exe CaptureViewer/package/
+          Set-Content CaptureViewer/package/README.txt "CaptureViewer captures the primary monitor with DXGI Desktop Duplication and displays it fullscreen. Press ESC to exit. For the DXVK experiment, copy x64 d3d11.dll and dxgi.dll from DXVK beside CaptureViewer.exe. If DXVK does not implement Desktop Duplication on your setup, the app will show an explicit DuplicateOutput error. Do not put these DLLs in the League of Legends folder."
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CaptureViewer-Windows-x64
+          path: CaptureViewer/package/*
