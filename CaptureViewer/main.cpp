@@ -3,62 +3,21 @@
 #include <dxgi1_2.h>
 #include <wrl/client.h>
 #include <string>
+#include <vector>
+#include <algorithm>
 using Microsoft::WRL::ComPtr;
 
-static HWND g_hwnd{};
-static bool g_fullscreen = true;
+static HWND g_main{}, g_combo{}, g_refresh{}, g_start{}, g_stop{}, g_full{}, g_status{}, g_preview{};
+static bool g_running=false, g_fs=false;
+static RECT g_old{}; static DWORD g_oldStyle{};
+static std::vector<HWND> g_windows;
+static ComPtr<ID3D11Device> g_dev; static ComPtr<ID3D11DeviceContext> g_ctx; static ComPtr<IDXGISwapChain> g_sc;
 
-LRESULT CALLBACK WndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
-    if (m == WM_KEYDOWN && w == VK_ESCAPE) { PostQuitMessage(0); return 0; }
-    if (m == WM_DESTROY) { PostQuitMessage(0); return 0; }
-    return DefWindowProc(h,m,w,l);
-}
-
-static void Fail(const wchar_t* s, HRESULT hr = S_OK) {
-    wchar_t b[512];
-    swprintf_s(b, L"%s\nHRESULT: 0x%08X", s, (unsigned)hr);
-    MessageBoxW(nullptr,b,L"CaptureViewer",MB_ICONERROR);
-}
-
-int WINAPI wWinMain(HINSTANCE hi,HINSTANCE,LPWSTR,int) {
-    WNDCLASSEXW wc{sizeof(wc)}; wc.lpfnWndProc=WndProc; wc.hInstance=hi; wc.lpszClassName=L"CaptureViewerWnd"; wc.hCursor=LoadCursor(nullptr,IDC_ARROW);
-    RegisterClassExW(&wc);
-    int sw=GetSystemMetrics(SM_CXSCREEN), sh=GetSystemMetrics(SM_CYSCREEN);
-    g_hwnd=CreateWindowExW(WS_EX_TOPMOST,wc.lpszClassName,L"CaptureViewer - ESC to exit",WS_POPUP,0,0,sw,sh,nullptr,nullptr,hi,nullptr);
-    if(!g_hwnd) return 1;
-
-    DXGI_SWAP_CHAIN_DESC sd{}; sd.BufferCount=2; sd.BufferDesc.Width=sw; sd.BufferDesc.Height=sh; sd.BufferDesc.Format=DXGI_FORMAT_B8G8R8A8_UNORM; sd.BufferUsage=DXGI_USAGE_RENDER_TARGET_OUTPUT; sd.OutputWindow=g_hwnd; sd.SampleDesc.Count=1; sd.Windowed=TRUE; sd.SwapEffect=DXGI_SWAP_EFFECT_DISCARD;
-    ComPtr<ID3D11Device> dev; ComPtr<ID3D11DeviceContext> ctx; ComPtr<IDXGISwapChain> sc;
-    D3D_FEATURE_LEVEL fl;
-    HRESULT hr=D3D11CreateDeviceAndSwapChain(nullptr,D3D_DRIVER_TYPE_HARDWARE,nullptr,D3D11_CREATE_DEVICE_BGRA_SUPPORT,nullptr,0,D3D11_SDK_VERSION,&sd,&sc,&dev,&fl,&ctx);
-    if(FAILED(hr)){Fail(L"D3D11CreateDeviceAndSwapChain failed",hr);return 2;}
-
-    ComPtr<IDXGIDevice> dxdev; dev.As(&dxdev);
-    ComPtr<IDXGIAdapter> ad; dxdev->GetAdapter(&ad);
-    ComPtr<IDXGIOutput> out; hr=ad->EnumOutputs(0,&out); if(FAILED(hr)){Fail(L"EnumOutputs failed",hr);return 3;}
-    ComPtr<IDXGIOutput1> out1; out.As(&out1);
-    ComPtr<IDXGIOutputDuplication> dup; hr=out1->DuplicateOutput(dev.Get(),&dup); if(FAILED(hr)){Fail(L"DXGI Desktop Duplication failed. If DXVK is installed beside this EXE, its DXGI implementation may not support DuplicateOutput.",hr);return 4;}
-
-    ShowWindow(g_hwnd,SW_SHOW); SetForegroundWindow(g_hwnd);
-    MSG msg{}; bool running=true;
-    while(running){
-        while(PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)){ if(msg.message==WM_QUIT){running=false;break;} TranslateMessage(&msg);DispatchMessageW(&msg); }
-        if(!running) break;
-        DXGI_OUTDUPL_FRAME_INFO fi{}; ComPtr<IDXGIResource> res;
-        hr=dup->AcquireNextFrame(0,&fi,&res);
-        if(hr==DXGI_ERROR_WAIT_TIMEOUT){Sleep(0);continue;}
-        if(hr==DXGI_ERROR_ACCESS_LOST){Fail(L"Capture access was lost. Restart CaptureViewer.",hr);break;}
-        if(FAILED(hr)){Fail(L"AcquireNextFrame failed",hr);break;}
-        ComPtr<ID3D11Texture2D> src; res.As(&src);
-        ComPtr<ID3D11Texture2D> back; sc->GetBuffer(0,IID_PPV_ARGS(&back));
-        D3D11_TEXTURE2D_DESC a{},b{}; src->GetDesc(&a); back->GetDesc(&b);
-        if(a.Width==b.Width && a.Height==b.Height && a.Format==b.Format) ctx->CopyResource(back.Get(),src.Get());
-        else {
-            UINT w2=(a.Width<b.Width?a.Width:b.Width), h2=(a.Height<b.Height?a.Height:b.Height);
-            D3D11_BOX box{0,0,0,w2,h2,1}; ctx->CopySubresourceRegion(back.Get(),0,0,0,0,src.Get(),0,&box);
-        }
-        dup->ReleaseFrame();
-        sc->Present(0,DXGI_PRESENT_ALLOW_TEARING);
-    }
-    return 0;
-}
+static void Status(const wchar_t* s){ SetWindowTextW(g_status,s); }
+static BOOL CALLBACK EnumCb(HWND h, LPARAM){ if(!IsWindowVisible(h)||h==g_main||h==g_preview) return TRUE; wchar_t t[512]{}; GetWindowTextW(h,t,512); if(!t[0]) return TRUE; g_windows.push_back(h); SendMessageW(g_combo,CB_ADDSTRING,0,(LPARAM)t); return TRUE; }
+static void Refresh(){ SendMessageW(g_combo,CB_RESETCONTENT,0,0); g_windows.clear(); EnumWindows(EnumCb,0); if(!g_windows.empty()) SendMessageW(g_combo,CB_SETCURSEL,0,0); Status(L"Select a window, then press Start Capture."); }
+static bool InitD3D(HWND h){ RECT r{};GetClientRect(h,&r); DXGI_SWAP_CHAIN_DESC sd{};sd.BufferCount=2;sd.BufferDesc.Width=max<LONG>(1,r.right);sd.BufferDesc.Height=max<LONG>(1,r.bottom);sd.BufferDesc.Format=DXGI_FORMAT_B8G8R8A8_UNORM;sd.BufferUsage=DXGI_USAGE_RENDER_TARGET_OUTPUT;sd.OutputWindow=h;sd.SampleDesc.Count=1;sd.Windowed=TRUE;sd.SwapEffect=DXGI_SWAP_EFFECT_DISCARD;D3D_FEATURE_LEVEL fl;return SUCCEEDED(D3D11CreateDeviceAndSwapChain(nullptr,D3D_DRIVER_TYPE_HARDWARE,nullptr,D3D11_CREATE_DEVICE_BGRA_SUPPORT,nullptr,0,D3D11_SDK_VERSION,&sd,&g_sc,&g_dev,&fl,&g_ctx));}
+static void ToggleFS(){ if(!g_preview)return; if(!g_fs){g_oldStyle=GetWindowLongW(g_preview,GWL_STYLE);GetWindowRect(g_preview,&g_old);MONITORINFO mi{sizeof(mi)};GetMonitorInfoW(MonitorFromWindow(g_preview,MONITOR_DEFAULTTONEAREST),&mi);SetWindowLongW(g_preview,GWL_STYLE,g_oldStyle&~WS_OVERLAPPEDWINDOW);SetWindowPos(g_preview,HWND_TOP,mi.rcMonitor.left,mi.rcMonitor.top,mi.rcMonitor.right-mi.rcMonitor.left,mi.rcMonitor.bottom-mi.rcMonitor.top,SWP_FRAMECHANGED|SWP_SHOWWINDOW);g_fs=true;}else{SetWindowLongW(g_preview,GWL_STYLE,g_oldStyle);SetWindowPos(g_preview,nullptr,g_old.left,g_old.top,g_old.right-g_old.left,g_old.bottom-g_old.top,SWP_FRAMECHANGED|SWP_SHOWWINDOW);g_fs=false;} }
+static LRESULT CALLBACK PreviewProc(HWND h,UINT m,WPARAM w,LPARAM l){if(m==WM_KEYDOWN&&w==VK_F11){ToggleFS();return 0;}if(m==WM_KEYDOWN&&w==VK_ESCAPE&&g_fs){ToggleFS();return 0;}if(m==WM_CLOSE){ShowWindow(h,SW_HIDE);g_running=false;Status(L"Capture stopped.");return 0;}return DefWindowProcW(h,m,w,l);}
+static LRESULT CALLBACK MainProc(HWND h,UINT m,WPARAM w,LPARAM l){if(m==WM_COMMAND){int id=LOWORD(w);if(id==101)Refresh();else if(id==102){int i=(int)SendMessageW(g_combo,CB_GETCURSEL,0,0);if(i<0||i>=(int)g_windows.size()){Status(L"Choose a window first.");return 0;}g_running=true;ShowWindow(g_preview,SW_SHOW);SetForegroundWindow(g_preview);Status(L"Capturing selected window. F11 fullscreen, ESC exits fullscreen.");}else if(id==103){g_running=false;ShowWindow(g_preview,SW_HIDE);Status(L"Capture stopped.");}else if(id==104){ShowWindow(g_preview,SW_SHOW);ToggleFS();}return 0;}if(m==WM_DESTROY){PostQuitMessage(0);return 0;}return DefWindowProcW(h,m,w,l);}
+int WINAPI wWinMain(HINSTANCE hi,HINSTANCE,LPWSTR,int){WNDCLASSEXW a{sizeof(a)};a.hInstance=hi;a.lpfnWndProc=MainProc;a.lpszClassName=L"CVMain";a.hCursor=LoadCursor(nullptr,IDC_ARROW);RegisterClassExW(&a);WNDCLASSEXW b{sizeof(b)};b.hInstance=hi;b.lpfnWndProc=PreviewProc;b.lpszClassName=L"CVPreview";b.hCursor=LoadCursor(nullptr,IDC_ARROW);RegisterClassExW(&b);g_main=CreateWindowExW(0,L"CVMain",L"CaptureViewer - Vulkan/Smooth Motion Test",WS_OVERLAPPED|WS_CAPTION|WS_SYSMENU|WS_MINIMIZEBOX,CW_USEDEFAULT,CW_USEDEFAULT,620,230,nullptr,nullptr,hi,nullptr);g_combo=CreateWindowW(L"COMBOBOX",L"",WS_CHILD|WS_VISIBLE|CBS_DROPDOWNLIST|WS_VSCROLL,20,25,565,300,g_main,(HMENU)100,hi,nullptr);g_refresh=CreateWindowW(L"BUTTON",L"Refresh Windows",WS_CHILD|WS_VISIBLE,20,70,130,34,g_main,(HMENU)101,hi,nullptr);g_start=CreateWindowW(L"BUTTON",L"Start Capture",WS_CHILD|WS_VISIBLE,160,70,130,34,g_main,(HMENU)102,hi,nullptr);g_stop=CreateWindowW(L"BUTTON",L"Stop Capture",WS_CHILD|WS_VISIBLE,300,70,130,34,g_main,(HMENU)103,hi,nullptr);g_full=CreateWindowW(L"BUTTON",L"Fullscreen (F11)",WS_CHILD|WS_VISIBLE,440,70,145,34,g_main,(HMENU)104,hi,nullptr);g_status=CreateWindowW(L"STATIC",L"",WS_CHILD|WS_VISIBLE,20,125,565,50,g_main,nullptr,hi,nullptr);g_preview=CreateWindowExW(0,L"CVPreview",L"CaptureViewer Output - F11 Fullscreen",WS_OVERLAPPEDWINDOW,CW_USEDEFAULT,CW_USEDEFAULT,1280,720,nullptr,nullptr,hi,nullptr);InitD3D(g_preview);ShowWindow(g_main,SW_SHOW);Refresh();MSG msg{};while(GetMessageW(&msg,nullptr,0,0)>0){TranslateMessage(&msg);DispatchMessageW(&msg);}return 0;}
