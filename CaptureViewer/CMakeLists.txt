@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.20)
+project(CaptureViewer LANGUAGES CXX)
+add_executable(CaptureViewer WIN32 main.cpp)
+target_compile_features(CaptureViewer PRIVATE cxx_std_17)
+target_compile_definitions(CaptureViewer PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(CaptureViewer PRIVATE d3d11 dxgi user32)
