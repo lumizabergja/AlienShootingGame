@@ -3,7 +3,7 @@ name: Build Original Presenter NVOFA Q0 Max1
 on:
   push:
     branches:
-      - dlss-fg-2x2-base-safe-4x4
+      - dlss-fg-2x2-base-safe-4x4-latewait
   workflow_dispatch:
 
 jobs:
@@ -207,6 +207,11 @@ jobs:
           if (-not $m.Contains('SetMaximumFrameLatency(1)')) { throw 'MaxFrameLatency 1 missing' }
           if (-not $m.Contains('AcquireNextFrame(2,&info,&resource)')) { throw '2ms capture timeout missing' }
 
+      - name: Apply post-capture Reflex and late OFA wait experiment
+        shell: pwsh
+        run: |
+          python "$env:GITHUB_WORKSPACE/nvof_overlay/late_wait_patch.py" "$env:GITHUB_WORKSPACE/dense-src/source"
+
       - name: Get Streamline headers
         shell: pwsh
         run: |
@@ -231,6 +236,6 @@ jobs:
       - name: Upload executable
         uses: actions/upload-artifact@v4
         with:
-          name: DX12-DLSS-FG-OriginalPresenter-NVOFA-Q0-Max1-B2-Boost-Safe-4x4
+          name: DX12-DLSS-FG-OriginalPresenter-NVOFA-Q0-Max1-B2-Boost-Safe-4x4-LateWait
           path: DX12-DLSS-FG-OriginalPresenter.exe
           if-no-files-found: error
