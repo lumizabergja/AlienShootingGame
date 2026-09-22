@@ -28,6 +28,51 @@ jobs:
             $bridge += Get-Content ("$env:GITHUB_WORKSPACE/nvof_overlay/dlss_bridge.cpp.{0:D2}" -f $_) -Raw
           }
           Set-Content -Path "$src/dlss_bridge.cpp" -Value $bridge -NoNewline
+          Copy-Item "$env:GITHUB_WORKSPACE/nvof_overlay/motion_shader.h" "$src/motion_shader.h" -Force
+
+          # Use the exact original HLSL for resample/software fallback. It is compiled
+          # once at startup; the per-frame presenter path remains the original one.
+          $bp = "$src/dlss_bridge.cpp"
+          $blines = Get-Content $bp
+          $bout = New-Object System.Collections.Generic.List[string]
+          $skip = $false
+          $done = $false
+          foreach ($line in $blines) {
+            if ($line -eq '#include "compute_bytecode.h"') {
+              $bout.Add('#include "motion_shader.h"')
+              $bout.Add('#include <cstring>')
+              continue
+            }
+            if (-not $done -and $line.StartsWith('    auto pipeline=[&](const unsigned char* bytes')) {
+              $skip = $true
+              $bout.Add('    auto pipeline=[&](const char* entry,ComPtr<ID3D12PipelineState>& pso) {')
+              $bout.Add('        ComPtr<ID3DBlob> code,compileErrors;')
+              $bout.Add('        UINT flags=D3DCOMPILE_ENABLE_STRICTNESS|D3DCOMPILE_OPTIMIZATION_LEVEL3;')
+              $bout.Add('        HRESULT hr=D3DCompile(kMotionShader,strlen(kMotionShader),"motion_shader.h",nullptr,nullptr,')
+              $bout.Add('                              entry,"cs_5_0",flags,0,&code,&compileErrors);')
+              $bout.Add('        if(FAILED(hr)) {')
+              $bout.Add('            std::string detail=compileErrors ? std::string((const char*)compileErrors->GetBufferPointer(),compileErrors->GetBufferSize()) : std::string();')
+              $bout.Add('            throw std::runtime_error(std::string("Compile ")+entry+" failed: "+detail);')
+              $bout.Add('        }')
+              $bout.Add('        D3D12_COMPUTE_PIPELINE_STATE_DESC pd{};pd.pRootSignature=root.Get();pd.CS={code->GetBufferPointer(),code->GetBufferSize()};')
+              $bout.Add('        HR(dev->CreateComputePipelineState(&pd,IID_PPV_ARGS(&pso)),"Compute pipeline");')
+              $bout.Add('    };')
+              $bout.Add('    pipeline("Resample",resamplePSO);')
+              $bout.Add('    pipeline("Motion",motionPSO);')
+              continue
+            }
+            if ($skip) {
+              if ($line -eq '    pipeline(motionCode,sizeof(motionCode),motionPSO);') {
+                $skip = $false
+                $done = $true
+              }
+              continue
+            }
+            $bout.Add($line)
+          }
+          if (-not $done) { throw 'Could not replace bytecode pipeline block' }
+          Set-Content -Path $bp -Value $bout
+
           Copy-Item "$env:GITHUB_WORKSPACE/nvof_overlay/dlss_bridge.h" "$src/dlss_bridge.h" -Force
           Copy-Item "$env:GITHUB_WORKSPACE/nvof_overlay/nvof_bridge.h" "$src/nvof_bridge.h" -Force
           Copy-Item "$env:GITHUB_WORKSPACE/nvof_overlay/nvof_bridge.cpp" "$src/nvof_bridge.cpp" -Force
