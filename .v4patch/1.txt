@@ -1,0 +1,199 @@
+    void Suspend(bool);
+     void Marker(sl::PCLMarker m);
+     std::wstring Status();
+-    void ResetHistory() { history=false; }
++    void ResetHistory();
+     void Release();
+     void Shutdown();
+     void EndRuntime() {if(initialized&&shutdown)shutdown();initialized=false;}
+@@ -51,8 +53,9 @@
+     uint32_t index{};
+     ComPtr<ID3D12DescriptorHeap> heap;
+     ComPtr<ID3D12RootSignature> root;
+-    ComPtr<ID3D12PipelineState> resamplePSO,motionPSO;
++    ComPtr<ID3D12PipelineState> resamplePSO,motionPSO,nvofResolvePSO;
+     ComPtr<ID3D12Device> device;
++    NvofBridge nvof;
+     UINT stride{};
+     sl::DLSSGOptions activeOptions{};
+     bool suspended{};
+diff -ruN v3base/main.cpp v4work/source/main.cpp
+--- v3base/main.cpp	2026-09-22 08:38:10.000000000 +0000
++++ v4work/source/main.cpp	2026-09-22 08:58:38.070126890 +0000
+@@ -632,10 +632,15 @@
+ 
+ bool App::RenderFrame(CaptureState& c, Dx12State& d, UINT64 copyReady,
+                       float syntheticOffsetPixels) {
+-    // Resource reuse and Reflex pacing happen before capture in Worker(), so the
+-    // captured image is as fresh as possible when command recording begins.
++    // The D3D11 capture signal is waited on GPU-side. Hardware optical flow gets
++    // first access to the fresh captured frame and runs asynchronously on NVOFA; the
++    // CPU can record the render list while that dedicated engine is working.
++    HRESULT hr = d.queue->Wait(d.sharedFence.Get(), copyReady);
++    if (FAILED(hr)) return false;
++    gDLSS.PrepareMotion(d.queue.Get(), d.sharedTexture.Get());
++
+     UINT frame = d.swapchain->GetCurrentBackBufferIndex();
+-    HRESULT hr = d.allocators[frame]->Reset();
++    hr = d.allocators[frame]->Reset();
+     if (FAILED(hr)) return false;
+     hr = d.list->Reset(d.allocators[frame].Get(), d.pipeline.Get());
+     if (FAILED(hr)) return false;
+@@ -676,8 +681,6 @@
+     d.list->ResourceBarrier(1, &barriers[1]);
+     hr = d.list->Close();
+     if (FAILED(hr)) return false;
+-    hr = d.queue->Wait(d.sharedFence.Get(), copyReady);
+-    if (FAILED(hr)) return false;
+     ID3D12CommandList* lists[] = {d.list.Get()};
+     gDLSS.Marker(sl::PCLMarker::eRenderSubmitStart);
+     d.queue->ExecuteCommandLists(1, lists);
+@@ -727,7 +730,7 @@
+     {
+     Dx12State d;
+     try {
+-        gLog.Write(L"Ultra low-latency DLSS FG v3. DXGI capture / DX12. Selected multiplier: " + std::to_wstring(multiplier_) + L"x.");
++        gLog.Write(L"Ultra low-latency DLSS FG v4 NVOFA. DXGI capture / DX12. Selected multiplier: " + std::to_wstring(multiplier_) + L"x.");
+         QueryPerformanceFrequency(&d.qpcFrequency);
+         {
+             std::wstring reason;
+diff -ruN v3base/motion_shader.h v4work/source/motion_shader.h
+--- v3base/motion_shader.h	2026-09-22 08:38:10.000000000 +0000
++++ v4work/source/motion_shader.h	2026-09-22 09:02:23.062347257 +0000
+@@ -8,6 +8,9 @@
+ Texture2D<float4> source   : register(t0);
+ Texture2D<float4> current  : register(t1);
+ Texture2D<float4> previous : register(t2);
++Texture2D<int2> nvofFlow : register(t3);
++Texture2D<uint> nvofCost : register(t4);
++Texture2D<int2> nvofBack : register(t5);
+ RWTexture2D<float4> downsampled : register(u0);
+ RWTexture2D<float2> motion      : register(u1);
+ RWTexture2D<float>  depth       : register(u2);
+@@ -18,6 +21,13 @@
+     uint width;
+     uint height;
+     uint resetHistory;
++    uint flowGrid;
++    uint flowWidth;
++    uint flowHeight;
++    uint hasCost;
++    uint hasBackward;
++    uint sourceWidth;
++    uint sourceHeight;
+ };
+ 
+ [numthreads(8, 8, 1)]
+@@ -127,6 +137,103 @@
+     }
+ }
+ 
++
++float2 LoadNvof(Texture2D<int2> tex, int2 cell)
++{
++    cell = clamp(cell, int2(0, 0), int2((int)flowWidth - 1, (int)flowHeight - 1));
++    return float2(tex.Load(int3(cell, 0))) * (1.0 / 32.0);
++}
++
++float CostConfidence(int2 cell)
++{
++    if (!hasCost) return 1.0;
++    cell = clamp(cell, int2(0, 0), int2((int)flowWidth - 1, (int)flowHeight - 1));
++    float c = (float)nvofCost.Load(int3(cell, 0)) * (1.0 / 255.0);
++    // Cost is inverse confidence. Keep a small floor so uncertain thin details
++    // interpolate from neighbors rather than popping to zero abruptly.
++    return 0.08 + 0.92 * saturate(1.0 - c);
++}
++
++float3 ColorAtCell(int2 cell)
++{
++    float2 src = float2(cell * (int)flowGrid) + float2((float)flowGrid * 0.5, (float)flowGrid * 0.5);
++    float2 outp = src * float2(width, height) / max(float2(1.0, 1.0), float2(sourceWidth, sourceHeight));
++    return current.Load(int3(ClampPixel(int2(outp)), 0)).rgb;
++}
++
++float2 EdgeAwareFlow(float2 pixel)
++{
++    float2 sourcePixel = (pixel + 0.5) * float2(sourceWidth, sourceHeight) / float2(width, height) - 0.5;
++    float2 g = (sourcePixel + 0.5) / max(1.0, (float)flowGrid) - 0.5;
++    int2 b = int2(floor(g));
++    float2 f = frac(g);
++    float3 centerColor = current.Load(int3(ClampPixel(int2(pixel)), 0)).rgb;
++    float2 sum = 0.0;
++    float wsum = 0.0;
++    [unroll] for (int y = 0; y < 2; ++y)
++    {
++        [unroll] for (int x = 0; x < 2; ++x)
++        {
++            int2 c = b + int2(x, y);
++            float spatial = (x ? f.x : 1.0 - f.x) * (y ? f.y : 1.0 - f.y);
++            float3 cc = ColorAtCell(c);
++            float colorDelta = abs(centerColor.r - cc.r) + abs(centerColor.g - cc.g) + abs(centerColor.b - cc.b);
++            float edge = rcp(1.0 + 14.0 * colorDelta);
++            float w = spatial * edge * CostConfidence(c);
++            sum += LoadNvof(nvofFlow, c) * w;
++            wsum += w;
++        }
++    }
++    if (wsum < 1e-5)
++        return LoadNvof(nvofFlow, int2(round(g)));
++    return sum / wsum;
++}
++
++float2 BilinearBackFlow(float2 sourcePixel)
++{
++    float2 g = (sourcePixel + 0.5) / max(1.0, (float)flowGrid) - 0.5;
++    int2 b = int2(floor(g));
++    float2 f = frac(g);
++    float2 a = lerp(LoadNvof(nvofBack, b + int2(0,0)), LoadNvof(nvofBack, b + int2(1,0)), f.x);
++    float2 c = lerp(LoadNvof(nvofBack, b + int2(0,1)), LoadNvof(nvofBack, b + int2(1,1)), f.x);
++    return lerp(a, c, f.y);
++}
++
++[numthreads(8, 8, 1)]
++void ResolveNvof(uint3 p : SV_DispatchThreadID)
++{
++    if (p.x >= width || p.y >= height) return;
++    float2 v = 0.0;
++    if (!resetHistory)
++    {
++        float2 sourceP = (float2(p.xy) + 0.5) * float2(sourceWidth, sourceHeight) / float2(width, height) - 0.5;
++        float2 sourceV = EdgeAwareFlow(float2(p.xy));
++
++        // Forward/backward round-trip disagreement is a strong occlusion / bad-vector
++        // signal. Fade rather than hard-cut to avoid shimmering at moving edges.
++        if (hasBackward)
++        {
++            float2 back = BilinearBackFlow(sourceP + sourceV);
++            float disagreement = length(sourceV + back);
++            float consistency = saturate((3.5 - disagreement) / 3.0);
++            sourceV *= consistency;
++        }
++        v = sourceV * float2(width, height) / float2(sourceWidth, sourceHeight);
++
++        // Stable overlays (crosshair, HUD text) should stay pinned. This is deliberately
++        // conservative: only almost-identical same-pixel content is forced to zero.
++        float3 ca = current.Load(int3(p.xy, 0)).rgb;
++        float3 cb = previous.Load(int3(p.xy, 0)).rgb;
++        float same = abs(ca.r-cb.r) + abs(ca.g-cb.g) + abs(ca.b-cb.b);
++        if (same < 0.010) v = 0.0;
++
++        // Reject impossible spikes that can otherwise create long FG streaks.
++        if (any(v != v) || any(abs(v) > 512.0)) v = 0.0;
++    }
++    motion[p.xy] = v;
++    depth[p.xy] = 0.5;
++}
++
+ // One thread estimates one 4x4 block. Compared with the old 8x8 field this
+ // supplies four times as many independently estimated vectors. Integer search
+ // reaches +/-31 px, followed by half-pixel refinement.
+diff -ruN v3base/nvof_bridge.cpp v4work/source/nvof_bridge.cpp
+--- v3base/nvof_bridge.cpp	1970-01-01 00:00:00.000000000 +0000
++++ v4work/source/nvof_bridge.cpp	2026-09-22 08:59:37.688138346 +0000
+@@ -0,0 +1,242 @@
++#include "nvof_bridge.h"
++#include "nvOpticalFlowCommon.h"
++#include "nvOpticalFlowD3D12.h"
++#include <algorithm>
++#inc
