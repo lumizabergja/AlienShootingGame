@@ -28,8 +28,31 @@ jobs:
           $b64 = (Get-Content "$env:GITHUB_WORKSPACE\v41.patch.b64" -Raw) -replace "[^A-Za-z0-9+/=]", ""
           [IO.File]::WriteAllBytes("$env:GITHUB_WORKSPACE\v41.patch", [Convert]::FromBase64String($b64))
           cd "$env:GITHUB_WORKSPACE\v4-source"
-          git apply --check "$env:GITHUB_WORKSPACE\v41.patch"
-          git apply "$env:GITHUB_WORKSPACE\v41.patch"
+          git apply --check --exclude=source/main.cpp "$env:GITHUB_WORKSPACE\v41.patch"
+          git apply --exclude=source/main.cpp "$env:GITHUB_WORKSPACE\v41.patch"
+
+      - name: Patch v4.1 scheduling directly
+        shell: pwsh
+        run: |
+          $p = "$env:GITHUB_WORKSPACE\v4-source\source\main.cpp"
+          $s = Get-Content $p -Raw
+          $s = $s.Replace('Ultra low-latency DLSS FG v4 NVOFA.', 'Ultra low-latency DLSS FG v4.1 NVOFA.')
+          $s = $s.Replace('Captured/base presents: ', 'Presenter/base throughput: ')
+          $start = $s.IndexOf('            // LOW-LATENCY ORDER:')
+          $end = $s.IndexOf('            DXGI_OUTDUPL_FRAME_INFO', $start)
+          if ($start -lt 0 -or $end -lt 0) { throw 'Could not locate v4 pre-capture scheduling block' }
+          $replacement = @"
+            // v4.1 scheduling: never CPU-wait for the whole prior presenter frame before
+            // AcquireNextFrame. Streamline/resource dependencies are GPU queued instead.
+            // The D3D11 shared-fence wait is also GPU-side, so the CPU remains free to
+            // acquire the newest desktop present while prior FG work drains.
+            gDLSS.BeforeFrame(d.queue.Get());
+            gDLSS.PrepareFrame();
+            if(c.lastRenderDone) HR(c.context4->Wait(c.sharedFence.Get(),c.lastRenderDone),"Capture overwrite protection");
+
+"@
+          $s = $s.Substring(0,$start) + $replacement + $s.Substring($end)
+          Set-Content -Path $p -Value $s -NoNewline
 
       - name: Get Streamline 2.14.1 headers
         shell: pwsh
