@@ -1,9 +1,9 @@
-name: Build Original Presenter NVOFA
+name: Build Original Presenter NVOFA Q0 Max1
 
 on:
   push:
     branches:
-      - dlss-fg-original-nvofa
+      - dlss-fg-original-nvofa-q0-max1
   workflow_dispatch:
 
 jobs:
@@ -133,6 +133,6 @@ jobs:
       - name: Upload executable
         uses: actions/upload-artifact@v4
         with:
-          name: LoLDX12Presenter-FG-Original-NVOFA
+          name: LoLDX12Presenter-FG-Original-NVOFA-Q0-Max1
           path: LoLDX12Presenter-FG.exe
           if-no-files-found: error
