@@ -1,0 +1,287 @@
+diff --git a/source/dlss_bridge.cpp b/source/dlss_bridge.cpp
+index d2fbaf2..2a25e6a 100644
+--- a/source/dlss_bridge.cpp
++++ b/source/dlss_bridge.cpp
+@@ -80,7 +80,7 @@ void DlssExperiment::Init(ID3D12Device* dev,IDXGIAdapter1* adapter,ID3D12Resourc
+         sl::DLSSGOptions go{};go.mode=sl::DLSSGMode::eOff;go.numBackBuffers=3;
+         go.colorWidth=w;go.colorHeight=h;go.colorBufferFormat=DXGI_FORMAT_B8G8R8A8_UNORM;
+         go.mvecDepthWidth=rw;go.mvecDepthHeight=rh;go.mvecBufferFormat=DXGI_FORMAT_R16G16_FLOAT;go.depthBufferFormat=DXGI_FORMAT_R32_FLOAT;
+-        go.hudLessBufferFormat=DXGI_FORMAT_R16G16B16A16_FLOAT;
++        go.hudLessBufferFormat=DXGI_FORMAT_R8G8B8A8_UNORM;
+         sl::DLSSGState state{};Check(fgState(viewport,state,&go),"DLSS-G capabilities");
+         if (multiplier - 1 > state.numFramesToGenerateMax)
+             throw std::runtime_error("Selected " + std::to_string(multiplier) + "x FG exceeds runtime support (maximum " +
+@@ -100,14 +100,16 @@ void DlssExperiment::Init(ID3D12Device* dev,IDXGIAdapter1* adapter,ID3D12Resourc
+             std::to_wstring(state.numFramesToGenerateMax));
+     }
+     auto read=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+-    Texture(current,rw,rh,DXGI_FORMAT_R16G16B16A16_FLOAT,read);
+-    Texture(previous,rw,rh,DXGI_FORMAT_R16G16B16A16_FLOAT,read);
++    Texture(current,rw,rh,DXGI_FORMAT_R8G8B8A8_UNORM,read);
++    Texture(previous,rw,rh,DXGI_FORMAT_R8G8B8A8_UNORM,read);
+     Texture(motion,rw,rh,DXGI_FORMAT_R16G16_FLOAT,read);Texture(depth,rw,rh,DXGI_FORMAT_R32_FLOAT,read);
+-    Texture(result,w,h,DXGI_FORMAT_R16G16B16A16_FLOAT,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
++    // The presenter and DLSS-G can consume the same current-color texture directly.
++    // Avoiding a second full-frame color texture/copy cuts bandwidth and queue work.
++    result=current;
+     D3D12_DESCRIPTOR_HEAP_DESC hd{};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;hd.NumDescriptors=6;hd.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+     HR(dev->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&heap)),"Compute descriptors");stride=dev->GetDescriptorHandleIncrementSize(hd.Type);
+-    SRV(source,DXGI_FORMAT_B8G8R8A8_UNORM,0);SRV(current.Get(),DXGI_FORMAT_R16G16B16A16_FLOAT,1);SRV(previous.Get(),DXGI_FORMAT_R16G16B16A16_FLOAT,2);
+-    UAV(current.Get(),DXGI_FORMAT_R16G16B16A16_FLOAT,3);UAV(motion.Get(),DXGI_FORMAT_R16G16_FLOAT,4);UAV(depth.Get(),DXGI_FORMAT_R32_FLOAT,5);
++    SRV(source,DXGI_FORMAT_B8G8R8A8_UNORM,0);SRV(current.Get(),DXGI_FORMAT_R8G8B8A8_UNORM,1);SRV(previous.Get(),DXGI_FORMAT_R8G8B8A8_UNORM,2);
++    UAV(current.Get(),DXGI_FORMAT_R8G8B8A8_UNORM,3);UAV(motion.Get(),DXGI_FORMAT_R16G16_FLOAT,4);UAV(depth.Get(),DXGI_FORMAT_R32_FLOAT,5);
+     D3D12_DESCRIPTOR_RANGE ranges[2]{};
+     ranges[0]={D3D12_DESCRIPTOR_RANGE_TYPE_SRV,3,0,0,0};ranges[1]={D3D12_DESCRIPTOR_RANGE_TYPE_UAV,3,0,0,3};
+     D3D12_ROOT_PARAMETER parameters[2]{};parameters[0].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+@@ -132,7 +134,7 @@ void DlssExperiment::Init(ID3D12Device* dev,IDXGIAdapter1* adapter,ID3D12Resourc
+     pipeline("Resample",resamplePSO);
+     pipeline("Motion",motionPSO);
+     log(L"Native-resolution FG input/output "+std::to_wstring(ow)+L"x"+std::to_wstring(oh)+L"; DLSS scaling is not loaded.");
+-    log(L"Dense external motion v2: 4x4 blocks, +/-31 px hierarchical search, half-pixel refinement, confidence rejection.");
++    log(L"Ultra external motion v3: 4x4 vectors, 9-tap matching, +/-31 px hierarchy, half-pixel refinement, static/UI early-out.");
+     log(L"FG still uses synthetic flat depth 0.5, zero game jitter and captured HUD because no engine buffers are accessed.");
+ }
+ void DlssExperiment::Marker(sl::PCLMarker m) { if(fg&&token&&marker) Check(marker(m,*token),"Reflex frame marker"); }
+@@ -176,26 +178,17 @@ void DlssExperiment::Record(ID3D12GraphicsCommandList* list,ID3D12Resource* sour
+     Transition(list,motion.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,read);Transition(list,depth.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,read);
+     sl::Extent input{};input.width=rw;input.height=rh;sl::Extent output{};output.width=ow;output.height=oh;
+     sl::Resource dr(sl::ResourceType::eTex2d,depth.Get(),read),mv(sl::ResourceType::eTex2d,motion.Get(),read);
+-    sl::Resource color(sl::ResourceType::eTex2d,current.Get(),read);
+-    Transition(list,result.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+-    sl::Resource out(sl::ResourceType::eTex2d,result.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+-    dr.width=mv.width=color.width=rw;dr.height=mv.height=color.height=rh;
++    dr.width=mv.width=rw;dr.height=mv.height=rh;
+     dr.nativeFormat=DXGI_FORMAT_R32_FLOAT;mv.nativeFormat=DXGI_FORMAT_R16G16_FLOAT;
+-    color.nativeFormat=DXGI_FORMAT_R16G16B16A16_FLOAT;out.width=ow;out.height=oh;out.nativeFormat=DXGI_FORMAT_R16G16B16A16_FLOAT;
+     sl::ResourceTag inputs[]={
+         {&dr,sl::kBufferTypeDepth,sl::eValidUntilPresent,&input},
+         {&mv,sl::kBufferTypeMotionVectors,sl::eValidUntilPresent,&input}
+     };
+     Check(tags(*token,viewport,inputs,2,list),"Tag motion and depth buffers");
+-    Transition(list,current.Get(),read,D3D12_RESOURCE_STATE_COPY_SOURCE);
+-    Transition(list,result.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_DEST);
+-    list->CopyResource(result.Get(),current.Get());
+-    Transition(list,current.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,read);
+-    Transition(list,result.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+-    Transition(list,result.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+     if(fg) {
+-        sl::Resource hud(sl::ResourceType::eTex2d,result.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+-        hud.width=ow;hud.height=oh;hud.nativeFormat=DXGI_FORMAT_R16G16B16A16_FLOAT;
++        // Reuse current directly: no full-frame FP16 copy before Present.
++        sl::Resource hud(sl::ResourceType::eTex2d,current.Get(),read);
++        hud.width=ow;hud.height=oh;hud.nativeFormat=DXGI_FORMAT_R8G8B8A8_UNORM;
+         // Capture includes the HUD. This is an explicit approximation, not HUD separation.
+         sl::ResourceTag tag{&hud,sl::kBufferTypeHUDLessColor,sl::eValidUntilPresent,&output};
+         Check(tags(*token,viewport,&tag,1,list),"Tag approximate HUD-less color");
+diff --git a/source/main.cpp b/source/main.cpp
+index 47174c8..f962d63 100644
+--- a/source/main.cpp
++++ b/source/main.cpp
+@@ -632,24 +632,13 @@ bool App::InitDx12(HWND, CaptureState& c, uint32_t sourceWidth,
+ 
+ bool App::RenderFrame(CaptureState& c, Dx12State& d, UINT64 copyReady,
+                       float syntheticOffsetPixels) {
+-    // FG uses one motion/history resource set: complete its prior submission
+-    // before recording again. Capture remains before render-time pacing.
+-    UINT64 pending=*std::max_element(std::begin(d.frameFenceValues),std::end(d.frameFenceValues));
+-    if(pending && d.frameFence->GetCompletedValue()<pending) {
+-        HR(d.frameFence->SetEventOnCompletion(pending,d.frameEvent),"FG resource completion");
+-        if(WaitForSingleObject(d.frameEvent,3000)!=WAIT_OBJECT_0) throw std::runtime_error("GPU stalled.");
+-    }
++    // Resource reuse and Reflex pacing happen before capture in Worker(), so the
++    // captured image is as fresh as possible when command recording begins.
+     UINT frame = d.swapchain->GetCurrentBackBufferIndex();
+-    if (d.frameFenceValues[frame] && d.frameFence->GetCompletedValue() < d.frameFenceValues[frame]) {
+-        HRESULT hr = d.frameFence->SetEventOnCompletion(d.frameFenceValues[frame], d.frameEvent);
+-        if (FAILED(hr)) return false;
+-        if (WaitForSingleObject(d.frameEvent, 3000) != WAIT_OBJECT_0) return false;
+-    }
+     HRESULT hr = d.allocators[frame]->Reset();
+     if (FAILED(hr)) return false;
+     hr = d.list->Reset(d.allocators[frame].Get(), d.pipeline.Get());
+     if (FAILED(hr)) return false;
+-    gDLSS.BeforeFrame(d.queue.Get());
+     gDLSS.Record(d.list.Get(),d.sharedTexture.Get());
+     d.list->SetPipelineState(d.pipeline.Get());
+     D3D12_RESOURCE_BARRIER barriers[3]{};
+@@ -738,7 +727,7 @@ void App::Worker(HWND target, HWND outputWindow) {
+     {
+     Dx12State d;
+     try {
+-        gLog.Write(L"Simple DLSS FG build. DXGI capture / DX12. Selected multiplier: " + std::to_wstring(multiplier_) + L"x.");
++        gLog.Write(L"Ultra low-latency DLSS FG v3. DXGI capture / DX12. Selected multiplier: " + std::to_wstring(multiplier_) + L"x.");
+         QueryPerformanceFrequency(&d.qpcFrequency);
+         {
+             std::wstring reason;
+@@ -754,7 +743,7 @@ void App::Worker(HWND target, HWND outputWindow) {
+         RECT output{};GetClientRect(outputWindow,&output);
+         gDLSS.Init(d.device.Get(),c.adapter.Get(),d.sharedTexture.Get(),output.right,output.bottom,false,true,multiplier_,false);
+         if(!CreateSwapchain(outputWindow,lowLatency_,d,false)) throw std::runtime_error("Swapchain creation failed.");
+-        D3D12_SHADER_RESOURCE_VIEW_DESC view{};view.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;
++        D3D12_SHADER_RESOURCE_VIEW_DESC view{};view.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
+         view.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;view.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;view.Texture2D.MipLevels=1;
+         d.device->CreateShaderResourceView(gDLSS.result.Get(),&view,d.srvHeap->GetCPUDescriptorHandleForHeapStart());
+         auto lastReport=std::chrono::steady_clock::now();auto lastFrame=lastReport;
+@@ -774,6 +763,25 @@ void App::Worker(HWND target, HWND outputWindow) {
+             if(!visible) {PostMessageW(outputWindow,WM_APP_OUTPUT_VISIBILITY,TRUE,0);visible=true;}
+             if(recreateSwapchain_.exchange(false)) throw std::runtime_error("Output resized: press Start again to rebuild DLSS resources.");
+             if (stop_ || paused_) continue;
++
++            // LOW-LATENCY ORDER: finish all reusable presenter/FG resources and
++            // perform Reflex sleep BEFORE asking Desktop Duplication for the next
++            // frame. Any unavoidable wait therefore happens before capture rather
++            // than ageing an already-captured frame.
++            UINT64 pending=*std::max_element(std::begin(d.frameFenceValues),std::end(d.frameFenceValues));
++            if(pending && d.frameFence->GetCompletedValue()<pending) {
++                HR(d.frameFence->SetEventOnCompletion(pending,d.frameEvent),"Pre-capture FG resource completion");
++                if(WaitForSingleObject(d.frameEvent,3000)!=WAIT_OBJECT_0) throw std::runtime_error("GPU stalled before capture.");
++            }
++            UINT preFrame=d.swapchain->GetCurrentBackBufferIndex();
++            if(d.frameFenceValues[preFrame] && d.frameFence->GetCompletedValue()<d.frameFenceValues[preFrame]) {
++                HR(d.frameFence->SetEventOnCompletion(d.frameFenceValues[preFrame],d.frameEvent),"Pre-capture backbuffer completion");
++                if(WaitForSingleObject(d.frameEvent,3000)!=WAIT_OBJECT_0) throw std::runtime_error("Backbuffer stalled before capture.");
++            }
++            gDLSS.BeforeFrame(d.queue.Get());
++            gDLSS.PrepareFrame();
++            if(c.lastRenderDone) HR(c.context4->Wait(c.sharedFence.Get(),c.lastRenderDone),"Pre-capture copy/render synchronization");
++
+             DXGI_OUTDUPL_FRAME_INFO info{};ComPtr<IDXGIResource> resource;
+             HRESULT hr=c.duplication->AcquireNextFrame(16,&info,&resource);
+             if(hr==DXGI_ERROR_WAIT_TIMEOUT) continue;
+@@ -791,7 +799,6 @@ void App::Worker(HWND target, HWND outputWindow) {
+             if(now-lastFrame>std::chrono::milliseconds(100)) gDLSS.ResetHistory();
+             lastFrame=now;
+             ComPtr<ID3D11Texture2D> desktop;HR(resource.As(&desktop),"Captured texture");
+-            if(c.lastRenderDone)HR(c.context4->Wait(c.sharedFence.Get(),c.lastRenderDone),"Capture/render synchronization");
+             RECT out=c.outputDesc.DesktopCoordinates;
+             D3D11_BOX box{};box.left=c.sourceRect.left-out.left;box.top=c.sourceRect.top-out.top;
+             box.right=box.left+width;box.bottom=box.top+height;box.back=1;
+diff --git a/source/motion_shader.h b/source/motion_shader.h
+index 82e593d..a39915b 100644
+--- a/source/motion_shader.h
++++ b/source/motion_shader.h
+@@ -61,17 +61,21 @@ float PixelErrorSubpixel(int2 currentPixel, float2 displacement)
+     return lumaError * 0.80 + colorError * 0.20;
+ }
+ 
+-// A compact cross-shaped patch keeps the search inexpensive enough for the
+-// low-latency capture path while being substantially more robust than a single pixel.
++// Nine taps are substantially more stable on diagonal edges, particles and
++// character silhouettes than the old five-tap cross. v2 accidentally ran the
++// whole motion pass twice, so this stronger matcher is still cheaper overall.
+ float PatchError(int2 center, int2 displacement)
+ {
+-    float score = 0.0;
+-    score += PixelError(center, displacement);
+-    score += PixelError(center + int2(-2, 0), displacement);
+-    score += PixelError(center + int2( 2, 0), displacement);
+-    score += PixelError(center + int2(0, -2), displacement);
+-    score += PixelError(center + int2(0,  2), displacement);
+-    score *= 0.2;
++    float score = PixelError(center, displacement) * 2.0;
++    [unroll] for (int y = -1; y <= 1; ++y)
++    {
++        [unroll] for (int x = -1; x <= 1; ++x)
++        {
++            if (x == 0 && y == 0) continue;
++            score += PixelError(center + int2(x, y) * 2, displacement);
++        }
++    }
++    score *= 0.10;
+     // Small regularizer prevents flat areas from choosing large arbitrary vectors.
+     score += 0.00008 * dot(float2(displacement), float2(displacement));
+     return score;
+@@ -79,13 +83,16 @@ float PatchError(int2 center, int2 displacement)
+ 
+ float PatchErrorSubpixel(int2 center, float2 displacement)
+ {
+-    float score = 0.0;
+-    score += PixelErrorSubpixel(center, displacement);
+-    score += PixelErrorSubpixel(center + int2(-2, 0), displacement);
+-    score += PixelErrorSubpixel(center + int2( 2, 0), displacement);
+-    score += PixelErrorSubpixel(center + int2(0, -2), displacement);
+-    score += PixelErrorSubpixel(center + int2(0,  2), displacement);
+-    score *= 0.2;
++    float score = PixelErrorSubpixel(center, displacement) * 2.0;
++    [unroll] for (int y = -1; y <= 1; ++y)
++    {
++        [unroll] for (int x = -1; x <= 1; ++x)
++        {
++            if (x == 0 && y == 0) continue;
++            score += PixelErrorSubpixel(center + int2(x, y) * 2, displacement);
++        }
++    }
++    score *= 0.10;
+     score += 0.00008 * dot(displacement, displacement);
+     return score;
+ }
+@@ -136,38 +143,44 @@ void Motion(uint3 threadId : SV_DispatchThreadID)
+     if (!resetHistory)
+     {
+         float zeroCost = PatchError(center, int2(0, 0));
+-        float bestCost = zeroCost;
+-
+-        SearchStep(center, 16, best, bestCost);
+-        SearchStep(center,  8, best, bestCost);
+-        SearchStep(center,  4, best, bestCost);
+-        SearchStep(center,  2, best, bestCost);
+-        SearchStep(center,  1, best, bestCost);
+-
+-        bestSubpixel = float2(best);
+-        float refinedCost = PatchErrorSubpixel(center, bestSubpixel);
+-        float2 base = bestSubpixel;
+-        [unroll] for (int sy = -1; sy <= 1; ++sy)
++
++        // A large part of HUD/static scenery is already a near-perfect match.
++        // Do not burn a full hierarchy on it and, more importantly, do not invent
++        // motion for stable UI such as a crosshair.
++        if (zeroCost > 0.0035)
+         {
+-            [unroll] for (int sx = -1; sx <= 1; ++sx)
++            float bestCost = zeroCost;
++            SearchStep(center, 16, best, bestCost);
++            SearchStep(center,  8, best, bestCost);
++            SearchStep(center,  4, best, bestCost);
++            SearchStep(center,  2, best, bestCost);
++            SearchStep(center,  1, best, bestCost);
++
++            bestSubpixel = float2(best);
++            float refinedCost = PatchErrorSubpixel(center, bestSubpixel);
++            float2 base = bestSubpixel;
++            [unroll] for (int sy = -1; sy <= 1; ++sy)
+             {
+-                float2 trial = base + float2((float)sx, (float)sy) * 0.5;
+-                float candidate = PatchErrorSubpixel(center, trial);
+-                if (candidate < refinedCost)
++                [unroll] for (int sx = -1; sx <= 1; ++sx)
+                 {
+-                    refinedCost = candidate;
+-                    bestSubpixel = trial;
++                    float2 trial = base + float2((float)sx, (float)sy) * 0.5;
++                    float candidate = PatchErrorSubpixel(center, trial);
++                    if (candidate < refinedCost)
++                    {
++                        refinedCost = candidate;
++                        bestSubpixel = trial;
++                    }
+                 }
+             }
+-        }
+ 
+-        float contrast = PatchContrast(center);
+-        float improvement = zeroCost - refinedCost;
++            float contrast = PatchContrast(center);
++            float improvement = zeroCost - refinedCost;
+ 
+-        // Conservative rejection is important for FG: an uncertain zero vector
+-        // usually looks better than a large false vector on flat/UI regions.
+-        if (refinedCost > 0.34 || improvement < 0.006 || (contrast < 0.018 && improvement < 0.020))
+-            bestSubpixel = float2(0.0, 0.0);
++            // Conservative rejection is important for FG: an uncertain zero vector
++            // usually looks better than a large false vector on flat/UI regions.
++            if (refinedCost > 0.30 || improvement < 0.005 || (contrast < 0.018 && improvement < 0.018))
++                bestSubpixel = float2(0.0, 0.0);
++        }
+     }
+ 
+     [unroll] for (uint y = 0; y < 4; ++y)
