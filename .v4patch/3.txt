@@ -1,0 +1,143 @@
+irection = backward_ ? NV_OF_PRED_DIRECTION_BOTH : NV_OF_PRED_DIRECTION_FORWARD;
++    init.enableGlobalFlow = NV_OF_FALSE; init.inputBufferFormat = NV_OF_BUFFER_FORMAT_ABGR8;
++    st = api_->fn.nvOFInit(h, &init);
++    if (st != NV_OF_SUCCESS && backward_) {
++        // Some driver/GPU combinations refuse bidirectional mode. Retry forward-only
++        // with a fresh session rather than giving up hardware flow entirely.
++        api_->fn.nvOFDestroy(h); session_ = nullptr;
++        backward_.Reset(); backwardCost_.Reset();
++        st = api_->fn.nvCreateOpticalFlowD3D12(device, reinterpret_cast<NvOFHandle*>(&session_));
++        if (st == NV_OF_SUCCESS && session_) {
++            h = static_cast<NvOFHandle>(session_);
++            init.predDirection = NV_OF_PRED_DIRECTION_FORWARD;
++            st = api_->fn.nvOFInit(h, &init);
++        }
++    }
++    if (st != NV_OF_SUCCESS) { if (log_) log_(std::wstring(L"NVOFA init failed: ") + NvofStatus(st) + L"; using compute fallback."); Shutdown(); return false; }
++
++    if (!Register(input_[0].Get(), &inputHandle_[0]) || !Register(input_[1].Get(), &inputHandle_[1]) ||
++        !Register(flow_.Get(), &flowHandle_) || (cost_ && !Register(cost_.Get(), &costHandle_)) ||
++        (backward_ && !Register(backward_.Get(), &backwardHandle_)) || (backward_ && backwardCost_ && !Register(backwardCost_.Get(), &backwardCostHandle_))) {
++        if (log_) log_(L"NVOFA resource registration failed; using compute fallback."); Shutdown(); return false;
++    }
++
++    ready_ = true; current_ = 0; hasPrevious_ = false; flowValid_ = false; disableTemporalOnce_ = true;
++    if (log_) log_(L"NVOFA hardware motion enabled: " + std::to_wstring(grid_) + L"x" + std::to_wstring(grid_) +
++        L" grid, FAST preset, cost=" + (cost_ ? std::wstring(L"on") : std::wstring(L"off")) +
++        L", backward consistency=" + (backward_ ? std::wstring(L"on") : std::wstring(L"off")) + L".");
++    return true;
++}
++
++bool NvofBridge::SubmitFrame(ID3D12CommandQueue* queue, ID3D12Resource* source) {
++    if (!ready_ || !queue || !source) return false;
++    if (FAILED(allocator_->Reset()) || FAILED(list_->Reset(allocator_.Get(), nullptr))) return false;
++    D3D12_RESOURCE_BARRIER b{}; b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++    b.Transition.pResource = source; b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
++    b.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON; b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
++    list_->ResourceBarrier(1, &b);
++    list_->CopyResource(input_[current_].Get(), source);
++    std::swap(b.Transition.StateBefore, b.Transition.StateAfter); list_->ResourceBarrier(1, &b);
++    if (FAILED(list_->Close())) return false;
++    ID3D12CommandList* lists[] = {list_.Get()}; queue->ExecuteCommandLists(1, lists);
++    const uint64_t ready = ++appValue_;
++    if (FAILED(queue->Signal(appFence_.Get(), ready))) return false;
++
++    if (!hasPrevious_) { hasPrevious_ = true; flowValid_ = false; current_ ^= 1u; return false; }
++
++    NV_OF_FENCE_POINT wait{appFence_.Get(), ready};
++    NV_OF_FENCE_POINT done{ofaFence_.Get(), ++ofaValue_};
++    NV_OF_EXECUTE_INPUT_PARAMS_D3D12 in{};
++    in.inputFrame = static_cast<NvOFGPUBufferHandle>(inputHandle_[current_]);
++    in.referenceFrame = static_cast<NvOFGPUBufferHandle>(inputHandle_[current_ ^ 1u]);
++    in.externalHints = nullptr;
++    in.disableTemporalHints = disableTemporalOnce_ ? NV_OF_TRUE : NV_OF_FALSE;
++    disableTemporalOnce_ = false;
++    in.hPrivData = nullptr; in.numRois = 0; in.roiData = nullptr; in.numFencePoints = 1; in.fencePoint = &wait;
++    NV_OF_EXECUTE_OUTPUT_PARAMS_D3D12 out{};
++    out.outputBuffer = static_cast<NvOFGPUBufferHandle>(flowHandle_);
++    out.outputCostBuffer = static_cast<NvOFGPUBufferHandle>(costHandle_);
++    out.hPrivData = nullptr;
++    out.bwdOutputBuffer = static_cast<NvOFGPUBufferHandle>(backwardHandle_);
++    out.bwdOutputCostBuffer = static_cast<NvOFGPUBufferHandle>(backwardCostHandle_); out.globalFlowBuffer = nullptr; out.fencePoint = &done;
++    auto st = api_->fn.nvOFExecuteD3D12(static_cast<NvOFHandle>(session_), &in, &out);
++    current_ ^= 1u;
++    if (st != NV_OF_SUCCESS) { flowValid_ = false; return false; }
++    flowValid_ = SUCCEEDED(queue->Wait(ofaFence_.Get(), done.value));
++    return flowValid_;
++}
++
++void NvofBridge::BeginRead(ID3D12GraphicsCommandList* list) {
++    if (!ready_ || !list) return;
++    ID3D12Resource* r[] = {flow_.Get(), cost_.Get(), backward_.Get()};
++    for (auto* x : r) if (x) {
++        D3D12_RESOURCE_BARRIER b{}; b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++        b.Transition = {x, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE};
++        list->ResourceBarrier(1, &b);
++    }
++}
++void NvofBridge::EndRead(ID3D12GraphicsCommandList* list) {
++    if (!ready_ || !list) return;
++    ID3D12Resource* r[] = {flow_.Get(), cost_.Get(), backward_.Get()};
++    for (auto* x : r) if (x) {
++        D3D12_RESOURCE_BARRIER b{}; b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++        b.Transition = {x, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON};
++        list->ResourceBarrier(1, &b);
++    }
++}
++
++void NvofBridge::UnregisterAll() {
++    if (!api_ || !api_->fn.nvOFUnregisterResourceD3D12) return;
++    void** handles[] = {&inputHandle_[0], &inputHandle_[1], &flowHandle_, &costHandle_, &backwardHandle_, &backwardCostHandle_};
++    for (void** p : handles) if (*p) {
++        NV_OF_UNREGISTER_RESOURCE_PARAMS_D3D12 u{}; u.hOFGpuBuffer = static_cast<NvOFGPUBufferHandle>(*p);
++        api_->fn.nvOFUnregisterResourceD3D12(&u); *p = nullptr;
++    }
++}
++void NvofBridge::Shutdown() {
++    ready_ = false; hasPrevious_ = false; flowValid_ = false;
++    UnregisterAll();
++    input_[0].Reset(); input_[1].Reset(); flow_.Reset(); cost_.Reset(); backward_.Reset(); backwardCost_.Reset();
++    if (api_ && session_ && api_->fn.nvOFDestroy) api_->fn.nvOFDestroy(static_cast<NvOFHandle>(session_));
++    session_ = nullptr; allocator_.Reset(); list_.Reset(); appFence_.Reset(); ofaFence_.Reset(); device_.Reset();
++    delete api_; api_ = nullptr;
++    // nvofapi64.dll is a display-driver component. Keep it loaded for process life
++    // once opened, matching NVIDIA's typical wrapper behavior.
++    library_ = nullptr;
++}
+diff -ruN v3base/nvof_bridge.h v4work/source/nvof_bridge.h
+--- v3base/nvof_bridge.h	1970-01-01 00:00:00.000000000 +0000
++++ v4work/source/nvof_bridge.h	2026-09-22 09:02:23.062115618 +0000
+@@ -0,0 +1,63 @@
++#pragma once
++#include <windows.h>
++#include <d3d12.h>
++#include <dxgi1_6.h>
++#include <wrl/client.h>
++#include <functional>
++#include <string>
++
++class NvofBridge {
++public:
++    using Log = std::function<void(const std::wstring&)>;
++    ~NvofBridge();
++    bool Init(ID3D12Device* device, UINT width, UINT height, Log log);
++    void Shutdown();
++    bool Available() const { return ready_; }
++    bool HasPrevious() const { return hasPrevious_; }
++    bool FlowReady() const { return flowValid_; }
++    UINT Grid() const { return grid_; }
++    UINT SourceWidth() const { return width_; }
++    UINT SourceHeight() const { return height_; }
++    UINT FlowWidth() const { return flowW_; }
++    UINT FlowHeight() const { return flowH_; }
++    bool HasCost() const { return cost_ != nullptr; }
++    bool HasBackward() const { return backward_ != nullptr; }
++    ID3D12Resource* Flow() const { return flow_.Get(); }
++    ID3D12Resource* Cost() const { return cost_.Get(); }
++    ID3D12Resource* Backward() const { return backward_.Get(); }
++    DXGI_FORMAT CostFormat() const { return costFormat_; }
++
++    // Copies the just-captured BGRA frame into NVOFA input memory, submits the
++    // hardware optical-flow engine, and inserts only GPU-side synchronization.
++    // The caller does not wait on the CPU.
++    bool SubmitFrame(ID3D12CommandQueue* queue, ID3D12Re
