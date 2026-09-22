@@ -41,16 +41,16 @@ jobs:
           $start = $s.IndexOf('            // LOW-LATENCY ORDER:')
           $end = $s.IndexOf('            DXGI_OUTDUPL_FRAME_INFO', $start)
           if ($start -lt 0 -or $end -lt 0) { throw 'Could not locate v4 pre-capture scheduling block' }
-          $replacement = @"
-            // v4.1 scheduling: never CPU-wait for the whole prior presenter frame before
-            // AcquireNextFrame. Streamline/resource dependencies are GPU queued instead.
-            // The D3D11 shared-fence wait is also GPU-side, so the CPU remains free to
-            // acquire the newest desktop present while prior FG work drains.
-            gDLSS.BeforeFrame(d.queue.Get());
-            gDLSS.PrepareFrame();
-            if(c.lastRenderDone) HR(c.context4->Wait(c.sharedFence.Get(),c.lastRenderDone),"Capture overwrite protection");
-
-"@
+          $replacement = @(
+            '            // v4.1 scheduling: never CPU-wait for the whole prior presenter frame before',
+            '            // AcquireNextFrame. Streamline/resource dependencies are GPU queued instead.',
+            '            // The D3D11 shared-fence wait is also GPU-side, so the CPU remains free to',
+            '            // acquire the newest desktop present while prior FG work drains.',
+            '            gDLSS.BeforeFrame(d.queue.Get());',
+            '            gDLSS.PrepareFrame();',
+            '            if(c.lastRenderDone) HR(c.context4->Wait(c.sharedFence.Get(),c.lastRenderDone),"Capture overwrite protection");',
+            ''
+          ) -join [Environment]::NewLine
           $s = $s.Substring(0,$start) + $replacement + $s.Substring($end)
           Set-Content -Path $p -Value $s -NoNewline
 
