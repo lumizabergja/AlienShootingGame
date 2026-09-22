@@ -27,6 +27,13 @@ jobs:
           git apply --check "$env:GITHUB_WORKSPACE\v3.patch"
           git apply "$env:GITHUB_WORKSPACE\v3.patch"
 
+      - name: Export exact v3 source snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: exact-v3-source
+          path: dense-src/source
+          if-no-files-found: error
+
       - name: Reconstruct and apply Ultra v4 patch
         shell: pwsh
         run: |
