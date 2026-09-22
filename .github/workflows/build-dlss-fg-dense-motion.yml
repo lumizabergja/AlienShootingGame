@@ -3,7 +3,7 @@ name: Build Original Presenter NVOFA Q0 Max1
 on:
   push:
     branches:
-      - dlss-fg-original-nvofa-q0-max1-b2-boost
+      - dlss-fg-b2-boost-nvofa-early
   workflow_dispatch:
 
 jobs:
@@ -88,6 +88,7 @@ jobs:
           $out = New-Object System.Collections.Generic.List[string]
           $addedPrepare = $false
           $addedWait = $false
+          $insideRenderFrame = $false
           $skipNextFailedCheck = $false
           foreach ($line in $lines) {
             if ($skipNextFailedCheck -and $line -eq '    if (FAILED(hr)) return false;') {
@@ -100,7 +101,8 @@ jobs:
             if ($skipNextFailedCheck) { throw 'Unexpected line after shared fence wait' }
 
             $out.Add($line)
-            if (-not $addedPrepare -and $line -eq '    gDLSS.BeforeFrame(d.queue.Get());') {
+            if (-not $addedPrepare -and $line -eq '                      float syntheticOffsetPixels) {') {
+              $out.Add('    // Start NVOFA immediately so optical flow overlaps existing CPU/frame-resource waits.')
               $out.Add('    gDLSS.PrepareMotion(d.sharedFence.Get(),copyReady);')
               $addedPrepare = $true
             }
@@ -108,9 +110,11 @@ jobs:
               $skipNextFailedCheck = $true
             }
           }
-          if (-not $addedPrepare) { throw 'Original BeforeFrame line not found' }
+          if (-not $addedPrepare) { throw 'RenderFrame entry point not found for early NVOFA' }
           if (-not $addedWait) { throw 'Original shared fence wait line not found' }
           Set-Content -Path $p -Value $out
+          $verify = Get-Content $p -Raw
+          if ([regex]::Matches($verify, 'gDLSS\.PrepareMotion\(d\.sharedFence\.Get\(\),copyReady\);').Count -ne 1) { throw 'Expected exactly one PrepareMotion call after early-NVOFA patch' }
 
           # Timing-only changes: no software backlog is added (queue target 0),
           # and force the DXGI swapchain maximum frame latency to 1.
@@ -193,6 +197,6 @@ jobs:
       - name: Upload executable
         uses: actions/upload-artifact@v4
         with:
-          name: DX12-DLSS-FG-OriginalPresenter-NVOFA-Q0-Max1-B2-Boost
+          name: DX12-DLSS-FG-OriginalPresenter-NVOFA-Q0-Max1-B2-Boost-EarlyNVOFA
           path: DX12-DLSS-FG-OriginalPresenter.exe
           if-no-files-found: error
