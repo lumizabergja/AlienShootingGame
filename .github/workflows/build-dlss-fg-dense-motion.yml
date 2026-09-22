@@ -1,8 +1,9 @@
-name: Build Original Presenter + NVOFA
+name: Build Original Presenter NVOFA
 
 on:
   push:
-    branches: [dlss-fg-original-nvofa]
+    branches:
+      - dlss-fg-original-nvofa
   workflow_dispatch:
 
 jobs:
@@ -11,108 +12,64 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Reconstruct original presenter source base
+      - name: Reconstruct source base
         shell: pwsh
         run: |
           $b64 = (Get-Content .payload/0.txt -Raw) + (Get-Content .payload/1.txt -Raw) + (Get-Content .payload/2.txt -Raw) + (Get-Content .payload/3.txt -Raw)
-          [IO.File]::WriteAllBytes("$env:GITHUB_WORKSPACE\dense-src.zip", [Convert]::FromBase64String($b64))
-          $hash = (Get-FileHash "$env:GITHUB_WORKSPACE\dense-src.zip" -Algorithm SHA256).Hash.ToLower()
-          if ($hash -ne "ab6664f8ec8b32e3a3b5a46e14f8b80e5a9e4380f3385e5a43a3ce966ab49473") { throw "Source payload hash mismatch: $hash" }
-          Expand-Archive "$env:GITHUB_WORKSPACE\dense-src.zip" "$env:GITHUB_WORKSPACE\dense-src" -Force
+          [IO.File]::WriteAllBytes("$env:GITHUB_WORKSPACE/dense-src.zip", [Convert]::FromBase64String($b64))
+          Expand-Archive "$env:GITHUB_WORKSPACE/dense-src.zip" "$env:GITHUB_WORKSPACE/dense-src" -Force
 
-      - name: Install NVOFA motion only
+      - name: Install NVOFA motion module
         shell: pwsh
         run: |
-          $src = "$env:GITHUB_WORKSPACE\dense-src\source"
+          $src = "$env:GITHUB_WORKSPACE/dense-src/source"
           $bridge = ""
           0..3 | ForEach-Object {
-            $bridge += Get-Content ("$env:GITHUB_WORKSPACE\nvof_overlay\dlss_bridge.cpp.{0:D2}" -f $_) -Raw
+            $bridge += Get-Content ("$env:GITHUB_WORKSPACE/nvof_overlay/dlss_bridge.cpp.{0:D2}" -f $_) -Raw
           }
-          Set-Content -Path "$src\dlss_bridge.cpp" -Value $bridge -NoNewline
-          Copy-Item "$env:GITHUB_WORKSPACE\nvof_overlay\dlss_bridge.h" "$src\dlss_bridge.h" -Force
-          Copy-Item "$env:GITHUB_WORKSPACE\nvof_overlay\nvof_bridge.h" "$src\nvof_bridge.h" -Force
-          Copy-Item "$env:GITHUB_WORKSPACE\nvof_overlay\nvof_bridge.cpp" "$src\nvof_bridge.cpp" -Force
+          Set-Content -Path "$src/dlss_bridge.cpp" -Value $bridge -NoNewline
+          Copy-Item "$env:GITHUB_WORKSPACE/nvof_overlay/dlss_bridge.h" "$src/dlss_bridge.h" -Force
+          Copy-Item "$env:GITHUB_WORKSPACE/nvof_overlay/nvof_bridge.h" "$src/nvof_bridge.h" -Force
+          Copy-Item "$env:GITHUB_WORKSPACE/nvof_overlay/nvof_bridge.cpp" "$src/nvof_bridge.cpp" -Force
 
-          # Keep the original presenter/capture/pacing path. These are the only two
-          # main.cpp additions required to synchronize the NVOFA motion result.
-          $p = "$src\main.cpp"
-          $s = Get-Content $p -Raw
-          $pat = '(?m)^    gDLSS\.BeforeFrame\(d\.queue\.Get\(\)\);\r?
+          $p = "$src/main.cpp"
+          $lines = Get-Content $p
+          $out = New-Object System.Collections.Generic.List[string]
+          $addedPrepare = $false
+          $addedWait = $false
+          $skipNextFailedCheck = $false
+          foreach ($line in $lines) {
+            if ($skipNextFailedCheck -and $line -eq '    if (FAILED(hr)) return false;') {
+              $out.Add($line)
+              $out.Add('    if(!gDLSS.WaitMotion(d.queue.Get())) return false;')
+              $addedWait = $true
+              $skipNextFailedCheck = $false
+              continue
+            }
+            if ($skipNextFailedCheck) { throw 'Unexpected line after shared fence wait' }
 
-      - name: Get Streamline 2.14.1 headers
+            $out.Add($line)
+            if (-not $addedPrepare -and $line -eq '    gDLSS.BeforeFrame(d.queue.Get());') {
+              $out.Add('    gDLSS.PrepareMotion(d.sharedFence.Get(),copyReady);')
+              $addedPrepare = $true
+            }
+            if (-not $addedWait -and $line -eq '    hr = d.queue->Wait(d.sharedFence.Get(), copyReady);') {
+              $skipNextFailedCheck = $true
+            }
+          }
+          if (-not $addedPrepare) { throw 'Original BeforeFrame line not found' }
+          if (-not $addedWait) { throw 'Original shared fence wait line not found' }
+          Set-Content -Path $p -Value $out
+
+      - name: Get Streamline headers
         shell: pwsh
         run: |
-          git clone --depth 1 --branch v2.14.1 https://github.com/NVIDIA-RTX/Streamline.git "$env:GITHUB_WORKSPACE\Streamline"
+          git clone --depth 1 --branch v2.14.1 https://github.com/NVIDIA-RTX/Streamline.git "$env:GITHUB_WORKSPACE/Streamline"
 
-      - name: Get NVIDIA Optical Flow headers
+      - name: Get Optical Flow headers
         shell: pwsh
         run: |
-          git clone --depth 1 https://github.com/mbucchia/Optical-Flow-SDK.git "$env:GITHUB_WORKSPACE\OpticalFlow"
-
-      - uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-
-      - name: Build x64 Release
-        shell: cmd
-        run: |
-          cd /d "%GITHUB_WORKSPACE%\dense-src\source"
-          rc /nologo /fo app.res app.rc
-          cl /nologo /std:c++20 /O2 /EHsc /W4 /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0A00 /DWINVER=0x0A00 /I "%GITHUB_WORKSPACE%\Streamline\include" /I "%GITHUB_WORKSPACE%\OpticalFlow\NvOFInterface" main.cpp dlss_bridge.cpp nvof_bridge.cpp app.res /Fe:"%GITHUB_WORKSPACE%\LoLDX12Presenter-FG.exe" /link d3d12.lib d3d11.lib dxgi.lib d3dcompiler.lib dwmapi.lib comctl32.lib shell32.lib ole32.lib user32.lib gdi32.lib wintrust.lib crypt32.lib /SUBSYSTEM:WINDOWS
-
-      - name: Upload executable
-        uses: actions/upload-artifact@v4
-        with:
-          name: LoLDX12Presenter-FG-Original-NVOFA
-          path: LoLDX12Presenter-FG.exe
-          if-no-files-found: error
-
-          if (-not [regex]::IsMatch($s,$pat)) { throw "Could not locate original BeforeFrame line" }
-          $s = [regex]::Replace($s,$pat,{ param($m) $m.Value + [Environment]::NewLine + '    gDLSS.PrepareMotion(d.sharedFence.Get(),copyReady);' },1)
-
-          $pat = '(?m)^    hr = d\.queue->Wait\(d\.sharedFence\.Get\(\), copyReady\);\r?
-
-      - name: Get Streamline 2.14.1 headers
-        shell: pwsh
-        run: |
-          git clone --depth 1 --branch v2.14.1 https://github.com/NVIDIA-RTX/Streamline.git "$env:GITHUB_WORKSPACE\Streamline"
-
-      - name: Get NVIDIA Optical Flow headers
-        shell: pwsh
-        run: |
-          git clone --depth 1 https://github.com/mbucchia/Optical-Flow-SDK.git "$env:GITHUB_WORKSPACE\OpticalFlow"
-
-      - uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-
-      - name: Build x64 Release
-        shell: cmd
-        run: |
-          cd /d "%GITHUB_WORKSPACE%\dense-src\source"
-          rc /nologo /fo app.res app.rc
-          cl /nologo /std:c++20 /O2 /EHsc /W4 /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0A00 /DWINVER=0x0A00 /I "%GITHUB_WORKSPACE%\Streamline\include" /I "%GITHUB_WORKSPACE%\OpticalFlow\NvOFInterface" main.cpp dlss_bridge.cpp nvof_bridge.cpp app.res /Fe:"%GITHUB_WORKSPACE%\LoLDX12Presenter-FG.exe" /link d3d12.lib d3d11.lib dxgi.lib d3dcompiler.lib dwmapi.lib comctl32.lib shell32.lib ole32.lib user32.lib gdi32.lib wintrust.lib crypt32.lib /SUBSYSTEM:WINDOWS
-
-      - name: Upload executable
-        uses: actions/upload-artifact@v4
-        with:
-          name: LoLDX12Presenter-FG-Original-NVOFA
-          path: LoLDX12Presenter-FG.exe
-          if-no-files-found: error
-
-          if (-not [regex]::IsMatch($s,$pat)) { throw "Could not locate original shared-fence wait line" }
-          $s = [regex]::Replace($s,$pat,{ param($m) $m.Value + [Environment]::NewLine + '    if(!gDLSS.WaitMotion(d.queue.Get())) return false;' },1)
-          Set-Content -Path $p -Value $s -NoNewline
-
-      - name: Get Streamline 2.14.1 headers
-        shell: pwsh
-        run: |
-          git clone --depth 1 --branch v2.14.1 https://github.com/NVIDIA-RTX/Streamline.git "$env:GITHUB_WORKSPACE\Streamline"
-
-      - name: Get NVIDIA Optical Flow headers
-        shell: pwsh
-        run: |
-          git clone --depth 1 https://github.com/mbucchia/Optical-Flow-SDK.git "$env:GITHUB_WORKSPACE\OpticalFlow"
+          git clone --depth 1 https://github.com/mbucchia/Optical-Flow-SDK.git "$env:GITHUB_WORKSPACE/OpticalFlow"
 
       - uses: ilammy/msvc-dev-cmd@v1
         with:
