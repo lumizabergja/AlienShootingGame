@@ -1,0 +1,1 @@
+Corrected all-in build: removes FRAME_LATENCY_WAITABLE_OBJECT and its wait gate after logs showed Streamline DLSS-G disabled flip queue throttling and stalled. Keeps B2, Q0, Max1, Reflex Boost, Early NVOFA, Reflex-before-capture, 2ms AcquireNextFrame, and 1x1 FAST NVOFA.
