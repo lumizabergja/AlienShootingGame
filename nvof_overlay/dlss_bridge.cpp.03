@@ -1,0 +1,88 @@
+idUntilPresent,&input},
+        {&mv,sl::kBufferTypeMotionVectors,sl::eValidUntilPresent,&input}
+    };
+    Check(tags(*token,viewport,inputs,2,list),"Tag motion and depth buffers");
+    Transition(list,current.Get(),read,D3D12_RESOURCE_STATE_COPY_SOURCE);
+    Transition(list,result.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_DEST);
+    list->CopyResource(result.Get(),current.Get());
+    Transition(list,current.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,read);
+    Transition(list,result.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    Transition(list,result.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    if(fg) {
+        sl::Resource hud(sl::ResourceType::eTex2d,result.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        hud.width=ow;hud.height=oh;hud.nativeFormat=DXGI_FORMAT_R16G16B16A16_FLOAT;
+        // Capture includes the HUD. This is an explicit approximation, not HUD separation.
+        sl::ResourceTag tag{&hud,sl::kBufferTypeHUDLessColor,sl::eValidUntilPresent,&output};
+        Check(tags(*token,viewport,&tag,1,list),"Tag approximate HUD-less color");
+    }
+    Transition(list,current.Get(),read,D3D12_RESOURCE_STATE_COPY_SOURCE);Transition(list,previous.Get(),read,D3D12_RESOURCE_STATE_COPY_DEST);
+    list->CopyResource(previous.Get(),current.Get());
+    Transition(list,current.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,read);Transition(list,previous.Get(),D3D12_RESOURCE_STATE_COPY_DEST,read);
+    if(nvof.Available()) nvof.RecordHistoryCopy(list,source,read);
+    Transition(list,source,read,D3D12_RESOURCE_STATE_COMMON);history=true;
+}
+void DlssExperiment::TagBackbuffer(ID3D12GraphicsCommandList* list,ID3D12Resource* backbuffer,D3D12_RESOURCE_STATES state) {
+    if(!fg||!token) return;
+    sl::Extent full{};full.width=ow;full.height=oh;
+    sl::Resource back(sl::ResourceType::eTex2d,backbuffer,state);
+    back.width=ow;back.height=oh;back.nativeFormat=DXGI_FORMAT_B8G8R8A8_UNORM;
+    sl::ResourceTag tag{&back,sl::kBufferTypeBackbuffer,sl::eValidUntilPresent,&full};
+    Check(tags(*token,viewport,&tag,1,list),"Tag final swapchain backbuffer");
+}
+void DlssExperiment::BeforeFrame(ID3D12CommandQueue* queue) {
+    if (inputFence && inputFenceValue)
+        HR(queue->Wait(inputFence.Get(), inputFenceValue), "Wait for previous FG input consumption");
+}
+void DlssExperiment::AfterPresent() {
+    if (!fg) return;
+    sl::DLSSGState state{};
+    auto r = fgState(viewport, state, nullptr);
+    if (r != sl::Result::eOk) { reportResult = r; return; }
+    reportStatus = static_cast<sl::DLSSGStatus>(
+        static_cast<unsigned>(reportStatus) | static_cast<unsigned>(state.status));
+    ++reportCalls;
+    reportPresents += state.numFramesActuallyPresented;
+    inputFence = static_cast<ID3D12Fence*>(state.inputsProcessingCompletionFence);
+    inputFenceValue = state.lastPresentInputsProcessingCompletionFenceValue;
+}
+void DlssExperiment::Suspend(bool value) {
+    if (!fg || !fgOptions || value == suspended) return;
+    auto options = activeOptions;
+    if (value) options.mode = sl::DLSSGMode::eOff;
+    Check(fgOptions(viewport, options), "Suspend/resume fixed FG");
+    suspended = value;
+    framePrepared = false;
+    history = false;
+    nvof.ResetHistory();
+}
+std::wstring DlssExperiment::Status() {
+    std::wstring s = L"Fixed " + std::to_wstring(activeOptions.numFramesToGenerate + 1) + L"x requested";
+    if (reportResult != sl::Result::eOk)
+        s += L" | SDK error=" + std::to_wstring(static_cast<int>(reportResult));
+    else if (static_cast<unsigned>(reportStatus))
+        s += L" | BLOCKED flags=" + std::to_wstring(static_cast<unsigned>(reportStatus));
+    else if (reportCalls && reportPresents > reportCalls) {
+        wchar_t text[100]{};
+        swprintf_s(text, L" | SDK reports %.2fx presents", double(reportPresents) / double(reportCalls));
+        s += text;
+    } else
+        s += L" | No extra frames reported; check sl.log";
+    reportCalls = reportPresents = 0;
+    reportResult = sl::Result::eOk;
+    reportStatus = sl::DLSSGStatus::eOk;
+    return s;
+}
+void DlssExperiment::Release() {
+    if(device) {
+        if(fg&&fgOptions) {sl::DLSSGOptions o{};o.mode=sl::DLSSGMode::eOff;fgOptions(viewport,o);}
+        if(freeResources) {if(sr)freeResources(sl::kFeatureDLSS,viewport);if(fg)freeResources(sl::kFeatureDLSS_G,viewport);}
+    }
+    nvof.Shutdown();
+    token=nullptr;framePrepared=false;history=false;current.Reset();previous.Reset();motion.Reset();depth.Reset();result.Reset();
+    inputFence.Reset();inputFenceValue=0;
+    resamplePSO.Reset();motionPSO.Reset();nvofResolvePSO.Reset();root.Reset();heap.Reset();device.Reset();
+}
+void DlssExperiment::Shutdown() {
+    Release();if(initialized&&shutdown)shutdown();initialized=false;
+    if(module)FreeLibrary(module);module=nullptr;
+}
