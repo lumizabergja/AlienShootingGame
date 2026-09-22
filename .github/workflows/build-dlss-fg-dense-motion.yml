@@ -27,6 +27,9 @@ jobs:
           0..3 | ForEach-Object {
             $bridge += Get-Content ("$env:GITHUB_WORKSPACE/nvof_overlay/dlss_bridge.cpp.{0:D2}" -f $_) -Raw
           }
+          # Repair the two C++ escaped Windows path literals after text-chunk transport.
+          $bridge = $bridge.Replace('VerifyRuntime(dir + L"\" + file);','VerifyRuntime(dir + L"\\" + file);')
+          $bridge = $bridge.Replace('(dir+L"\sl.interposer.dll")','(dir+L"\\sl.interposer.dll")')
           Set-Content -Path "$src/dlss_bridge.cpp" -Value $bridge -NoNewline
           Copy-Item "$env:GITHUB_WORKSPACE/nvof_overlay/motion_shader.h" "$src/motion_shader.h" -Force
 
