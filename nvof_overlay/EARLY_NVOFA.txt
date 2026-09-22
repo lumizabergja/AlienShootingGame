@@ -1,0 +1,1 @@
+Experimental A/B variant: start NVOFA at RenderFrame entry so it overlaps existing CPU/frame-resource waits. Same B2 + Q0 + Max1 + Reflex Boost behavior otherwise.
