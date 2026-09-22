@@ -3,7 +3,7 @@ name: Build Original Presenter NVOFA Q0 Max1
 on:
   push:
     branches:
-      - dlss-fg-original-nvofa-q0-max1-b2
+      - dlss-fg-original-nvofa-q0-max1-b2-boost
   workflow_dispatch:
 
 jobs:
@@ -160,6 +160,15 @@ jobs:
           $s = $s.Replace('go.numBackBuffers=3;','go.numBackBuffers=2;')
           Set-Content -Path $p -Value $s -NoNewline
 
+          # A/B test only: Reflex On -> Reflex On + Boost.
+          # Change only the final boost argument passed to gDLSS.Init.
+          $p = "$src/main.cpp"
+          $s = Get-Content $p -Raw
+          $matches = [regex]::Matches($s, 'gDLSS\.Init\(([^;\r\n]*),false\);')
+          if ($matches.Count -ne 1) { throw "Expected exactly one gDLSS.Init(...,false); call, found $($matches.Count)" }
+          $s = [regex]::Replace($s, 'gDLSS\.Init\(([^;\r\n]*),false\);', 'gDLSS.Init($1,true);', 1)
+          Set-Content -Path $p -Value $s -NoNewline
+
       - name: Get Streamline headers
         shell: pwsh
         run: |
@@ -184,6 +193,6 @@ jobs:
       - name: Upload executable
         uses: actions/upload-artifact@v4
         with:
-          name: DX12-DLSS-FG-OriginalPresenter-NVOFA-Q0-Max1-B2
+          name: DX12-DLSS-FG-OriginalPresenter-NVOFA-Q0-Max1-B2-Boost
           path: DX12-DLSS-FG-OriginalPresenter.exe
           if-no-files-found: error
