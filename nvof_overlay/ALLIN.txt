@@ -1,0 +1,1 @@
+All-in experimental latency build: waitable swapchain gating, Reflex-before-capture, 2 ms fresh DXGI acquire, 1x1 FAST NVOFA, existing B2/Q0/Max1/Boost/EarlyNVOFA preserved.
