@@ -1,0 +1,58 @@
+--- a/source/main.cpp
++++ b/source/main.cpp
+@@ -632,10 +632,13 @@
+ 
+ bool App::RenderFrame(CaptureState& c, Dx12State& d, UINT64 copyReady,
+                       float syntheticOffsetPixels) {
+-    // Resource reuse and Reflex pacing happen before capture in Worker(), so the
+-    // captured image is as fresh as possible when command recording begins.
++    gDLSS.PrepareMotion(d.sharedFence.Get(), copyReady);
++
+     UINT frame = d.swapchain->GetCurrentBackBufferIndex();
+-    HRESULT hr = d.allocators[frame]->Reset();
++    HRESULT hr;
++    hr = d.allocators[frame]->Reset();
+     if (FAILED(hr)) return false;
+@@ -643,8 +646,8 @@
+     d.list->SetPipelineState(d.pipeline.Get());
+     D3D12_RESOURCE_BARRIER barriers[3]{};
+     barriers[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+-    barriers[0].Transition.pResource = d.sharedTexture.Get();
+-    barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
++    barriers[0].Transition.pResource = gDLSS.result.Get();
++    barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+     barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+@@ -652,7 +655,7 @@
+     barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_PRESENT;
+     barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_RENDER_TARGET;
+     barriers[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+-    d.list->ResourceBarrier(1, &barriers[1]);
++    d.list->ResourceBarrier(2, barriers);
+@@ -670,14 +673,16 @@
+     d.list->DrawInstanced(3, 1, 0, 0);
+     gDLSS.TagBackbuffer(d.list.Get(),d.backBuffers[frame].Get(),D3D12_RESOURCE_STATE_RENDER_TARGET);
+     barriers[0].Transition.StateBefore = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+-    barriers[0].Transition.StateAfter = D3D12_RESOURCE_STATE_COMMON;
++    barriers[0].Transition.StateAfter = (gDLSS.result.Get()==d.sharedTexture.Get()) ? D3D12_RESOURCE_STATE_COMMON : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+     barriers[1].Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
+     barriers[1].Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
+-    d.list->ResourceBarrier(1, &barriers[1]);
++    d.list->ResourceBarrier(2, barriers);
+     hr = d.list->Close();
+     if (FAILED(hr)) return false;
+-    hr = d.queue->Wait(d.sharedFence.Get(), copyReady);
+-    if (FAILED(hr)) return false;
++    if (FAILED(d.queue->Wait(d.sharedFence.Get(), copyReady))) return false;
++    if (!gDLSS.WaitMotion(d.queue.Get())) return false;
+@@ -727,7 +732,7 @@
+     {
+     Dx12State d;
+     try {
+-        gLog.Write(L"Ultra low-latency DLSS FG v3. DXGI capture / DX12. Selected multiplier: " + std::to_wstring(multiplier_) + L"x.");
++        gLog.Write(L"Ultra low-latency DLSS FG v4 NVOFA. DXGI capture / DX12. Selected multiplier: " + std::to_wstring(multiplier_) + L"x.");
+@@ -743,7 +748,7 @@
+         RECT output{};GetClientRect(outputWindow,&output);
+         gDLSS.Init(d.device.Get(),c.adapter.Get(),d.sharedTexture.Get(),output.right,output.bottom,false,true,multiplier_,false);
+         if(!CreateSwapchain(outputWindow,lowLatency_,d,false)) throw std::runtime_error("Swapchain creation failed.");
+-        D3D12_SHADER_RESOURCE_VIEW_DESC view{};view.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
++        D3D12_SHADER_RESOURCE_VIEW_DESC view{};view.Format=gDLSS.resultFormat;
