@@ -1,0 +1,44 @@
+name: Build DLSS FG Dense Motion v2
+
+on:
+  push:
+    branches: [dlss-fg-dense-motion-v2]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reconstruct modified source
+        shell: pwsh
+        run: |
+          $b64 = (Get-Content .payload/0.txt -Raw) + (Get-Content .payload/1.txt -Raw) + (Get-Content .payload/2.txt -Raw) + (Get-Content .payload/3.txt -Raw)
+          [IO.File]::WriteAllBytes("$env:GITHUB_WORKSPACE\dense-src.zip", [Convert]::FromBase64String($b64))
+          $hash = (Get-FileHash "$env:GITHUB_WORKSPACE\dense-src.zip" -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne "ab6664f8ec8b32e3a3b5a46e14f8b80e5a9e4380f3385e5a43a3ce966ab49473") { throw "Source payload hash mismatch: $hash" }
+          Expand-Archive "$env:GITHUB_WORKSPACE\dense-src.zip" "$env:GITHUB_WORKSPACE\dense-src" -Force
+
+      - name: Get Streamline 2.14.1 headers
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch v2.14.1 https://github.com/NVIDIA-RTX/Streamline.git "$env:GITHUB_WORKSPACE\Streamline"
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build x64 Release
+        shell: cmd
+        run: |
+          cd /d "%GITHUB_WORKSPACE%\dense-src\source"
+          rc /nologo /fo app.res app.rc
+          cl /nologo /std:c++20 /O2 /EHsc /W4 /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0A00 /DWINVER=0x0A00 /I "%GITHUB_WORKSPACE%\Streamline\include" main.cpp dlss_bridge.cpp app.res /Fe:"%GITHUB_WORKSPACE%\LoLDX12Presenter-FG.exe" /link d3d12.lib d3d11.lib dxgi.lib d3dcompiler.lib dwmapi.lib comctl32.lib shell32.lib ole32.lib user32.lib gdi32.lib wintrust.lib crypt32.lib /SUBSYSTEM:WINDOWS
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: LoLDX12Presenter-FG-DenseMotion-v2
+          path: LoLDX12Presenter-FG.exe
+          if-no-files-found: error
