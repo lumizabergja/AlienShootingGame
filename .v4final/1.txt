@@ -1,0 +1,142 @@
+OURCE_STATE_UNORDERED_ACCESS);
+-    sl::Resource out(sl::ResourceType::eTex2d,result.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+-    dr.width=mv.width=color.width=rw;dr.height=mv.height=color.height=rh;
++    dr.width=mv.width=rw;dr.height=mv.height=rh;
+     dr.nativeFormat=DXGI_FORMAT_R32_FLOAT;mv.nativeFormat=DXGI_FORMAT_R16G16_FLOAT;
+-    color.nativeFormat=DXGI_FORMAT_R16G16B16A16_FLOAT;out.width=ow;out.height=oh;out.nativeFormat=DXGI_FORMAT_R16G16B16A16_FLOAT;
+     sl::ResourceTag inputs[]={
+         {&dr,sl::kBufferTypeDepth,sl::eValidUntilPresent,&input},
+         {&mv,sl::kBufferTypeMotionVectors,sl::eValidUntilPresent,&input}
+     };
+     Check(tags(*token,viewport,inputs,2,list),"Tag motion and depth buffers");
+-    Transition(list,current.Get(),read,D3D12_RESOURCE_STATE_COPY_SOURCE);
+-    Transition(list,result.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_DEST);
+-    list->CopyResource(result.Get(),current.Get());
+-    Transition(list,current.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,read);
+-    Transition(list,result.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+-    Transition(list,result.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+     if(fg) {
+-        sl::Resource hud(sl::ResourceType::eTex2d,result.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+-        hud.width=ow;hud.height=oh;hud.nativeFormat=DXGI_FORMAT_R16G16B16A16_FLOAT;
++        // Reuse current directly: no full-frame FP16 copy before Present.
++        sl::Resource hud(sl::ResourceType::eTex2d,current.Get(),read);
++        hud.width=ow;hud.height=oh;hud.nativeFormat=DXGI_FORMAT_R8G8B8A8_UNORM;
+         // Capture includes the HUD. This is an explicit approximation, not HUD separation.
+         sl::ResourceTag tag{&hud,sl::kBufferTypeHUDLessColor,sl::eValidUntilPresent,&output};
+         Check(tags(*token,viewport,&tag,1,list),"Tag approximate HUD-less color");
+@@ -262,7 +277,8 @@
+     }
+     token=nullptr;framePrepared=false;history=false;current.Reset();previous.Reset();motion.Reset();depth.Reset();result.Reset();
+     inputFence.Reset();inputFenceValue=0;
+-    resamplePSO.Reset();motionPSO.Reset();root.Reset();heap.Reset();device.Reset();
++    nvof.Shutdown();
++    resamplePSO.Reset();motionPSO.Reset();nvofResolvePSO.Reset();root.Reset();heap.Reset();device.Reset();
+ }
+ void DlssExperiment::Shutdown() {
+     Release();if(initialized&&shutdown)shutdown();initialized=false;
+diff -ruN a/source/dlss_bridge.h b/source/dlss_bridge.h
+--- a/source/dlss_bridge.h	2026-09-22 06:20:16.000000000 +0000
++++ b/source/dlss_bridge.h	2026-09-22 08:56:47.441458964 +0000
+@@ -14,6 +14,7 @@
+ #include <stdexcept>
+ #include <string>
+ #include <chrono>
++#include "nvof_bridge.h"
+ using Microsoft::WRL::ComPtr;
+ 
+ class DlssExperiment {
+@@ -35,6 +36,7 @@
+     void BindDevice(ID3D12Device* d) {Check(setDevice(d),"slSetD3DDevice");}
+     void Init(ID3D12Device*,IDXGIAdapter1*,ID3D12Resource*,UINT,UINT,bool,bool,UINT,bool);
+     void PrepareFrame();
++    bool PrepareMotion(ID3D12CommandQueue*,ID3D12Resource*);
+     void Record(ID3D12GraphicsCommandList*,ID3D12Resource*);
+     void TagBackbuffer(ID3D12GraphicsCommandList*,ID3D12Resource*,D3D12_RESOURCE_STATES);
+     void BeforeFrame(ID3D12CommandQueue*);
+@@ -42,7 +44,7 @@
+     void Suspend(bool);
+     void Marker(sl::PCLMarker m);
+     std::wstring Status();
+-    void ResetHistory() { history=false; }
++    void ResetHistory();
+     void Release();
+     void Shutdown();
+     void EndRuntime() {if(initialized&&shutdown)shutdown();initialized=false;}
+@@ -51,8 +53,9 @@
+     uint32_t index{};
+     ComPtr<ID3D12DescriptorHeap> heap;
+     ComPtr<ID3D12RootSignature> root;
+-    ComPtr<ID3D12PipelineState> resamplePSO,motionPSO;
++    ComPtr<ID3D12PipelineState> resamplePSO,motionPSO,nvofResolvePSO;
+     ComPtr<ID3D12Device> device;
++    NvofBridge nvof;
+     UINT stride{};
+     sl::DLSSGOptions activeOptions{};
+     bool suspended{};
+diff -ruN a/source/main.cpp b/source/main.cpp
+--- a/source/main.cpp	2026-09-22 06:23:38.000000000 +0000
++++ b/source/main.cpp	2026-09-22 08:58:38.070126890 +0000
+@@ -632,24 +632,18 @@
+ 
+ bool App::RenderFrame(CaptureState& c, Dx12State& d, UINT64 copyReady,
+                       float syntheticOffsetPixels) {
+-    // FG uses one motion/history resource set: complete its prior submission
+-    // before recording again. Capture remains before render-time pacing.
+-    UINT64 pending=*std::max_element(std::begin(d.frameFenceValues),std::end(d.frameFenceValues));
+-    if(pending && d.frameFence->GetCompletedValue()<pending) {
+-        HR(d.frameFence->SetEventOnCompletion(pending,d.frameEvent),"FG resource completion");
+-        if(WaitForSingleObject(d.frameEvent,3000)!=WAIT_OBJECT_0) throw std::runtime_error("GPU stalled.");
+-    }
++    // The D3D11 capture signal is waited on GPU-side. Hardware optical flow gets
++    // first access to the fresh captured frame and runs asynchronously on NVOFA; the
++    // CPU can record the render list while that dedicated engine is working.
++    HRESULT hr = d.queue->Wait(d.sharedFence.Get(), copyReady);
++    if (FAILED(hr)) return false;
++    gDLSS.PrepareMotion(d.queue.Get(), d.sharedTexture.Get());
++
+     UINT frame = d.swapchain->GetCurrentBackBufferIndex();
+-    if (d.frameFenceValues[frame] && d.frameFence->GetCompletedValue() < d.frameFenceValues[frame]) {
+-        HRESULT hr = d.frameFence->SetEventOnCompletion(d.frameFenceValues[frame], d.frameEvent);
+-        if (FAILED(hr)) return false;
+-        if (WaitForSingleObject(d.frameEvent, 3000) != WAIT_OBJECT_0) return false;
+-    }
+-    HRESULT hr = d.allocators[frame]->Reset();
++    hr = d.allocators[frame]->Reset();
+     if (FAILED(hr)) return false;
+     hr = d.list->Reset(d.allocators[frame].Get(), d.pipeline.Get());
+     if (FAILED(hr)) return false;
+-    gDLSS.BeforeFrame(d.queue.Get());
+     gDLSS.Record(d.list.Get(),d.sharedTexture.Get());
+     d.list->SetPipelineState(d.pipeline.Get());
+     D3D12_RESOURCE_BARRIER barriers[3]{};
+@@ -687,8 +681,6 @@
+     d.list->ResourceBarrier(1, &barriers[1]);
+     hr = d.list->Close();
+     if (FAILED(hr)) return false;
+-    hr = d.queue->Wait(d.sharedFence.Get(), copyReady);
+-    if (FAILED(hr)) return false;
+     ID3D12CommandList* lists[] = {d.list.Get()};
+     gDLSS.Marker(sl::PCLMarker::eRenderSubmitStart);
+     d.queue->ExecuteCommandLists(1, lists);
+@@ -738,7 +730,7 @@
+     {
+     Dx12State d;
+     try {
+-        gLog.Write(L"Simple DLSS FG build. DXGI capture / DX12. Selected multiplier: " + std::to_wstring(multiplier_) + L"x.");
++        gLog.Write(L"Ultra low-latency DLSS FG v4 NVOFA. DXGI capture / DX12. Selected multiplier: " + std::to_wstring(multiplier_) + L"x.");
+         QueryPerformanceFrequency(&d.qpcFrequency);
+         {
+             std::wstring reason;
+@@ -754,7 +746,7 @@
+         RECT output{};GetClientRect(outputWindow,&output);
+         gDLSS.Init(d.device.Get(),c.adapter.Get(),d.sharedTexture.Get(),output.right,output.bottom,false,true,multiplier_,false);
+         if(!CreateSwapchain(outputWindow,lowLatency_,d,false)) throw std::runtime_error("Swapchain creation failed.");
+-        D3D12_SHADER_RESOURCE_VIEW_DESC view{};view.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;
++        D3D12_SHADER_RESOURCE_VIEW_DESC view{};view.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
+         view.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;view.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;view.Texture2D.MipLevels=1;
+         d.device->CreateShaderResourceView(gDLSS.result.Get(),&view,d.srvHeap->GetCPUDescriptorHandleForHeapStart());
+         auto lastReport=std::chrono::steady_clock::now();auto lastFrame=lastReport;
+@@ -774,6 +766,25 @@
+             if(!visible) {PostMessageW(outputWindow,WM_APP_OUTPUT_VISIBILITY,TRUE,0);visible=true;}
+             if(recreateSwapchain_.exchange(false)) throw std::runtime_error("Output resized: press Start again to rebuild DLSS resources.");
+         
