@@ -37,15 +37,71 @@ jobs:
           # main.cpp additions required to synchronize the NVOFA motion result.
           $p = "$src\main.cpp"
           $s = Get-Content $p -Raw
-          $old = '    gDLSS.BeforeFrame(d.queue.Get());' + [Environment]::NewLine + '    gDLSS.Record(d.list.Get(),d.sharedTexture.Get());'
-          $new = '    gDLSS.BeforeFrame(d.queue.Get());' + [Environment]::NewLine + '    gDLSS.PrepareMotion(d.sharedFence.Get(),copyReady);' + [Environment]::NewLine + '    gDLSS.Record(d.list.Get(),d.sharedTexture.Get());'
-          if (-not $s.Contains($old)) { throw "Could not locate original BeforeFrame/Record sequence" }
-          $s = $s.Replace($old,$new)
+          $pat = '(?m)^    gDLSS\.BeforeFrame\(d\.queue\.Get\(\)\);\r?
 
-          $old = '    hr = d.queue->Wait(d.sharedFence.Get(), copyReady);' + [Environment]::NewLine + '    if (FAILED(hr)) return false;' + [Environment]::NewLine + '    ID3D12CommandList* lists[] = {d.list.Get()};'
-          $new = '    hr = d.queue->Wait(d.sharedFence.Get(), copyReady);' + [Environment]::NewLine + '    if (FAILED(hr)) return false;' + [Environment]::NewLine + '    if(!gDLSS.WaitMotion(d.queue.Get())) return false;' + [Environment]::NewLine + '    ID3D12CommandList* lists[] = {d.list.Get()};'
-          if (-not $s.Contains($old)) { throw "Could not locate original shared-fence wait sequence" }
-          $s = $s.Replace($old,$new)
+      - name: Get Streamline 2.14.1 headers
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch v2.14.1 https://github.com/NVIDIA-RTX/Streamline.git "$env:GITHUB_WORKSPACE\Streamline"
+
+      - name: Get NVIDIA Optical Flow headers
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/mbucchia/Optical-Flow-SDK.git "$env:GITHUB_WORKSPACE\OpticalFlow"
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build x64 Release
+        shell: cmd
+        run: |
+          cd /d "%GITHUB_WORKSPACE%\dense-src\source"
+          rc /nologo /fo app.res app.rc
+          cl /nologo /std:c++20 /O2 /EHsc /W4 /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0A00 /DWINVER=0x0A00 /I "%GITHUB_WORKSPACE%\Streamline\include" /I "%GITHUB_WORKSPACE%\OpticalFlow\NvOFInterface" main.cpp dlss_bridge.cpp nvof_bridge.cpp app.res /Fe:"%GITHUB_WORKSPACE%\LoLDX12Presenter-FG.exe" /link d3d12.lib d3d11.lib dxgi.lib d3dcompiler.lib dwmapi.lib comctl32.lib shell32.lib ole32.lib user32.lib gdi32.lib wintrust.lib crypt32.lib /SUBSYSTEM:WINDOWS
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: LoLDX12Presenter-FG-Original-NVOFA
+          path: LoLDX12Presenter-FG.exe
+          if-no-files-found: error
+
+          if (-not [regex]::IsMatch($s,$pat)) { throw "Could not locate original BeforeFrame line" }
+          $s = [regex]::Replace($s,$pat,{ param($m) $m.Value + [Environment]::NewLine + '    gDLSS.PrepareMotion(d.sharedFence.Get(),copyReady);' },1)
+
+          $pat = '(?m)^    hr = d\.queue->Wait\(d\.sharedFence\.Get\(\), copyReady\);\r?
+
+      - name: Get Streamline 2.14.1 headers
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch v2.14.1 https://github.com/NVIDIA-RTX/Streamline.git "$env:GITHUB_WORKSPACE\Streamline"
+
+      - name: Get NVIDIA Optical Flow headers
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/mbucchia/Optical-Flow-SDK.git "$env:GITHUB_WORKSPACE\OpticalFlow"
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Build x64 Release
+        shell: cmd
+        run: |
+          cd /d "%GITHUB_WORKSPACE%\dense-src\source"
+          rc /nologo /fo app.res app.rc
+          cl /nologo /std:c++20 /O2 /EHsc /W4 /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0A00 /DWINVER=0x0A00 /I "%GITHUB_WORKSPACE%\Streamline\include" /I "%GITHUB_WORKSPACE%\OpticalFlow\NvOFInterface" main.cpp dlss_bridge.cpp nvof_bridge.cpp app.res /Fe:"%GITHUB_WORKSPACE%\LoLDX12Presenter-FG.exe" /link d3d12.lib d3d11.lib dxgi.lib d3dcompiler.lib dwmapi.lib comctl32.lib shell32.lib ole32.lib user32.lib gdi32.lib wintrust.lib crypt32.lib /SUBSYSTEM:WINDOWS
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: LoLDX12Presenter-FG-Original-NVOFA
+          path: LoLDX12Presenter-FG.exe
+          if-no-files-found: error
+
+          if (-not [regex]::IsMatch($s,$pat)) { throw "Could not locate original shared-fence wait line" }
+          $s = [regex]::Replace($s,$pat,{ param($m) $m.Value + [Environment]::NewLine + '    if(!gDLSS.WaitMotion(d.queue.Get())) return false;' },1)
           Set-Content -Path $p -Value $s -NoNewline
 
       - name: Get Streamline 2.14.1 headers
