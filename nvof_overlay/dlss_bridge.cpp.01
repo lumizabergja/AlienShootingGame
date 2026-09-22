@@ -1,0 +1,71 @@
+ze=1;d.MipLevels=1;d.Format=f;d.SampleDesc.Count=1;d.Flags=D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    HR(device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&d,state,nullptr,IID_PPV_ARGS(&r)),"Create DLSS texture");
+}
+void DlssExperiment::SRV(ID3D12Resource* r,DXGI_FORMAT fmt,UINT slot) {
+    D3D12_SHADER_RESOURCE_VIEW_DESC d{};d.Format=fmt;d.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;
+    d.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;d.Texture2D.MipLevels=1;
+    auto h=heap->GetCPUDescriptorHandleForHeapStart();h.ptr+=slot*stride;device->CreateShaderResourceView(r,&d,h);
+}
+void DlssExperiment::UAV(ID3D12Resource* r,DXGI_FORMAT fmt,UINT slot) {
+    D3D12_UNORDERED_ACCESS_VIEW_DESC d{};d.Format=fmt;d.ViewDimension=D3D12_UAV_DIMENSION_TEXTURE2D;
+    auto h=heap->GetCPUDescriptorHandleForHeapStart();h.ptr+=slot*stride;device->CreateUnorderedAccessView(r,nullptr,&d,h);
+}
+void DlssExperiment::Init(ID3D12Device* dev,IDXGIAdapter1* adapter,ID3D12Resource* source,UINT w,UINT h,bool, bool useFG,UINT multiplier,bool boost) {
+    if (multiplier < 2 || multiplier > 4) throw std::runtime_error("Select a fixed FG multiplier of 2x, 3x or 4x.");
+    device=dev;sr=false;fg=useFG;ow=w;oh=h;rw=w;rh=h;history=false;index=0;srEvaluated=false;
+    DXGI_ADAPTER_DESC1 ad{};HR(adapter->GetDesc1(&ad),"Adapter desc");
+    sl::AdapterInfo ai{};ai.deviceLUID=(uint8_t*)&ad.AdapterLuid;ai.deviceLUIDSizeInBytes=sizeof(LUID);
+    if(fg) {
+        Check(supported(sl::kFeatureDLSS_G,ai),"DLSS Frame Generation support");
+        Feature(fgOptions,sl::kFeatureDLSS_G,"slDLSSGSetOptions");Feature(fgState,sl::kFeatureDLSS_G,"slDLSSGGetState");
+        Feature(reflexOptions,sl::kFeatureReflex,"slReflexSetOptions");Feature(reflexSleep,sl::kFeatureReflex,"slReflexSleep");
+        Feature(marker,sl::kFeaturePCL,"slPCLSetMarker");
+        sl::ReflexOptions ro{};ro.mode=boost ? sl::ReflexMode::eLowLatencyWithBoost : sl::ReflexMode::eLowLatency;
+        Check(reflexOptions(ro),"Enable Reflex");
+        log(boost ? L"Presenter Reflex: On + Boost" : L"Presenter Reflex: On");
+        sl::DLSSGOptions go{};go.mode=sl::DLSSGMode::eOff;go.numBackBuffers=3;
+        go.colorWidth=w;go.colorHeight=h;go.colorBufferFormat=DXGI_FORMAT_B8G8R8A8_UNORM;
+        go.mvecDepthWidth=rw;go.mvecDepthHeight=rh;go.mvecBufferFormat=DXGI_FORMAT_R16G16_FLOAT;go.depthBufferFormat=DXGI_FORMAT_R32_FLOAT;
+        go.hudLessBufferFormat=DXGI_FORMAT_R16G16B16A16_FLOAT;
+        sl::DLSSGState state{};Check(fgState(viewport,state,&go),"DLSS-G capabilities");
+        if (multiplier - 1 > state.numFramesToGenerateMax)
+            throw std::runtime_error("Selected " + std::to_string(multiplier) + "x FG exceeds runtime support (maximum " +
+                std::to_string(state.numFramesToGenerateMax + 1) + "x). Choose a lower multiplier.");
+        go.mode = sl::DLSSGMode::eOn;
+        go.numFramesToGenerate = multiplier - 1;
+        go.flags = sl::DLSSGFlags::eRetainResourcesWhenOff;
+        activeOptions = go;
+        suspended = false;
+        framePrepared = false;
+        reportCalls = reportPresents = 0;
+        reportResult = sl::Result::eOk;
+        reportStatus = sl::DLSSGStatus::eOk;
+        Check(fgOptions(viewport,go),"Enable fixed NVIDIA Frame Generation");
+        log(L"Requested fixed " + std::to_wstring(multiplier) + L"x FG: " +
+            std::to_wstring(go.numFramesToGenerate) + L" generated frames per captured frame. Dynamic mode OFF. Runtime max generated frames=" +
+            std::to_wstring(state.numFramesToGenerateMax));
+    }
+    auto read=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    Texture(current,rw,rh,DXGI_FORMAT_R16G16B16A16_FLOAT,read);
+    Texture(previous,rw,rh,DXGI_FORMAT_R16G16B16A16_FLOAT,read);
+    Texture(motion,rw,rh,DXGI_FORMAT_R16G16_FLOAT,read);Texture(depth,rw,rh,DXGI_FORMAT_R32_FLOAT,read);
+    Texture(result,w,h,DXGI_FORMAT_R16G16B16A16_FLOAT,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+    auto sourceDesc=source->GetDesc();
+    nvof.Init(dev,source,(UINT)sourceDesc.Width,sourceDesc.Height,log);
+    D3D12_DESCRIPTOR_HEAP_DESC hd{};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;hd.NumDescriptors=8;hd.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+    HR(dev->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&heap)),"Compute descriptors");stride=dev->GetDescriptorHandleIncrementSize(hd.Type);
+    SRV(source,DXGI_FORMAT_B8G8R8A8_UNORM,0);SRV(current.Get(),DXGI_FORMAT_R16G16B16A16_FLOAT,1);SRV(previous.Get(),DXGI_FORMAT_R16G16B16A16_FLOAT,2);
+    SRV(nvof.Available()?nvof.Flow():nullptr,DXGI_FORMAT_R16G16_SINT,3);
+    SRV(nvof.Available()&&nvof.HasCost()?nvof.Cost():nullptr,DXGI_FORMAT_R8_UINT,4);
+    UAV(current.Get(),DXGI_FORMAT_R16G16B16A16_FLOAT,5);UAV(motion.Get(),DXGI_FORMAT_R16G16_FLOAT,6);UAV(depth.Get(),DXGI_FORMAT_R32_FLOAT,7);
+    D3D12_DESCRIPTOR_RANGE ranges[2]{};
+    ranges[0]={D3D12_DESCRIPTOR_RANGE_TYPE_SRV,5,0,0,0};ranges[1]={D3D12_DESCRIPTOR_RANGE_TYPE_UAV,3,0,0,5};
+    D3D12_ROOT_PARAMETER parameters[2]{};parameters[0].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+    parameters[0].DescriptorTable={2,ranges};parameters[1].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;parameters[1].Constants={0,0,9};
+    D3D12_STATIC_SAMPLER_DESC sampler{};sampler.Filter=D3D12_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler.AddressU=sampler.AddressV=sampler.AddressW=D3D12_TEXTURE_ADDRESS_MODE_CLAMP;sampler.MaxLOD=D3D12_FLOAT32_MAX;
+    D3D12_ROOT_SIGNATURE_DESC rd{};rd.NumParameters=2;rd.pParameters=parameters;rd.NumStaticSamplers=1;rd.pStaticSamplers=&sampler;
+    ComPtr<ID3DBlob> blob,errors;HR(D3D12SerializeRootSignature(&rd,D3D_ROOT_SIGNATURE_VERSION_1,&blob,&errors),"Compute root serialize");
+    HR(dev->CreateRootSignature(0,blob->GetBufferPointer(),blob->GetBufferSize(),IID_PPV_ARGS(&root)),"Compute root");
+    auto pipeline=[&](const unsigned char* bytes,SIZE_T size,ComPtr<ID3D12PipelineState>& pso) {
+        D3D12_COMPUTE_PIPELINE_STATE_DESC pd{};pd.pRootSignature=root.Get();pd.
