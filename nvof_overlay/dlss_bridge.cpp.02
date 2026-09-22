@@ -1,0 +1,84 @@
+CS={bytes,size};
+        HR(dev->CreateComputePipelineState(&pd,IID_PPV_ARGS(&pso)),"Compute pipeline (Shader Model 6.0)");
+    };
+    pipeline(resampleCode,sizeof(resampleCode),resamplePSO);
+    pipeline(motionCode,sizeof(motionCode),motionPSO);
+    {
+        ComPtr<ID3DBlob> code,err;
+        HRESULT hr=D3DCompile(kNvofResolveShader,sizeof(kNvofResolveShader)-1,nullptr,nullptr,nullptr,
+                              "ResolveNvof","cs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&code,&err);
+        if(FAILED(hr)) {
+            std::string msg="NVOFA resolve shader compile failed";
+            if(err) msg += ": "+std::string((const char*)err->GetBufferPointer(),err->GetBufferSize());
+            throw std::runtime_error(msg);
+        }
+        D3D12_COMPUTE_PIPELINE_STATE_DESC pd{};pd.pRootSignature=root.Get();pd.CS={code->GetBufferPointer(),code->GetBufferSize()};
+        HR(dev->CreateComputePipelineState(&pd,IID_PPV_ARGS(&nvofResolvePSO)),"NVOFA resolve pipeline");
+    }
+    log(L"Native-resolution FG input/output "+std::to_wstring(ow)+L"x"+std::to_wstring(oh)+L"; DLSS scaling is not loaded.");
+    log(nvof.Available()?L"Motion source: NVIDIA Optical Flow Accelerator; presenter/capture/pacing unchanged.":L"Motion source: original software estimator fallback; presenter/capture/pacing unchanged.");
+}
+void DlssExperiment::Marker(sl::PCLMarker m) { if(fg&&token&&marker) Check(marker(m,*token),"Reflex frame marker"); }
+void DlssExperiment::PrepareFrame() {
+    // Capture timeouts and cursor-only updates retain the same pending token.
+    // Sleep only once per actual submitted frame, before capture in fresh mode.
+    if (framePrepared) return;
+    uint32_t n=index++;Check(newToken(token,&n),"New frame token");
+    if(fg) Check(reflexSleep(*token),"Reflex sleep");
+    framePrepared = true;
+}
+bool DlssExperiment::PrepareMotion(ID3D12Fence* captureFence,uint64_t captureValue) {
+    return nvof.Available() ? nvof.SubmitFrame(captureFence,captureValue) : false;
+}
+bool DlssExperiment::WaitMotion(ID3D12CommandQueue* queue) {
+    return nvof.WaitOnFlow(queue);
+}
+void DlssExperiment::Record(ID3D12GraphicsCommandList* list,ID3D12Resource* source) {
+    PrepareFrame(); // Also supports the original after-capture timing for comparison.
+    framePrepared = false;
+    Marker(sl::PCLMarker::eSimulationStart);Marker(sl::PCLMarker::eSimulationEnd);
+    sl::Constants c{};
+    sl::float4x4 identity{};identity[0]={1,0,0,0};identity[1]={0,1,0,0};identity[2]={0,0,1,0};identity[3]={0,0,0,1};
+    c.cameraViewToClip=identity;c.clipToCameraView=identity;c.clipToLensClip=identity;c.clipToPrevClip=identity;c.prevClipToClip=identity;
+    c.jitterOffset={0,0};c.mvecScale={1.0f/rw,1.0f/rh};c.cameraPinholeOffset={0,0};
+    c.cameraPos={0,0,0};c.cameraUp={0,1,0};c.cameraRight={1,0,0};c.cameraFwd={0,0,1};
+    c.cameraNear=0.1f;c.cameraFar=1000;c.cameraFOV=1.04719755f;c.cameraAspectRatio=float(ow)/oh;
+    c.motionVectorsInvalidValue=65504;c.depthInverted=sl::eFalse;c.cameraMotionIncluded=sl::eTrue;
+    c.motionVectors3D=sl::eFalse;c.reset=history?sl::eFalse:sl::eTrue;c.orthographicProjection=sl::eTrue;
+    Check(constants(c,*token,viewport),"Set synthetic flat-plane constants");
+    const auto read=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+    Transition(list,source,D3D12_RESOURCE_STATE_COMMON,read);
+    Transition(list,current.Get(),read,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    ID3D12DescriptorHeap* hs[]={heap.Get()};list->SetDescriptorHeaps(1,hs);list->SetComputeRootSignature(root.Get());
+    list->SetComputeRootDescriptorTable(0,heap->GetGPUDescriptorHandleForHeapStart());
+    UINT settings[]={rw,rh,history?0u:1u,nvof.Available()?nvof.Grid():4u,
+                     nvof.Available()?nvof.FlowWidth():0u,nvof.Available()?nvof.FlowHeight():0u,
+                     nvof.Available()&&nvof.HasCost()?1u:0u,
+                     nvof.Available()?nvof.SourceWidth():rw,nvof.Available()?nvof.SourceHeight():rh};
+    list->SetComputeRoot32BitConstants(1,9,settings,0);
+    list->SetPipelineState(resamplePSO.Get());list->Dispatch((rw+7)/8,(rh+7)/8,1);
+    Transition(list,current.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,read);
+    if(!history) {
+        Transition(list,current.Get(),read,D3D12_RESOURCE_STATE_COPY_SOURCE);Transition(list,previous.Get(),read,D3D12_RESOURCE_STATE_COPY_DEST);
+        list->CopyResource(previous.Get(),current.Get());
+        Transition(list,current.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,read);Transition(list,previous.Get(),D3D12_RESOURCE_STATE_COPY_DEST,read);
+    }
+    Transition(list,motion.Get(),read,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);Transition(list,depth.Get(),read,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    if(nvof.Available()&&nvof.FlowReady()) {
+        nvof.BeginRead(list);
+        list->SetPipelineState(nvofResolvePSO.Get());list->Dispatch((rw+7)/8,(rh+7)/8,1);
+        nvof.EndRead(list);
+    } else {
+        list->SetPipelineState(motionPSO.Get());list->Dispatch((rw+63)/64,(rh+63)/64,1);
+    }
+    Transition(list,motion.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,read);Transition(list,depth.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,read);
+    sl::Extent input{};input.width=rw;input.height=rh;sl::Extent output{};output.width=ow;output.height=oh;
+    sl::Resource dr(sl::ResourceType::eTex2d,depth.Get(),read),mv(sl::ResourceType::eTex2d,motion.Get(),read);
+    sl::Resource color(sl::ResourceType::eTex2d,current.Get(),read);
+    Transition(list,result.Get(),D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    sl::Resource out(sl::ResourceType::eTex2d,result.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    dr.width=mv.width=color.width=rw;dr.height=mv.height=color.height=rh;
+    dr.nativeFormat=DXGI_FORMAT_R32_FLOAT;mv.nativeFormat=DXGI_FORMAT_R16G16_FLOAT;
+    color.nativeFormat=DXGI_FORMAT_R16G16B16A16_FLOAT;out.width=ow;out.height=oh;out.nativeFormat=DXGI_FORMAT_R16G16B16A16_FLOAT;
+    sl::ResourceTag inputs[]={
+        {&dr,sl::kBufferTypeDepth,sl::eVal
