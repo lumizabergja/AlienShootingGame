@@ -1,0 +1,138 @@
+#include "dlss_bridge.h"
+#include "compute_bytecode.h"
+#include <wintrust.h>
+#include <softpub.h>
+
+static const char kNvofResolveShader[] = R"HLSL(
+Texture2D<float4> current : register(t1);
+Texture2D<float4> previous : register(t2);
+Texture2D<int2> nvofFlow : register(t3);
+Texture2D<uint> nvofCost : register(t4);
+RWTexture2D<float2> motion : register(u1);
+RWTexture2D<float> depth : register(u2);
+
+cbuffer Settings : register(b0) {
+    uint width;
+    uint height;
+    uint resetHistory;
+    uint flowGrid;
+    uint flowWidth;
+    uint flowHeight;
+    uint hasCost;
+    uint sourceWidth;
+    uint sourceHeight;
+};
+
+int2 ClampPixel(int2 p) {
+    return clamp(p, int2(0,0), int2((int)width-1,(int)height-1));
+}
+int2 ClampCell(int2 p) {
+    return clamp(p, int2(0,0), int2((int)flowWidth-1,(int)flowHeight-1));
+}
+float2 LoadFlow(int2 c) {
+    c=ClampCell(c);
+    return float2(nvofFlow.Load(int3(c,0))) * (1.0/32.0);
+}
+float Confidence(int2 c) {
+    if(!hasCost) return 1.0;
+    c=ClampCell(c);
+    float v=(float)nvofCost.Load(int3(c,0))*(1.0/255.0);
+    return 0.10 + 0.90*saturate(1.0-v);
+}
+float3 ColorAtCell(int2 c) {
+    float2 sp=float2(c*(int)flowGrid)+float2((float)flowGrid*0.5,(float)flowGrid*0.5);
+    float2 op=sp*float2(width,height)/max(float2(1,1),float2(sourceWidth,sourceHeight));
+    return current.Load(int3(ClampPixel(int2(op)),0)).rgb;
+}
+float2 ResolveFlow(float2 pixel) {
+    float2 sp=(pixel+0.5)*float2(sourceWidth,sourceHeight)/float2(width,height)-0.5;
+    float2 g=(sp+0.5)/max(1.0,(float)flowGrid)-0.5;
+    int2 b=int2(floor(g));
+    float2 f=frac(g);
+    float3 center=current.Load(int3(ClampPixel(int2(pixel)),0)).rgb;
+    float2 sum=0.0;
+    float wsum=0.0;
+    [unroll] for(int y=0;y<2;++y) {
+        [unroll] for(int x=0;x<2;++x) {
+            int2 c=b+int2(x,y);
+            float spatial=(x?f.x:1.0-f.x)*(y?f.y:1.0-f.y);
+            float3 cc=ColorAtCell(c);
+            float delta=abs(center.r-cc.r)+abs(center.g-cc.g)+abs(center.b-cc.b);
+            float edge=rcp(1.0+12.0*delta);
+            float w=spatial*edge*Confidence(c);
+            sum+=LoadFlow(c)*w;
+            wsum+=w;
+        }
+    }
+    if(wsum<1e-5) return LoadFlow(int2(round(g)));
+    return sum/wsum;
+}
+
+[numthreads(8,8,1)]
+void ResolveNvof(uint3 id:SV_DispatchThreadID) {
+    if(id.x>=width||id.y>=height) return;
+    float2 v=0.0;
+    if(!resetHistory) {
+        v=ResolveFlow(float2(id.xy));
+        v*=float2(width,height)/max(float2(1,1),float2(sourceWidth,sourceHeight));
+        float3 a=current.Load(int3(id.xy,0)).rgb;
+        float3 b=previous.Load(int3(id.xy,0)).rgb;
+        float same=abs(a.r-b.r)+abs(a.g-b.g)+abs(a.b-b.b);
+        if(same<0.006) v=0.0;
+        if(any(v!=v)||any(abs(v)>512.0)) v=0.0;
+    }
+    motion[id.xy]=v;
+    depth[id.xy]=0.5;
+}
+)HLSL";
+
+
+static void VerifyRuntime(const std::wstring& path) {
+    WINTRUST_FILE_INFO file{};
+    file.cbStruct = sizeof(file);
+    file.pcwszFilePath = path.c_str();
+    WINTRUST_DATA trust{};
+    trust.cbStruct = sizeof(trust);
+    trust.dwUIChoice = WTD_UI_NONE;
+    trust.fdwRevocationChecks = WTD_REVOKE_NONE;
+    trust.dwUnionChoice = WTD_CHOICE_FILE;
+    trust.pFile = &file;
+    trust.dwStateAction = WTD_STATEACTION_VERIFY;
+    trust.dwProvFlags = WTD_CACHE_ONLY_URL_RETRIEVAL;
+    GUID action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
+    LONG status = WinVerifyTrust(nullptr, &action, &trust);
+    trust.dwStateAction = WTD_STATEACTION_CLOSE;
+    WinVerifyTrust(nullptr, &action, &trust);
+    if (status != ERROR_SUCCESS)
+        throw std::runtime_error("NVIDIA runtime signature verification failed. Restore the original DLLs and check Windows certificate trust.");
+}
+void DlssExperiment::Check(sl::Result r,const char* where) {
+    if(r!=sl::Result::eOk) throw std::runtime_error(std::string(where)+" Streamline error "+std::to_string((int)r));
+}
+void DlssExperiment::Load() {
+    wchar_t path[32768]{}; GetModuleFileNameW(nullptr,path,32768);
+    auto dir=std::filesystem::path(path).parent_path().wstring();
+    for (const wchar_t* file : {L"sl.interposer.dll", L"sl.common.dll", L"sl.pcl.dll",
+                               L"sl.reflex.dll", L"sl.dlss_g.dll", L"nvngx_dlssg.dll"})
+        VerifyRuntime(dir + L"\" + file);
+    module=LoadLibraryExW((dir+L"\sl.interposer.dll").c_str(),nullptr,LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR|LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    if(!module) throw std::runtime_error("Cannot load sl.interposer.dll; extract the entire ZIP first.");
+    Export(init,"slInit"); Export(shutdown,"slShutdown"); Export(setDevice,"slSetD3DDevice");
+    Export(feature,"slGetFeatureFunction");Export(supported,"slIsFeatureSupported");
+    Export(newToken,"slGetNewFrameToken");Export(constants,"slSetConstants");Export(tags,"slSetTagForFrame");
+    Export(evaluate,"slEvaluateFeature");Export(freeResources,"slFreeResources");
+    Export(factory,"CreateDXGIFactory1"); Export(createDevice,"D3D12CreateDevice");
+    const wchar_t* dirs[]={dir.c_str()};
+    sl::Feature features[]={sl::kFeatureDLSS_G,sl::kFeatureReflex,sl::kFeaturePCL};
+    sl::Preferences p{};p.pathsToPlugins=dirs;p.numPathsToPlugins=1;p.pathToLogsAndData=dir.c_str();
+    p.logLevel=sl::LogLevel::eDefault;p.featuresToLoad=features;p.numFeaturesToLoad=3;
+    p.flags=sl::PreferenceFlags::eDisableCLStateTracking|sl::PreferenceFlags::eUseFrameBasedResourceTagging|sl::PreferenceFlags::eUseDXGIFactoryProxy;
+    p.engine=sl::EngineType::eCustom;p.engineVersion="DXGI-DX12 Simple Fixed FG";
+    p.projectId="e86d5d1d-b886-47ac-a90d-48708688358b";p.renderAPI=sl::RenderAPI::eD3D12;
+    Check(init(p,sl::kSDKVersion),"slInit");initialized=true;
+    log(L"Streamline 2.14.1 initialized for DLSS Frame Generation only (no DLSS scaler).");
+}
+void DlssExperiment::Texture(ComPtr<ID3D12Resource>& r,UINT w,UINT h,DXGI_FORMAT f,D3D12_RESOURCE_STATES state) {
+    D3D12_HEAP_PROPERTIES hp{};hp.Type=D3D12_HEAP_TYPE_DEFAULT;
+    D3D12_RESOURCE_DESC d{};d.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;d.Width=w;d.Height=h;
+    d.DepthOrArraySi
