@@ -1,8 +1,8 @@
-name: Build DLSS FG Dense Motion v2
+name: Build Original Presenter + NVOFA
 
 on:
   push:
-    branches: [dlss-fg-dense-motion-v2]
+    branches: [dlss-fg-original-nvofa]
   workflow_dispatch:
 
 jobs:
@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Reconstruct modified source
+      - name: Reconstruct original presenter source base
         shell: pwsh
         run: |
           $b64 = (Get-Content .payload/0.txt -Raw) + (Get-Content .payload/1.txt -Raw) + (Get-Content .payload/2.txt -Raw) + (Get-Content .payload/3.txt -Raw)
@@ -20,10 +20,27 @@ jobs:
           if ($hash -ne "ab6664f8ec8b32e3a3b5a46e14f8b80e5a9e4380f3385e5a43a3ce966ab49473") { throw "Source payload hash mismatch: $hash" }
           Expand-Archive "$env:GITHUB_WORKSPACE\dense-src.zip" "$env:GITHUB_WORKSPACE\dense-src" -Force
 
+      - name: Restore original presenter and add only NVOFA motion
+        shell: pwsh
+        run: |
+          $b64 = (Get-Content "$env:GITHUB_WORKSPACE\nvof_overlay\core.patch.b64" -Raw) -replace "[^A-Za-z0-9+/=]", ""
+          [IO.File]::WriteAllBytes("$env:GITHUB_WORKSPACE\core.patch", [Convert]::FromBase64String($b64))
+          cd "$env:GITHUB_WORKSPACE\dense-src"
+          git apply --check "$env:GITHUB_WORKSPACE\core.patch"
+          git apply "$env:GITHUB_WORKSPACE\core.patch"
+          Copy-Item "$env:GITHUB_WORKSPACE\nvof_overlay\dlss_bridge.h" "$env:GITHUB_WORKSPACE\dense-src\source\dlss_bridge.h" -Force
+          Copy-Item "$env:GITHUB_WORKSPACE\nvof_overlay\nvof_bridge.h" "$env:GITHUB_WORKSPACE\dense-src\source\nvof_bridge.h" -Force
+          Copy-Item "$env:GITHUB_WORKSPACE\nvof_overlay\nvof_bridge.cpp" "$env:GITHUB_WORKSPACE\dense-src\source\nvof_bridge.cpp" -Force
+
       - name: Get Streamline 2.14.1 headers
         shell: pwsh
         run: |
           git clone --depth 1 --branch v2.14.1 https://github.com/NVIDIA-RTX/Streamline.git "$env:GITHUB_WORKSPACE\Streamline"
+
+      - name: Get NVIDIA Optical Flow headers
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/mbucchia/Optical-Flow-SDK.git "$env:GITHUB_WORKSPACE\OpticalFlow"
 
       - uses: ilammy/msvc-dev-cmd@v1
         with:
@@ -34,11 +51,11 @@ jobs:
         run: |
           cd /d "%GITHUB_WORKSPACE%\dense-src\source"
           rc /nologo /fo app.res app.rc
-          cl /nologo /std:c++20 /O2 /EHsc /W4 /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0A00 /DWINVER=0x0A00 /I "%GITHUB_WORKSPACE%\Streamline\include" main.cpp dlss_bridge.cpp app.res /Fe:"%GITHUB_WORKSPACE%\LoLDX12Presenter-FG.exe" /link d3d12.lib d3d11.lib dxgi.lib d3dcompiler.lib dwmapi.lib comctl32.lib shell32.lib ole32.lib user32.lib gdi32.lib wintrust.lib crypt32.lib /SUBSYSTEM:WINDOWS
+          cl /nologo /std:c++20 /O2 /EHsc /W4 /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0A00 /DWINVER=0x0A00 /I "%GITHUB_WORKSPACE%\Streamline\include" /I "%GITHUB_WORKSPACE%\OpticalFlow\NvOFInterface" main.cpp dlss_bridge.cpp nvof_bridge.cpp app.res /Fe:"%GITHUB_WORKSPACE%\LoLDX12Presenter-FG.exe" /link d3d12.lib d3d11.lib dxgi.lib d3dcompiler.lib dwmapi.lib comctl32.lib shell32.lib ole32.lib user32.lib gdi32.lib wintrust.lib crypt32.lib /SUBSYSTEM:WINDOWS
 
       - name: Upload executable
         uses: actions/upload-artifact@v4
         with:
-          name: LoLDX12Presenter-FG-DenseMotion-v2
+          name: LoLDX12Presenter-FG-Original-NVOFA
           path: LoLDX12Presenter-FG.exe
           if-no-files-found: error
