@@ -32,7 +32,7 @@ jobs:
         run: |
           $p = ""
           0..4 | ForEach-Object { $p += (Get-Content "$env:GITHUB_WORKSPACE\.v4patch\$_.txt" -Raw) }
-          $bytes = [Text.Encoding]::UTF8.GetBytes($p)
+          $p = $p.Replace("`r`n","`n")\n          $bytes = [Text.Encoding]::UTF8.GetBytes($p)
           $sha = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($bytes)).Replace("-","").ToLower()
           if ($sha -ne "a377631d2de30f44283f308b6307219cf3b800e193861a362d717b914c84cc89") { throw "v4 patch hash mismatch: $sha" }
           $p = $p.Replace("v3base/","a/source/").Replace("v4work/source/","b/source/")
