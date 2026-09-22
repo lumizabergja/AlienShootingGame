@@ -1,0 +1,1 @@
+Exact AllInSafe base A/B variant: only NVOFA grid preference changes from 1x1-first to 4x4-first. Everything else unchanged.
