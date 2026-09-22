@@ -1,8 +1,8 @@
-name: Build DLSS FG Dense Motion v2
+name: Build DLSS FG Ultra v3
 
 on:
   push:
-    branches: [dlss-fg-dense-motion-v2]
+    branches: [dlss-fg-ultra-v3-final]
   workflow_dispatch:
 
 jobs:
@@ -11,7 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Reconstruct modified source
+      - name: Reconstruct v2 source
         shell: pwsh
         run: |
           $b64 = (Get-Content .payload/0.txt -Raw) + (Get-Content .payload/1.txt -Raw) + (Get-Content .payload/2.txt -Raw) + (Get-Content .payload/3.txt -Raw)
@@ -19,6 +19,13 @@ jobs:
           $hash = (Get-FileHash "$env:GITHUB_WORKSPACE\dense-src.zip" -Algorithm SHA256).Hash.ToLower()
           if ($hash -ne "ab6664f8ec8b32e3a3b5a46e14f8b80e5a9e4380f3385e5a43a3ce966ab49473") { throw "Source payload hash mismatch: $hash" }
           Expand-Archive "$env:GITHUB_WORKSPACE\dense-src.zip" "$env:GITHUB_WORKSPACE\dense-src" -Force
+
+      - name: Apply Ultra v3 latency and motion patch
+        shell: pwsh
+        run: |
+          cd "$env:GITHUB_WORKSPACE\dense-src"
+          git apply --check "$env:GITHUB_WORKSPACE\v3.patch"
+          git apply "$env:GITHUB_WORKSPACE\v3.patch"
 
       - name: Get Streamline 2.14.1 headers
         shell: pwsh
@@ -39,6 +46,6 @@ jobs:
       - name: Upload executable
         uses: actions/upload-artifact@v4
         with:
-          name: LoLDX12Presenter-FG-DenseMotion-v2
+          name: LoLDX12Presenter-FG-Ultra-v3
           path: LoLDX12Presenter-FG.exe
           if-no-files-found: error
