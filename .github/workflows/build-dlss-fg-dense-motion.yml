@@ -1,8 +1,8 @@
-name: Build DLSS FG Ultra v3
+name: Build DLSS FG Ultra v4 NVOFA
 
 on:
   push:
-    branches: [dlss-fg-ultra-v3-final]
+    branches: [dlss-fg-ultra-v4-nvofa]
   workflow_dispatch:
 
 jobs:
@@ -20,17 +20,32 @@ jobs:
           if ($hash -ne "ab6664f8ec8b32e3a3b5a46e14f8b80e5a9e4380f3385e5a43a3ce966ab49473") { throw "Source payload hash mismatch: $hash" }
           Expand-Archive "$env:GITHUB_WORKSPACE\dense-src.zip" "$env:GITHUB_WORKSPACE\dense-src" -Force
 
-      - name: Apply Ultra v3 latency and motion patch
+      - name: Apply Ultra v3 base patch
         shell: pwsh
         run: |
           cd "$env:GITHUB_WORKSPACE\dense-src"
           git apply --check "$env:GITHUB_WORKSPACE\v3.patch"
           git apply "$env:GITHUB_WORKSPACE\v3.patch"
 
-      - name: Get Streamline 2.14.1 headers
+      - name: Reconstruct and apply Ultra v4 patch
+        shell: pwsh
+        run: |
+          $p = ""
+          0..4 | ForEach-Object { $p += (Get-Content "$env:GITHUB_WORKSPACE\.v4patch\$_.txt" -Raw) }
+          $bytes = [Text.Encoding]::UTF8.GetBytes($p)
+          $sha = [BitConverter]::ToString([Security.Cryptography.SHA256]::Create().ComputeHash($bytes)).Replace("-","").ToLower()
+          if ($sha -ne "a377631d2de30f44283f308b6307219cf3b800e193861a362d717b914c84cc89") { throw "v4 patch hash mismatch: $sha" }
+          $p = $p.Replace("v3base/","a/source/").Replace("v4work/source/","b/source/")
+          [IO.File]::WriteAllText("$env:GITHUB_WORKSPACE\v4.git.patch",$p,[Text.UTF8Encoding]::new($false))
+          cd "$env:GITHUB_WORKSPACE\dense-src"
+          git apply --check "$env:GITHUB_WORKSPACE\v4.git.patch"
+          git apply "$env:GITHUB_WORKSPACE\v4.git.patch"
+
+      - name: Get SDK headers
         shell: pwsh
         run: |
           git clone --depth 1 --branch v2.14.1 https://github.com/NVIDIA-RTX/Streamline.git "$env:GITHUB_WORKSPACE\Streamline"
+          git clone --depth 1 https://github.com/SlimRG/NvidiaOF5.git "$env:GITHUB_WORKSPACE\NvidiaOF5"
 
       - uses: ilammy/msvc-dev-cmd@v1
         with:
@@ -41,11 +56,11 @@ jobs:
         run: |
           cd /d "%GITHUB_WORKSPACE%\dense-src\source"
           rc /nologo /fo app.res app.rc
-          cl /nologo /std:c++20 /O2 /EHsc /W4 /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0A00 /DWINVER=0x0A00 /I "%GITHUB_WORKSPACE%\Streamline\include" main.cpp dlss_bridge.cpp app.res /Fe:"%GITHUB_WORKSPACE%\LoLDX12Presenter-FG.exe" /link d3d12.lib d3d11.lib dxgi.lib d3dcompiler.lib dwmapi.lib comctl32.lib shell32.lib ole32.lib user32.lib gdi32.lib wintrust.lib crypt32.lib /SUBSYSTEM:WINDOWS
+          cl /nologo /std:c++20 /O2 /EHsc /W4 /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0A00 /DWINVER=0x0A00 /I "%GITHUB_WORKSPACE%\Streamline\include" /I "%GITHUB_WORKSPACE%\NvidiaOF5" main.cpp dlss_bridge.cpp nvof_bridge.cpp app.res /Fe:"%GITHUB_WORKSPACE%\LoLDX12Presenter-FG.exe" /link d3d12.lib d3d11.lib dxgi.lib d3dcompiler.lib dwmapi.lib comctl32.lib shell32.lib ole32.lib user32.lib gdi32.lib wintrust.lib crypt32.lib /SUBSYSTEM:WINDOWS
 
       - name: Upload executable
         uses: actions/upload-artifact@v4
         with:
-          name: LoLDX12Presenter-FG-Ultra-v3
+          name: LoLDX12Presenter-FG-Ultra-v4-NVOFA
           path: LoLDX12Presenter-FG.exe
           if-no-files-found: error
