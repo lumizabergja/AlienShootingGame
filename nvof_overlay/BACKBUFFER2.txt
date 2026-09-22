@@ -1,0 +1,1 @@
+A/B variant only: kFrameCount=2 and Streamline numBackBuffers=2. All Q0/Max1/NVOFA behavior unchanged.
