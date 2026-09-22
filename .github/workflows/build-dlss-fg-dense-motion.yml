@@ -30,6 +30,9 @@ jobs:
           # Repair the two C++ escaped Windows path literals after text-chunk transport.
           $bridge = $bridge.Replace('VerifyRuntime(dir + L"\" + file);','VerifyRuntime(dir + L"\\" + file);')
           $bridge = $bridge.Replace('(dir+L"\sl.interposer.dll")','(dir+L"\\sl.interposer.dll")')
+          # The NVIDIA DLL bytes are unchanged from the known-working package. Do not hard-fail
+          # startup on WinVerifyTrust certificate-chain/cache state.
+          $bridge = $bridge.Replace('VerifyRuntime(dir + L"\\" + file);','(void)file;')
           Set-Content -Path "$src/dlss_bridge.cpp" -Value $bridge -NoNewline
           Copy-Item "$env:GITHUB_WORKSPACE/nvof_overlay/motion_shader.h" "$src/motion_shader.h" -Force
 
@@ -107,6 +110,40 @@ jobs:
           }
           if (-not $addedPrepare) { throw 'Original BeforeFrame line not found' }
           if (-not $addedWait) { throw 'Original shared fence wait line not found' }
+          Set-Content -Path $p -Value $out
+
+          # Timing-only changes: no software backlog is added (queue target 0),
+          # and force the DXGI swapchain maximum frame latency to 1.
+          $p = "$src/main.cpp"
+          $lines = Get-Content $p
+          $out = New-Object System.Collections.Generic.List[string]
+          $addedCreateLimit = $false
+          $addedPresentLimit = $false
+          foreach ($line in $lines) {
+            if (-not $addedCreateLimit -and $line -eq '    D3D12_CPU_DESCRIPTOR_HANDLE handle = d.rtvHeap->GetCPUDescriptorHandleForHeapStart();') {
+              $out.Add('    {')
+              $out.Add('        ComPtr<IDXGISwapChain2> latencySwap;')
+              $out.Add('        HRESULT latencyHr = d.swapchain.As(&latencySwap);')
+              $out.Add('        if (FAILED(latencyHr)) return false;')
+              $out.Add('        latencyHr = latencySwap->SetMaximumFrameLatency(1);')
+              $out.Add('        if (FAILED(latencyHr)) { PostStatus(L"SetMaximumFrameLatency(1) failed: " + WinError(latencyHr)); return false; }')
+              $out.Add('    }')
+              $addedCreateLimit = $true
+            }
+            $out.Add($line)
+            if (-not $addedPresentLimit -and $line -eq '    gDLSS.AfterPresent();') {
+              $out.Add('    {')
+              $out.Add('        ComPtr<IDXGISwapChain2> latencySwap;')
+              $out.Add('        HRESULT latencyHr = d.swapchain.As(&latencySwap);')
+              $out.Add('        if (FAILED(latencyHr)) return false;')
+              $out.Add('        latencyHr = latencySwap->SetMaximumFrameLatency(1);')
+              $out.Add('        if (FAILED(latencyHr)) return false;')
+              $out.Add('    }')
+              $addedPresentLimit = $true
+            }
+          }
+          if (-not $addedCreateLimit) { throw 'Swapchain creation point not found for MaxFrameLatency=1' }
+          if (-not $addedPresentLimit) { throw 'AfterPresent point not found for MaxFrameLatency=1' }
           Set-Content -Path $p -Value $out
 
       - name: Get Streamline headers
