@@ -1,0 +1,116 @@
+--- a/source/motion_shader.h
++++ b/source/motion_shader.h
+@@ -8,6 +8,9 @@
+ Texture2D<float4> source   : register(t0);
+ Texture2D<float4> current  : register(t1);
+ Texture2D<float4> previous : register(t2);
++Texture2D<int2> nvofFlow : register(t3);
++Texture2D<uint> nvofCost : register(t4);
++Texture2D<int2> nvofBack : register(t5);
+ RWTexture2D<float4> downsampled : register(u0);
+ RWTexture2D<float2> motion      : register(u1);
+ RWTexture2D<float>  depth       : register(u2);
+@@ -18,6 +21,13 @@
+     uint width;
+     uint height;
+     uint resetHistory;
++    uint flowGrid;
++    uint flowWidth;
++    uint flowHeight;
++    uint hasCost;
++    uint hasBackward;
++    uint sourceWidth;
++    uint sourceHeight;
+ };
+@@ -127,6 +137,103 @@
+     }
+ }
+ 
++
++float2 LoadNvof(Texture2D<int2> tex, int2 cell)
++{
++    cell = clamp(cell, int2(0, 0), int2((int)flowWidth - 1, (int)flowHeight - 1));
++    return float2(tex.Load(int3(cell, 0))) * (1.0 / 32.0);
++}
++
++float CostConfidence(int2 cell)
++{
++    if (!hasCost) return 1.0;
++    cell = clamp(cell, int2(0, 0), int2((int)flowWidth - 1, (int)flowHeight - 1));
++    float c = (float)nvofCost.Load(int3(cell, 0)) * (1.0 / 255.0);
++    return 0.08 + 0.92 * saturate(1.0 - c);
++}
++
++float3 ColorAtCell(int2 cell)
++{
++    float2 src = float2(cell * (int)flowGrid) + float2((float)flowGrid * 0.5, (float)flowGrid * 0.5);
++    float2 outp = src * float2(width, height) / max(float2(1.0, 1.0), float2(sourceWidth, sourceHeight));
++    return current.Load(int3(ClampPixel(int2(outp)), 0)).rgb;
++}
++
++float2 EdgeAwareFlow(float2 pixel)
++{
++    float2 sourcePixel = (pixel + 0.5) * float2(sourceWidth, sourceHeight) / float2(width, height) - 0.5;
++    float2 g = (sourcePixel + 0.5) / max(1.0, (float)flowGrid) - 0.5;
++    int2 b = int2(floor(g));
++    float2 f = frac(g);
++    float3 centerColor = current.Load(int3(ClampPixel(int2(pixel)), 0)).rgb;
++    float2 sum = 0.0;
++    float wsum = 0.0;
++    [unroll] for (int y = 0; y < 2; ++y)
++    {
++        [unroll] for (int x = 0; x < 2; ++x)
++        {
++            int2 c = b + int2(x, y);
++            float spatial = (x ? f.x : 1.0 - f.x) * (y ? f.y : 1.0 - f.y);
++            float3 cc = ColorAtCell(c);
++            float colorDelta = abs(centerColor.r - cc.r) + abs(centerColor.g - cc.g) + abs(centerColor.b - cc.b);
++            float edge = rcp(1.0 + 14.0 * colorDelta);
++            float w = spatial * edge * CostConfidence(c);
++            sum += LoadNvof(nvofFlow, c) * w;
++            wsum += w;
++        }
++    }
++    if (wsum < 1e-5)
++        return LoadNvof(nvofFlow, int2(round(g)));
++    return sum / wsum;
++}
++
++float2 BilinearBackFlow(float2 sourcePixel)
++{
++    float2 g = (sourcePixel + 0.5) / max(1.0, (float)flowGrid) - 0.5;
++    int2 b = int2(floor(g));
++    float2 f = frac(g);
++    float2 a = lerp(LoadNvof(nvofBack, b + int2(0,0)), LoadNvof(nvofBack, b + int2(1,0)), f.x);
++    float2 c = lerp(LoadNvof(nvofBack, b + int2(0,1)), LoadNvof(nvofBack, b + int2(1,1)), f.x);
++    return lerp(a, c, f.y);
++}
++
++[numthreads(8, 8, 1)]
++void ResolveNvof(uint3 p : SV_DispatchThreadID)
++{
++    if (p.x >= width || p.y >= height) return;
++    float2 v = 0.0;
++    if (!resetHistory)
++    {
++        float2 sourceP = (float2(p.xy) + 0.5) * float2(sourceWidth, sourceHeight) / float2(width, height) - 0.5;
++        float2 sourceV = EdgeAwareFlow(float2(p.xy));
++        if (hasBackward)
++        {
++            float2 back = BilinearBackFlow(sourceP + sourceV);
++            float disagreement = length(sourceV + back);
++            float consistency = saturate((3.5 - disagreement) / 3.0);
++            sourceV *= consistency;
++        }
++        v = sourceV * float2(width, height) / float2(sourceWidth, sourceHeight);
++        float3 ca = current.Load(int3(p.xy, 0)).rgb;
++        float3 cb = previous.Load(int3(p.xy, 0)).rgb;
++        float same = abs(ca.r-cb.r) + abs(ca.g-cb.g) + abs(ca.b-cb.b);
++        if (same < 0.010) v = 0.0;
++        if (any(v != v) || any(abs(v) > 512.0)) v = 0.0;
++    }
++    motion[p.xy] = v;
++    depth[p.xy] = 0.5;
++}
++
+ // One thread estimates one 4x4 block. Compared with the old 8x8 field this
