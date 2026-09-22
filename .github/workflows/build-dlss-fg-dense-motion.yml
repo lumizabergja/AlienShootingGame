@@ -11,38 +11,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Reconstruct v2 source
+      - name: Reconstruct finished v4 source
         shell: pwsh
         run: |
-          $b64 = (Get-Content .payload/0.txt -Raw) + (Get-Content .payload/1.txt -Raw) + (Get-Content .payload/2.txt -Raw) + (Get-Content .payload/3.txt -Raw)
-          [IO.File]::WriteAllBytes("$env:GITHUB_WORKSPACE\dense-src.zip", [Convert]::FromBase64String($b64))
-          $hash = (Get-FileHash "$env:GITHUB_WORKSPACE\dense-src.zip" -Algorithm SHA256).Hash.ToLower()
-          if ($hash -ne "ab6664f8ec8b32e3a3b5a46e14f8b80e5a9e4380f3385e5a43a3ce966ab49473") { throw "Source payload hash mismatch: $hash" }
-          Expand-Archive "$env:GITHUB_WORKSPACE\dense-src.zip" "$env:GITHUB_WORKSPACE\dense-src" -Force
-
-      - name: Apply Ultra v3 base patch
-        shell: pwsh
-        run: |
-          cd "$env:GITHUB_WORKSPACE\dense-src"
-          git apply --check "$env:GITHUB_WORKSPACE\v3.patch"
-          git apply "$env:GITHUB_WORKSPACE\v3.patch"
-
-      - name: Apply Ultra v4 NVOFA patches
-        shell: pwsh
-        run: |
-          cd "$env:GITHUB_WORKSPACE\dense-src"
-          $patches = @(
-            "$env:GITHUB_WORKSPACE\v4patch\dlss_bridge.cpp.patch",
-            "$env:GITHUB_WORKSPACE\v4patch\dlss_bridge.h.patch",
-            "$env:GITHUB_WORKSPACE\v4patch\motion_shader.h.patch",
-            "$env:GITHUB_WORKSPACE\v4patch\main.cpp.patch"
-          )
-          foreach ($p in $patches) {
-            git apply --check $p
-            git apply $p
-          }
-          Copy-Item "$env:GITHUB_WORKSPACE\v4src\nvof_bridge.cpp" "$env:GITHUB_WORKSPACE\dense-src\source\nvof_bridge.cpp" -Force
-          Copy-Item "$env:GITHUB_WORKSPACE\v4src\nvof_bridge.h" "$env:GITHUB_WORKSPACE\dense-src\source\nvof_bridge.h" -Force
+          $parts = Get-ChildItem "$env:GITHUB_WORKSPACE\.v4payload\*.txt" | Sort-Object Name
+          if (-not $parts) { throw "v4 payload missing" }
+          $b64 = ""
+          foreach ($p in $parts) { $b64 += Get-Content $p.FullName -Raw }
+          [IO.File]::WriteAllBytes("$env:GITHUB_WORKSPACE\v4-source.zip", [Convert]::FromBase64String($b64))
+          $hash = (Get-FileHash "$env:GITHUB_WORKSPACE\v4-source.zip" -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne "2c5d05c4d0acd2d29474a2c558a2c644e0337dca3958f53793e3b0cbd713bee9") { throw "v4 source hash mismatch: $hash" }
+          Expand-Archive "$env:GITHUB_WORKSPACE\v4-source.zip" "$env:GITHUB_WORKSPACE\v4-source" -Force
 
       - name: Get Streamline 2.14.1 headers
         shell: pwsh
@@ -61,7 +40,7 @@ jobs:
       - name: Build x64 Release
         shell: cmd
         run: |
-          cd /d "%GITHUB_WORKSPACE%\dense-src\source"
+          cd /d "%GITHUB_WORKSPACE%\v4-source\source"
           rc /nologo /fo app.res app.rc
           cl /nologo /std:c++20 /O2 /EHsc /W4 /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0A00 /DWINVER=0x0A00 /I "%GITHUB_WORKSPACE%\Streamline\include" /I "%GITHUB_WORKSPACE%\OpticalFlow\NvOFInterface" main.cpp dlss_bridge.cpp nvof_bridge.cpp app.res /Fe:"%GITHUB_WORKSPACE%\LoLDX12Presenter-FG.exe" /link d3d12.lib d3d11.lib dxgi.lib d3dcompiler.lib dwmapi.lib comctl32.lib shell32.lib ole32.lib user32.lib gdi32.lib wintrust.lib crypt32.lib /SUBSYSTEM:WINDOWS
 
