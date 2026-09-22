@@ -1,0 +1,123 @@
+incomplete driver API; using compute fallback."); Shutdown(); return false;
++    }
++    st = api_->fn.nvCreateOpticalFlowD3D12(device, reinterpret_cast<NvOFHandle*>(&session_));
++    if (st != NV_OF_SUCCESS || !session_) { if (log_) log_(std::wstring(L"NVOFA unavailable: ") + NvofStatus(st)); Shutdown(); return false; }
++    auto h = static_cast<NvOFHandle>(session_);
++
++    uint32_t count = 0;
++    if (api_->fn.nvOFGetCaps(h, NV_OF_CAPS_SUPPORTED_OUTPUT_GRID_SIZES, nullptr, &count) != NV_OF_SUCCESS || !count) {
++        if (log_) log_(L"NVOFA unavailable: no flow grid reported."); Shutdown(); return false;
++    }
++    std::vector<uint32_t> grids(count);
++    api_->fn.nvOFGetCaps(h, NV_OF_CAPS_SUPPORTED_OUTPUT_GRID_SIZES, grids.data(), &count);
++    auto supports = [&](uint32_t g){ return std::find(grids.begin(), grids.end(), g) != grids.end(); };
++    // 1x1 at 1080p-class resolutions for maximum edge fidelity; 2x2 above that to
++    // protect frame time. Both are much denser than the v3 4x4 software field.
++    const uint64_t pixels = uint64_t(width) * uint64_t(height);
++    if (pixels <= uint64_t(1920) * 1080 && supports(1)) grid_ = 1;
++    else if (supports(2)) grid_ = 2;
++    else if (supports(1)) grid_ = 1;
++    else if (supports(4)) grid_ = 4;
++    else { if (log_) log_(L"NVOFA unavailable: unsupported flow grid."); Shutdown(); return false; }
++
++    uint32_t fmtCount = 0;
++    if (api_->fn.nvOFGetSurfaceFormatCountD3D12(h, NV_OF_BUFFER_USAGE_INPUT, NV_OF_MODE_OPTICALFLOW, &fmtCount) != NV_OF_SUCCESS || !fmtCount) {
++        Shutdown(); return false;
++    }
++    std::vector<DXGI_FORMAT> inputs(fmtCount);
++    api_->fn.nvOFGetSurfaceFormatD3D12(h, NV_OF_BUFFER_USAGE_INPUT, NV_OF_MODE_OPTICALFLOW, inputs.data());
++    if (std::find(inputs.begin(), inputs.end(), DXGI_FORMAT_B8G8R8A8_UNORM) == inputs.end()) {
++        if (log_) log_(L"NVOFA unavailable: BGRA8 input unsupported; using compute fallback."); Shutdown(); return false;
++    }
++
++    // The flow surface itself must use the driver's optical-flow vector format.
++    fmtCount = 0;
++    if (api_->fn.nvOFGetSurfaceFormatCountD3D12(h, NV_OF_BUFFER_USAGE_OUTPUT, NV_OF_MODE_OPTICALFLOW, &fmtCount) != NV_OF_SUCCESS || !fmtCount) {
++        Shutdown(); return false;
++    }
++    std::vector<DXGI_FORMAT> outputs(fmtCount);
++    api_->fn.nvOFGetSurfaceFormatD3D12(h, NV_OF_BUFFER_USAGE_OUTPUT, NV_OF_MODE_OPTICALFLOW, outputs.data());
++    if (std::find(outputs.begin(), outputs.end(), DXGI_FORMAT_R16G16_SINT) == outputs.end()) {
++        if (log_) log_(L"NVOFA unavailable: expected S10.5 flow surface format is unsupported."); Shutdown(); return false;
++    }
++
++    // Cost is optional; R8_UINT is the efficient documented form when offered.
++    fmtCount = 0;
++    if (api_->fn.nvOFGetSurfaceFormatCountD3D12(h, NV_OF_BUFFER_USAGE_COST, NV_OF_MODE_OPTICALFLOW, &fmtCount) == NV_OF_SUCCESS && fmtCount) {
++        std::vector<DXGI_FORMAT> costs(fmtCount);
++        api_->fn.nvOFGetSurfaceFormatD3D12(h, NV_OF_BUFFER_USAGE_COST, NV_OF_MODE_OPTICALFLOW, costs.data());
++        if (std::find(costs.begin(), costs.end(), DXGI_FORMAT_R8_UINT) != costs.end()) costFormat_ = DXGI_FORMAT_R8_UINT;
++    }
++
++    flowW_ = (width + grid_ - 1) / grid_; flowH_ = (height + grid_ - 1) / grid_;
++    input_[0] = MakeTexture(DXGI_FORMAT_B8G8R8A8_UNORM, width, height, L"NVOFA input 0");
++    input_[1] = MakeTexture(DXGI_FORMAT_B8G8R8A8_UNORM, width, height, L"NVOFA input 1");
++    flow_ = MakeTexture(DXGI_FORMAT_R16G16_SINT, flowW_, flowH_, L"NVOFA forward flow");
++    backward_ = MakeTexture(DXGI_FORMAT_R16G16_SINT, flowW_, flowH_, L"NVOFA backward flow");
++    if (costFormat_ != DXGI_FORMAT_UNKNOWN) { cost_ = MakeTexture(costFormat_, flowW_, flowH_, L"NVOFA cost"); backwardCost_ = MakeTexture(costFormat_, flowW_, flowH_, L"NVOFA backward cost"); }
++    if (!input_[0] || !input_[1] || !flow_) { Shutdown(); return false; }
++
++    if (FAILED(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&appFence_))) ||
++        FAILED(device_->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&ofaFence_))) ||
++        FAILED(device_->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator_))) ||
++        FAILED(device_->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator_.Get(), nullptr, IID_PPV_ARGS(&list_)))) {
++        Shutdown(); return false;
++    }
++    list_->Close();
++
++    NV_OF_INIT_PARAMS init{};
++    init.width = width; init.height = height;
++    init.outGridSize = static_cast<NV_OF_OUTPUT_VECTOR_GRID_SIZE>(grid_);
++    init.hintGridSize = NV_OF_HINT_VECTOR_GRID_SIZE_UNDEFINED;
++    init.mode = NV_OF_MODE_OPTICALFLOW;
++    init.perfLevel = NV_OF_PERF_LEVEL_FAST;
++    init.enableExternalHints = NV_OF_FALSE;
++    init.enableOutputCost = cost_ ? NV_OF_TRUE : NV_OF_FALSE;
++    init.hPrivData = nullptr; init.disparityRange = NV_OF_STEREO_DISPARITY_RANGE_UNDEFINED;
++    init.enableRoi = NV_OF_FALSE; init.predDirection = backward_ ? NV_OF_PRED_DIRECTION_BOTH : NV_OF_PRED_DIRECTION_FORWARD;
++    init.enableGlobalFlow = NV_OF_FALSE; init.inputBufferFormat = NV_OF_BUFFER_FORMAT_ABGR8;
++    st = api_->fn.nvOFInit(h, &init);
++    if (st != NV_OF_SUCCESS && backward_) {
++        // Some driver/GPU combinations refuse bidirectional mode. Retry forward-only
++        // with a fresh session rather than giving up hardware flow entirely.
++        api_->fn.nvOFDestroy(h); session_ = nullptr;
++        backward_.Reset(); backwardCost_.Reset();
++        st = api_->fn.nvCreateOpticalFlowD3D12(device, reinterpret_cast<NvOFHandle*>(&session_));
++        if (st == NV_OF_SUCCESS && session_) {
++            h = static_cast<NvOFHandle>(session_);
++            init.predDirection = NV_OF_PRED_DIRECTION_FORWARD;
++            st = api_->fn.nvOFInit(h, &init);
++        }
++    }
++    if (st != NV_OF_SUCCESS) { if (log_) log_(std::wstring(L"NVOFA init failed: ") + NvofStatus(st) + L"; using compute fallback."); Shutdown(); return false; }
++
++    if (!Register(input_[0].Get(), &inputHandle_[0]) || !Register(input_[1].Get(), &inputHandle_[1]) ||
++        !Register(flow_.Get(), &flowHandle_) || (cost_ && !Register(cost_.Get(), &costHandle_)) ||
++        (backward_ && !Register(backward_.Get(), &backwardHandle_)) || (backward_ && backwardCost_ && !Register(backwardCost_.Get(), &backwardCostHandle_))) {
++        if (log_) log_(L"NVOFA resource registration failed; using compute fallback."); Shutdown(); return false;
++    }
++
++    ready_ = true; current_ = 0; hasPrevious_ = false; flowValid_ = false; disableTemporalOnce_ = true;
++    if (log_) log_(L"NVOFA hardware motion enabled: " + std::to_wstring(grid_) + L"x" + std::to_wstring(grid_) +
++        L" grid, FAST preset, cost=" + (cost_ ? std::wstring(L"on") : std::wstring(L"off")) +
++        L", backward consistency=" + (backward_ ? std::wstring(L"on") : std::wstring(L"off")) + L".");
++    return true;
++}
++
++bool NvofBridge::SubmitFrame(ID3D12CommandQueue* queue, ID3D12Resource* source) {
++    if (!ready_ || !queue || !source) return false;
++    if (FAILED(allocator_->Reset()) || FAILED(list_->Reset(allocator_.Get(), nullptr))) return false;
++    D3D12_RESOURCE_BARRIER b{}; b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++    b.Transition.pResource = source; b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
++    b.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON; b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
++    list_->ResourceBarrier(1, &b);
++    list_->CopyResource(input_[current_].Get(), source);
++    std::swap(b.Transition.StateBefore, b.Transition.StateAfter); list_->ResourceBarrier(1, &b);
++    if (FAILED(list_->Close())) return false;
++    ID3D12CommandList* lists[] = {list_.Get()}; queue->ExecuteCommandLists(1, lists);
++    const uint64_t ready = ++appValue_;
++    if (FAILED(queue->Signal(appFence_.Get(), ready))) return false;
++
++    if (!hasPrevious_) { hasPrevious_ = true; flowValid_ = false; current_ ^= 1u; return false; }
++
++
