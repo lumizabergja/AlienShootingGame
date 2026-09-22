@@ -1,0 +1,31 @@
+source* source);
++    void BeginRead(ID3D12GraphicsCommandList* list);
++    void EndRead(ID3D12GraphicsCommandList* list);
++    void ResetHistory() { hasPrevious_ = false; flowValid_ = false; disableTemporalOnce_ = true; }
++
++private:
++    struct Api;
++    Api* api_{};
++    void* session_{};
++    HMODULE library_{};
++    Log log_;
++    Microsoft::WRL::ComPtr<ID3D12Device> device_;
++    Microsoft::WRL::ComPtr<ID3D12CommandAllocator> allocator_;
++    Microsoft::WRL::ComPtr<ID3D12GraphicsCommandList> list_;
++    Microsoft::WRL::ComPtr<ID3D12Fence> appFence_, ofaFence_;
++    uint64_t appValue_{}, ofaValue_{};
++    Microsoft::WRL::ComPtr<ID3D12Resource> input_[2], flow_, cost_, backward_, backwardCost_;
++    void* inputHandle_[2]{};
++    void* flowHandle_{};
++    void* costHandle_{};
++    void* backwardHandle_{};
++    void* backwardCostHandle_{};
++    UINT width_{}, height_{}, flowW_{}, flowH_{}, grid_{};
++    DXGI_FORMAT costFormat_{DXGI_FORMAT_UNKNOWN};
++    UINT current_{};
++    bool ready_{}, hasPrevious_{}, flowValid_{}, disableTemporalOnce_{true};
++
++    Microsoft::WRL::ComPtr<ID3D12Resource> MakeTexture(DXGI_FORMAT fmt, UINT w, UINT h, const wchar_t* name);
++    bool Register(ID3D12Resource* resource, void** handle);
++    void UnregisterAll();
++};
