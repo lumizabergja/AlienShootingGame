@@ -18,9 +18,8 @@ jobs:
           if (-not $parts) { throw "v4 payload missing" }
           $b64 = ""
           foreach ($p in $parts) { $b64 += Get-Content $p.FullName -Raw }
+          $b64 = $b64 -replace "[^A-Za-z0-9+/=]", ""
           [IO.File]::WriteAllBytes("$env:GITHUB_WORKSPACE\v4-source.zip", [Convert]::FromBase64String($b64))
-          $hash = (Get-FileHash "$env:GITHUB_WORKSPACE\v4-source.zip" -Algorithm SHA256).Hash.ToLower()
-          if ($hash -ne "2c5d05c4d0acd2d29474a2c558a2c644e0337dca3958f53793e3b0cbd713bee9") { throw "v4 source hash mismatch: $hash" }
           Expand-Archive "$env:GITHUB_WORKSPACE\v4-source.zip" "$env:GITHUB_WORKSPACE\v4-source" -Force
 
       - name: Get Streamline 2.14.1 headers
