@@ -1,0 +1,167 @@
+etHistory)
++    {
++        float2 sourceP = (float2(p.xy) + 0.5) * float2(sourceWidth, sourceHeight) / float2(width, height) - 0.5;
++        float2 sourceV = EdgeAwareFlow(float2(p.xy));
++
++        // Forward/backward round-trip disagreement is a strong occlusion / bad-vector
++        // signal. Fade rather than hard-cut to avoid shimmering at moving edges.
++        if (hasBackward)
++        {
++            float2 back = BilinearBackFlow(sourceP + sourceV);
++            float disagreement = length(sourceV + back);
++            float consistency = saturate((3.5 - disagreement) / 3.0);
++            sourceV *= consistency;
++        }
++        v = sourceV * float2(width, height) / float2(sourceWidth, sourceHeight);
++
++        // Stable overlays (crosshair, HUD text) should stay pinned. This is deliberately
++        // conservative: only almost-identical same-pixel content is forced to zero.
++        float3 ca = current.Load(int3(p.xy, 0)).rgb;
++        float3 cb = previous.Load(int3(p.xy, 0)).rgb;
++        float same = abs(ca.r-cb.r) + abs(ca.g-cb.g) + abs(ca.b-cb.b);
++        if (same < 0.010) v = 0.0;
++
++        // Reject impossible spikes that can otherwise create long FG streaks.
++        if (any(v != v) || any(abs(v) > 512.0)) v = 0.0;
++    }
++    motion[p.xy] = v;
++    depth[p.xy] = 0.5;
++}
++
+ // One thread estimates one 4x4 block. Compared with the old 8x8 field this
+ // supplies four times as many independently estimated vectors. Integer search
+ // reaches +/-31 px, followed by half-pixel refinement.
+@@ -136,38 +250,44 @@
+     if (!resetHistory)
+     {
+         float zeroCost = PatchError(center, int2(0, 0));
+-        float bestCost = zeroCost;
+ 
+-        SearchStep(center, 16, best, bestCost);
+-        SearchStep(center,  8, best, bestCost);
+-        SearchStep(center,  4, best, bestCost);
+-        SearchStep(center,  2, best, bestCost);
+-        SearchStep(center,  1, best, bestCost);
+-
+-        bestSubpixel = float2(best);
+-        float refinedCost = PatchErrorSubpixel(center, bestSubpixel);
+-        float2 base = bestSubpixel;
+-        [unroll] for (int sy = -1; sy <= 1; ++sy)
++        // A large part of HUD/static scenery is already a near-perfect match.
++        // Do not burn a full hierarchy on it and, more importantly, do not invent
++        // motion for stable UI such as a crosshair.
++        if (zeroCost > 0.0035)
+         {
+-            [unroll] for (int sx = -1; sx <= 1; ++sx)
++            float bestCost = zeroCost;
++            SearchStep(center, 16, best, bestCost);
++            SearchStep(center,  8, best, bestCost);
++            SearchStep(center,  4, best, bestCost);
++            SearchStep(center,  2, best, bestCost);
++            SearchStep(center,  1, best, bestCost);
++
++            bestSubpixel = float2(best);
++            float refinedCost = PatchErrorSubpixel(center, bestSubpixel);
++            float2 base = bestSubpixel;
++            [unroll] for (int sy = -1; sy <= 1; ++sy)
+             {
+-                float2 trial = base + float2((float)sx, (float)sy) * 0.5;
+-                float candidate = PatchErrorSubpixel(center, trial);
+-                if (candidate < refinedCost)
++                [unroll] for (int sx = -1; sx <= 1; ++sx)
+                 {
+-                    refinedCost = candidate;
+-                    bestSubpixel = trial;
++                    float2 trial = base + float2((float)sx, (float)sy) * 0.5;
++                    float candidate = PatchErrorSubpixel(center, trial);
++                    if (candidate < refinedCost)
++                    {
++                        refinedCost = candidate;
++                        bestSubpixel = trial;
++                    }
+                 }
+             }
+-        }
+ 
+-        float contrast = PatchContrast(center);
+-        float improvement = zeroCost - refinedCost;
++            float contrast = PatchContrast(center);
++            float improvement = zeroCost - refinedCost;
+ 
+-        // Conservative rejection is important for FG: an uncertain zero vector
+-        // usually looks better than a large false vector on flat/UI regions.
+-        if (refinedCost > 0.34 || improvement < 0.006 || (contrast < 0.018 && improvement < 0.020))
+-            bestSubpixel = float2(0.0, 0.0);
++            // Conservative rejection is important for FG: an uncertain zero vector
++            // usually looks better than a large false vector on flat/UI regions.
++            if (refinedCost > 0.30 || improvement < 0.005 || (contrast < 0.018 && improvement < 0.018))
++                bestSubpixel = float2(0.0, 0.0);
++        }
+     }
+ 
+     [unroll] for (uint y = 0; y < 4; ++y)
+diff -ruN a/source/nvof_bridge.cpp b/source/nvof_bridge.cpp
+--- a/source/nvof_bridge.cpp	1970-01-01 00:00:00.000000000 +0000
++++ b/source/nvof_bridge.cpp	2026-09-22 08:59:37.688138346 +0000
+@@ -0,0 +1,242 @@
++#include "nvof_bridge.h"
++#include "nvOpticalFlowCommon.h"
++#include "nvOpticalFlowD3D12.h"
++#include <algorithm>
++#include <vector>
++
++using Microsoft::WRL::ComPtr;
++
++struct NvofBridge::Api { NV_OF_D3D12_API_FUNCTION_LIST fn{}; };
++using PfnCreateInstanceD3D12 = NV_OF_STATUS (NVOFAPI*)(uint32_t, NV_OF_D3D12_API_FUNCTION_LIST*);
++
++static const wchar_t* NvofStatus(NV_OF_STATUS s) {
++    switch (s) {
++    case NV_OF_SUCCESS: return L"success";
++    case NV_OF_ERR_OF_NOT_AVAILABLE: return L"not available";
++    case NV_OF_ERR_UNSUPPORTED_DEVICE: return L"unsupported device";
++    case NV_OF_ERR_INVALID_PARAM: return L"invalid parameter";
++    case NV_OF_ERR_INVALID_VERSION: return L"invalid version";
++    case NV_OF_ERR_UNSUPPORTED_FEATURE: return L"unsupported feature";
++    default: return L"driver error";
++    }
++}
++
++NvofBridge::~NvofBridge() { Shutdown(); }
++
++ComPtr<ID3D12Resource> NvofBridge::MakeTexture(DXGI_FORMAT fmt, UINT w, UINT h, const wchar_t* name) {
++    D3D12_HEAP_PROPERTIES hp{}; hp.Type = D3D12_HEAP_TYPE_DEFAULT;
++    D3D12_RESOURCE_DESC d{}; d.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D; d.Width = w; d.Height = h;
++    d.DepthOrArraySize = 1; d.MipLevels = 1; d.Format = fmt; d.SampleDesc.Count = 1;
++    d.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN; d.Flags = D3D12_RESOURCE_FLAG_NONE;
++    ComPtr<ID3D12Resource> r;
++    if (FAILED(device_->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &d,
++        D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&r)))) return nullptr;
++    r->SetName(name); return r;
++}
++
++bool NvofBridge::Register(ID3D12Resource* resource, void** handle) {
++    NV_OF_REGISTER_RESOURCE_PARAMS_D3D12 p{};
++    p.resource = resource;
++    p.inputFencePoint.fence = appFence_.Get();
++    p.inputFencePoint.value = appValue_;
++    p.hOFGpuBuffer = reinterpret_cast<NvOFGPUBufferHandle*>(handle);
++    p.outputFencePoint.fence = ofaFence_.Get();
++    p.outputFencePoint.value = ++ofaValue_;
++    auto s = api_->fn.nvOFRegisterResourceD3D12(static_cast<NvOFHandle>(session_), &p);
++    return s == NV_OF_SUCCESS && *handle;
++}
++
++bool NvofBridge::Init(ID3D12Device* device, UINT width, UINT height, Log log) {
++    Shutdown();
++    log_ = std::move(log); device_ = device; width_ = width; height_ = height;
++    library_ = LoadLibraryExW(L"nvofapi64.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
++    if (!library_) { if (log_) log_(L"NVOFA unavailable: driver optical-flow module not found; using compute fallback."); return false; }
++    auto create = reinterpret_cast<PfnCreateInstanceD3D12>(GetProcAddress(library_, "NvOFAPICreateInstanceD3D12"));
++    if (!create) { if (log_) log_(L"NVOFA unavailable: D3D12 entry point missing; using compute fallback."); Shutdown(); return false; }
++    api_ = new Api();
++    auto st = create(NV_OF_API_VERSION, &api_->fn);
++    if (st != NV_OF_SUCCESS || !api_->fn.nvCreateOpticalFlowD3D12 || !api_->fn.nvOFInit ||
++        !api_->fn.nvOFExecuteD3D12 || !api_->fn.nvOFRegisterResourceD3D12 || !api_->fn.nvOFGetCaps ||
++        !api_->fn.nvOFGetSurfaceFormatCountD3D12 || !api_->fn.nvOFGetSurfaceFormatD3D12) {
++        if (log_) log_(L"NVOFA unavailable: 
