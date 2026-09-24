@@ -41,7 +41,7 @@ jobs:
           Invoke-WebRequest "https://github.com/NVIDIA/DLSS/releases/download/v310.9.1/ngx_dlss_demo_windows.zip" -OutFile "$pwd\dlss-sdk.zip"
           Expand-Archive "$pwd\dlss-sdk.zip" "$pwd\ext\dlss" -Force
           New-Item -ItemType Directory -Force -Path "$pwd\ext\nvof" | Out-Null
-          Invoke-WebRequest "https://raw.githubusercontent.com/NVIDIA/NVIDIAOpticalFlowSDK/master/nvOpticalFlowCommon.h" -OutFile "$pwd\ext\nvof\nvOpticalFlowCommon.h"
+          Invoke-WebRequest "https://raw.githubusercontent.com/SlimRG/NvidiaOF5/main/nvOpticalFlowCommon.h" -OutFile "$pwd\ext\nvof\nvOpticalFlowCommon.h"
           Invoke-WebRequest "https://raw.githubusercontent.com/SlimRG/NvidiaOF5/main/nvOpticalFlowD3D12.h" -OutFile "$pwd\ext\nvof\nvOpticalFlowD3D12.h"
           $sl = Get-ChildItem "$pwd\ext\streamline" -Recurse -File -Filter "sl.h" | Select-Object -First 1
           if (-not $sl) { throw "Streamline sl.h not found." }
