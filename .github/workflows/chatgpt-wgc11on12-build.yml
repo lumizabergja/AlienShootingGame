@@ -183,14 +183,12 @@ jobs:
           p=Path("source/main.cpp")
           s=p.read_text(encoding="utf-8-sig")
 
-          old='pool_=wgc::Direct3D11CaptureFramePool::CreateFreeThreaded(winrtDev_,wdx::DirectXPixelFormat::B8G8R8A8UIntNormalized,1,{(int)width_,(int)height_});'
-          if old not in s: raise SystemExit("framepool creation not found")
-          s=s.replace(old,'pool_=wgc::Direct3D11CaptureFramePool::CreateFreeThreaded(winrtDev_,wdx::DirectXPixelFormat::B8G8R8A8UIntNormalized,2,{(int)width_,(int)height_});',1)
-
+          s=s.replace('CreateFreeThreaded(winrtDev_,wdx::DirectXPixelFormat::B8G8R8A8UIntNormalized,1,{(int)width_,(int)height_})',
+                      'CreateFreeThreaded(winrtDev_,wdx::DirectXPixelFormat::B8G8R8A8UIntNormalized,2,{(int)width_,(int)height_})',1)
           s=s.replace('WGC CreateFreeThreaded on D3D11On12: 1 physical buffer, 0 software queue. Frames are copied GPU-only into a persistent D3D12 input and released immediately.',
                       'WGC CreateFreeThreaded on D3D11On12: 2 physical buffers, 0 software queue, newest-frame-only. GPU-only copy to persistent D3D12 input.',1)
 
-          pat=r'    wgc::Direct3D11CaptureFrame TakeFrame\(\)\{.*?^    \}\n    void CreatePersistentInput'
+          pat=r'    wgc::Direct3D11CaptureFrame TakeFrame\(\)\{.*?\n    \}'
           rep='''    wgc::Direct3D11CaptureFrame TakeFrame(){
               auto frame=pool_?pool_.TryGetNextFrame():nullptr;
               if(!frame) return nullptr;
@@ -204,43 +202,44 @@ jobs:
               auto cs=frame.ContentSize();
               if(cs.Width!=(int)width_||cs.Height!=(int)height_)sizeChanged_=true;
               return frame;
-          }
-          void CreatePersistentInput'''
+          }'''
           rep='\n'.join(line[10:] if line.startswith('          ') else line for line in rep.splitlines())
-          s,n=re.subn(pat,rep,s,count=1,flags=re.S|re.M)
-          if n!=1: raise SystemExit("TakeFrame regex not found")
+          s,n=re.subn(pat,rep,s,count=1,flags=re.S)
+          if n!=1: raise SystemExit("TakeFrame replacement failed")
 
           s=s.replace('Capture bridge: one persistent D3D12 BGRA8 input, GPU-only D3D11On12 copy, WGC frame released immediately.',
                       'Capture bridge: one persistent D3D12 BGRA8 input; WGC2 feeds it newest-only with no software queue.',1)
 
-          old='    gDLSS.BeforeFrame(d.queue.Get());\n\n    gDLSS.Marker(sl::PCLMarker::eSimulationStart);'
-          if old not in s: raise SystemExit("RenderOne BeforeFrame location not found")
-          s=s.replace(old,'    gDLSS.Marker(sl::PCLMarker::eSimulationStart);',1)
+          # Remove the one existing per-frame FG input wait from RenderOne. We move it
+          # before the D3D11On12 capture copy so input reuse is ordered correctly.
+          render_start=s.find('bool App::RenderOne(')
+          render_end=s.find('void App::DestroyDx12',render_start)
+          if render_start<0 or render_end<0: raise SystemExit("RenderOne boundaries not found")
+          block=s[render_start:render_end]
+          if 'gDLSS.BeforeFrame(d.queue.Get());' not in block: raise SystemExit("RenderOne BeforeFrame call not found")
+          block=block.replace('    gDLSS.BeforeFrame(d.queue.Get());\n','',1)
+          s=s[:render_start]+block+s[render_end:]
 
           s=s.replace('RUNNING: WGC1 / 1 buffer / immediate GPU copy / frame released before DLSS / queue 0',
                       'RUNNING: WGC2 / 2 physical buffers / 0 software queue / newest-only / GPU-side FG input wait',1)
           s=s.replace('Game window size changed. Stop and Start again so the one-buffer frame pool can be recreated exactly.',
                       'Game window size changed. Stop and Start again so the capture pool can be recreated exactly.',1)
 
-          old='''            // Lowest-latency policy: NEVER wait on the CPU with a captured frame in hand.
-              // If the prior real frame is still on the GPU, discard this capture immediately and wait for a fresher one.
-              if(d.frameValue&&d.frameFence->GetCompletedValue()<d.frameValue){frame.Close();cap.NoteDrop();continue;}
-
-              cap.CopyFrameToPersistent(frame); // frame returned to the 1-buffer pool immediately after GPU copy submission
-          '''
-          old='\n'.join(line[10:] if line.startswith('          ') else line for line in old.splitlines())+'\n'
-          new='''            // Queue the DLSS-G input-consumption dependency on the GPU before overwriting
-              // the persistent input. The CPU never waits and there is no software frame queue.
+          gate_start=s.find('            // Lowest-latency policy: NEVER wait on the CPU with a captured frame in hand.')
+          if gate_start<0: raise SystemExit("CPU drop gate start not found")
+          copy_line=s.find('            cap.CopyFrameToPersistent(frame);',gate_start)
+          if copy_line<0: raise SystemExit("capture copy line not found")
+          copy_end=s.find('\n',copy_line)
+          replacement='''            // Queue the previous DLSS-G input-consumption dependency on the GPU before
+              // overwriting the persistent input. CPU remains non-blocking; software queue remains zero.
               gDLSS.BeforeFrame(d.queue.Get());
               cap.CopyFrameToPersistent(frame);
           '''
-          new='\n'.join(line[10:] if line.startswith('          ') else line for line in new.splitlines())+'\n'
-          if old not in s: raise SystemExit("old CPU drop gate not found")
-          s=s.replace(old,new,1)
+          replacement='\n'.join(line[10:] if line.startswith('          ') else line for line in replacement.splitlines())+'\n'
+          s=s[:gate_start]+replacement+s[copy_end+1:]
 
           s=s.replace('WGC released before DLSS | persistent D3D12 input | %s',
                       'WGC2 newest-only | GPU-side reuse wait | persistent D3D12 input | %s',1)
-
           p.write_text(s,encoding="utf-8")
       - name: Fetch current NVIDIA headers
         shell: powershell
