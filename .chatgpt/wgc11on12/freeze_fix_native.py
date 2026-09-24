@@ -38,13 +38,8 @@ new='''        if(frameEvent_){SetEvent(frameEvent_);CloseHandle(frameEvent_);fr
 '''
 s=s.replace(old,new,1)
 
-old='''        on12_->ReleaseWrappedResources(wrapped,1);
-        ctx_->Flush();
-        src11.Reset();
-        frame.Close();frame=nullptr;
-'''
-if old not in s: raise SystemExit("WGC copy release block not found")
-new='''        on12_->ReleaseWrappedResources(wrapped,1);
+pat=r'on12_->ReleaseWrappedResources\\(wrapped,1\\);\\s*ctx_->Flush\\(\\);\\s*src11\\.Reset\\(\\);\\s*frame\\.Close\\(\\);frame=nullptr;'
+new='''on12_->ReleaseWrappedResources(wrapped,1);
         ctx_->Flush();
         const uint64_t value=++copyValue_;
         HR(d12Queue_->Signal(copyFence_.Get(),value),"Signal WGC copy completion");
@@ -54,9 +49,9 @@ new='''        on12_->ReleaseWrappedResources(wrapped,1);
             if(wr!=WAIT_OBJECT_0) throw std::runtime_error("WGC GPU copy did not complete within 500 ms.");
         }
         src11.Reset();
-        frame.Close();frame=nullptr;
-'''
-s=s.replace(old,new,1)
+        frame.Close();frame=nullptr;'''
+s,n=re.subn(pat,new,s,count=1,flags=re.S)
+if n!=1: raise SystemExit("WGC copy release block not found")
 
 old='    ComPtr<ID3D12Resource> input12_;ComPtr<ID3D11Resource> input11_;\n    HANDLE frameEvent_{};\n'
 if old not in s: raise SystemExit("WGC member insertion point not found")
