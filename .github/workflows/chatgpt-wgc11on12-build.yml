@@ -3,7 +3,7 @@ name: ChatGPT WGC D3D11On12 Zero Copy Build
 on:
   push:
     branches:
-      - chatgpt-wgc1-hostpaced-freezefix
+      - chatgpt-wgc1-capture-triggered-reflex
   workflow_dispatch:
 
 jobs:
@@ -188,6 +188,13 @@ jobs:
           $ErrorActionPreference = "Stop"
           python "$pwd\.chatgpt\wgc11on12\host_paced_swapchain.py"
           if ($LASTEXITCODE -ne 0) { throw "host-paced swapchain transform failed" }
+
+      - name: Apply capture-triggered Reflex pacing
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          python "$pwd\.chatgpt\wgc11on12\capture_triggered_reflex.py"
+          if ($LASTEXITCODE -ne 0) { throw "capture-triggered Reflex transform failed" }
 
       - name: Fetch current NVIDIA headers
         shell: powershell
