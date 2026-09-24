@@ -210,36 +210,29 @@ jobs:
           s=s.replace('Capture bridge: one persistent D3D12 BGRA8 input, GPU-only D3D11On12 copy, WGC frame released immediately.',
                       'Capture bridge: one persistent D3D12 BGRA8 input; WGC2 feeds it newest-only with no software queue.',1)
 
-          # Remove the one existing per-frame FG input wait from RenderOne. We move it
-          # before the D3D11On12 capture copy so input reuse is ordered correctly.
-          render_start=s.find('bool App::RenderOne(')
-          render_end=s.find('void App::DestroyDx12',render_start)
-          if render_start<0 or render_end<0: raise SystemExit("RenderOne boundaries not found")
-          block=s[render_start:render_end]
-          if 'gDLSS.BeforeFrame(d.queue.Get());' not in block: raise SystemExit("RenderOne BeforeFrame call not found")
-          block=block.replace('    gDLSS.BeforeFrame(d.queue.Get());\n','',1)
-          s=s[:render_start]+block+s[render_end:]
+          # Move the FG input-consumption wait out of RenderOne and ahead of capture input overwrite.
+          rs=s.find('bool App::RenderOne('); re_=s.find('void App::DestroyDx12',rs)
+          if rs<0 or re_<0: raise SystemExit("RenderOne boundaries not found")
+          block=s[rs:re_]
+          block,n=re.subn(r'\s*gDLSS\.BeforeFrame\(d\.queue\.Get\(\)\);\s*','\n    ',block,count=1)
+          if n!=1: raise SystemExit("RenderOne BeforeFrame removal failed")
+          s=s[:rs]+block+s[re_:]
+
+          # Remove the CPU-side prior-frame drop gate.
+          s,n=re.subn(r'\s*// Lowest-latency policy: NEVER wait on the CPU with a captured frame in hand\.\s*// If the prior real frame is still on the GPU, discard this capture immediately and wait for a fresher one\.\s*if\(d\.frameValue&&d\.frameFence->GetCompletedValue\(\)<d\.frameValue\)\{frame\.Close\(\);cap\.NoteDrop\(\);continue;\}\s*','\n',s,count=1)
+          if n!=1: raise SystemExit("CPU drop gate removal failed")
+
+          if 'cap.CopyFrameToPersistent(frame)' not in s: raise SystemExit("capture copy call missing")
+          s=s.replace('cap.CopyFrameToPersistent(frame)',
+                      'gDLSS.BeforeFrame(d.queue.Get());\n            cap.CopyFrameToPersistent(frame)',1)
 
           s=s.replace('RUNNING: WGC1 / 1 buffer / immediate GPU copy / frame released before DLSS / queue 0',
                       'RUNNING: WGC2 / 2 physical buffers / 0 software queue / newest-only / GPU-side FG input wait',1)
           s=s.replace('Game window size changed. Stop and Start again so the one-buffer frame pool can be recreated exactly.',
                       'Game window size changed. Stop and Start again so the capture pool can be recreated exactly.',1)
-
-          gate_start=s.find('            // Lowest-latency policy: NEVER wait on the CPU with a captured frame in hand.')
-          if gate_start<0: raise SystemExit("CPU drop gate start not found")
-          copy_line=s.find('            cap.CopyFrameToPersistent(frame);',gate_start)
-          if copy_line<0: raise SystemExit("capture copy line not found")
-          copy_end=s.find('\n',copy_line)
-          replacement='''            // Queue the previous DLSS-G input-consumption dependency on the GPU before
-              // overwriting the persistent input. CPU remains non-blocking; software queue remains zero.
-              gDLSS.BeforeFrame(d.queue.Get());
-              cap.CopyFrameToPersistent(frame);
-          '''
-          replacement='\n'.join(line[10:] if line.startswith('          ') else line for line in replacement.splitlines())+'\n'
-          s=s[:gate_start]+replacement+s[copy_end+1:]
-
           s=s.replace('WGC released before DLSS | persistent D3D12 input | %s',
                       'WGC2 newest-only | GPU-side reuse wait | persistent D3D12 input | %s',1)
+
           p.write_text(s,encoding="utf-8")
       - name: Fetch current NVIDIA headers
         shell: powershell
