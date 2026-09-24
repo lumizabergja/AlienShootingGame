@@ -3,7 +3,7 @@ name: ChatGPT WGC D3D11On12 Zero Copy Build
 on:
   push:
     branches:
-      - chatgpt-wgc11on12-zero-copy
+      - chatgpt-wgc1-persistent-copy
   workflow_dispatch:
 
 jobs:
@@ -33,6 +33,13 @@ jobs:
           @("nvof_bridge.cpp","nvof_bridge.h","motion_shader.h","app.manifest","app.rc") | ForEach-Object {
             Copy-Item "$pwd\baseline\$_" "$pwd\source\$_" -Force
           }
+
+      - name: Apply one-buffer release-before-DLSS fix
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          git apply "$pwd\.chatgpt\wgc11on12\capture-copy-fix.patch"
+          if ($LASTEXITCODE -ne 0) { throw "capture copy fix patch failed" }
 
       - name: Fetch current NVIDIA headers
         shell: powershell
