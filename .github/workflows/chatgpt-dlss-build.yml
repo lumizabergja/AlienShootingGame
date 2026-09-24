@@ -72,32 +72,32 @@ jobs:
           @("sl.interposer.dll","sl.common.dll","sl.pcl.dll","sl.reflex.dll","sl.dlss.dll","sl.dlss_g.dll","nvngx_dlss.dll","nvngx_dlssg.dll") | ForEach-Object { Copy-RequiredRuntime $_ }
           New-Item -ItemType Directory -Force -Path "$pkg\source" | Out-Null
           Copy-Item "$pwd\source\*" "$pkg\source" -Force
-          @"
-DLSS Ultra Performance Transformer - Clean Build
-=================================================
-
-HOW TO USE
-1. Keep the game in WINDOWED mode.
-2. Start DLSS-Presenter.exe and select the game window.
-3. Choose 2x, 3x, or 4x Frame Generation and press Start.
-4. Output is always BORDERLESS FULLSCREEN. There is no title bar/tab.
-5. F8 = pause/resume. F10 = stop.
-
-DLSS SR
-- Mode: Ultra Performance
-- Transformer preset: L
-- Streamline: 2.14.1
-- DLSS runtime: 310.9.1
-- Input: captured game client image
-- Output: monitor fullscreen resolution
-
-For 1920x1080, Ultra Performance's ideal input is approximately 640x360.
-The app logs the exact recommended input reported by the current DLSS runtime.
-
-This external-capture integration uses optical-flow/synthetic-depth data rather than
-the game's native engine depth/motion vectors, so image quality can differ from a
-native in-engine DLSS integration.
-"@ | Set-Content "$pkg\START-HERE.txt" -Encoding UTF8
+          $readme = @(
+            "DLSS Ultra Performance Transformer - Clean Build",
+            "=================================================",
+            "",
+            "HOW TO USE",
+            "1. Keep the game in WINDOWED mode.",
+            "2. Start DLSS-Presenter.exe and select the game window.",
+            "3. Choose 2x, 3x, or 4x Frame Generation and press Start.",
+            "4. Output is always BORDERLESS FULLSCREEN. There is no title bar/tab.",
+            "5. F8 = pause/resume. F10 = stop.",
+            "",
+            "DLSS SR",
+            "- Mode: Ultra Performance",
+            "- Transformer preset: L",
+            "- Streamline: 2.14.1",
+            "- DLSS runtime: 310.9.1",
+            "- Input: captured game client image",
+            "- Output: monitor fullscreen resolution",
+            "",
+            "For 1920x1080, Ultra Performance's ideal input is approximately 640x360.",
+            "The app logs the exact recommended input reported by the current DLSS runtime.",
+            "",
+            "This external-capture integration uses optical-flow/synthetic-depth data rather than",
+            "the game's native engine depth/motion vectors, so quality can differ from native DLSS."
+          )
+          $readme | Set-Content "$pkg\START-HERE.txt" -Encoding UTF8
           $slLicense = Get-ChildItem "$pwd\ext\streamline" -Recurse -File | Where-Object { $_.Name -ieq "license.txt" } | Select-Object -First 1
           if ($slLicense) { Copy-Item $slLicense.FullName "$pkg\LICENSE_Streamline.txt" -Force }
           $dlssLicense = Get-ChildItem "$pwd\ext\dlss" -Recurse -File | Where-Object { $_.Name -match "license" } | Select-Object -First 1
