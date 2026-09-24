@@ -19,7 +19,9 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
-          Copy-Item "$pwd\.chatgpt\wgc1\source.zip" "$pwd\source.zip" -Force
+          $parts = Get-ChildItem "$pwd\.chatgpt\wgc1\part*.txt" | Sort-Object Name
+          $b64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ""
+          [IO.File]::WriteAllBytes("$pwd\source.zip", [Convert]::FromBase64String($b64))
           Expand-Archive "$pwd\source.zip" "$pwd\source" -Force
       - name: Fetch current NVIDIA headers
         shell: powershell
