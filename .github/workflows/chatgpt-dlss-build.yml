@@ -1,0 +1,113 @@
+name: ChatGPT DLSS Ultra Performance Clean Build
+
+on:
+  push:
+    branches:
+      - chatgpt-dlss-ultraperf-clean
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout staging branch
+        uses: actions/checkout@v4
+
+      - name: Enable MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Decode clean presenter source
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $parts = Get-ChildItem ".chatgpt/dlss-src/part*.txt" | Sort-Object Name
+          if ($parts.Count -ne 5) { throw "Expected 5 source chunks, found $($parts.Count)." }
+          $b64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ""
+          [IO.File]::WriteAllBytes("$pwd\dlss_clean_src.zip", [Convert]::FromBase64String($b64))
+          if (Test-Path source) { Remove-Item source -Recurse -Force }
+          Expand-Archive "$pwd\dlss_clean_src.zip" "$pwd\source" -Force
+
+      - name: Fetch current NVIDIA SDKs
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path ext | Out-Null
+          Invoke-WebRequest "https://github.com/NVIDIA-RTX/Streamline/releases/download/v2.14.1/streamline-sdk-v2.14.1.zip" -OutFile "$pwd\streamline-sdk.zip"
+          Expand-Archive "$pwd\streamline-sdk.zip" "$pwd\ext\streamline" -Force
+          Invoke-WebRequest "https://github.com/NVIDIA/DLSS/releases/download/v310.9.1/ngx_dlss_demo_windows.zip" -OutFile "$pwd\dlss-sdk.zip"
+          Expand-Archive "$pwd\dlss-sdk.zip" "$pwd\ext\dlss" -Force
+          New-Item -ItemType Directory -Force -Path "$pwd\ext\nvof" | Out-Null
+          Invoke-WebRequest "https://raw.githubusercontent.com/NVIDIA/NVIDIAOpticalFlowSDK/master/nvOpticalFlowCommon.h" -OutFile "$pwd\ext\nvof\nvOpticalFlowCommon.h"
+          Invoke-WebRequest "https://raw.githubusercontent.com/SlimRG/NvidiaOF5/main/nvOpticalFlowD3D12.h" -OutFile "$pwd\ext\nvof\nvOpticalFlowD3D12.h"
+          $sl = Get-ChildItem "$pwd\ext\streamline" -Recurse -File -Filter "sl.h" | Select-Object -First 1
+          if (-not $sl) { throw "Streamline sl.h not found." }
+          "SL_INC=$($sl.Directory.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Compile x64 Release
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path "$pwd\build" | Out-Null
+          rc /nologo /fo "$pwd\build\app.res" "$pwd\source\app.rc"
+          if ($LASTEXITCODE -ne 0) { throw "rc.exe failed with $LASTEXITCODE" }
+          cl /nologo /std:c++20 /O2 /EHsc /utf-8 /permissive- /W3 /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0A00 /I "$env:SL_INC" /I "$pwd\ext\nvof" "$pwd\source\main.cpp" "$pwd\source\dlss_bridge.cpp" "$pwd\source\nvof_bridge.cpp" "$pwd\build\app.res" /Fe:"$pwd\build\DLSS-Presenter.exe" /link d3d11.lib d3d12.lib dxgi.lib d3dcompiler.lib user32.lib gdi32.lib comctl32.lib dwmapi.lib wintrust.lib crypt32.lib ole32.lib shell32.lib
+          if ($LASTEXITCODE -ne 0) { throw "cl.exe failed with $LASTEXITCODE" }
+
+      - name: Assemble ready-to-run package
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $pkg = "$pwd\package"
+          New-Item -ItemType Directory -Force -Path $pkg | Out-Null
+          Copy-Item "$pwd\build\DLSS-Presenter.exe" $pkg
+          function Copy-RequiredRuntime([string]$Name) {
+            $candidate = Get-ChildItem "$pwd\ext" -Recurse -File -Filter $Name | Sort-Object @{Expression={ if ($_.FullName -match "\\development\\|\\debug\\") { 1 } else { 0 } }}, FullName | Select-Object -First 1
+            if (-not $candidate) { throw "Required runtime not found: $Name" }
+            Copy-Item $candidate.FullName (Join-Path $pkg $Name) -Force
+          }
+          @("sl.interposer.dll","sl.common.dll","sl.pcl.dll","sl.reflex.dll","sl.dlss.dll","sl.dlss_g.dll","nvngx_dlss.dll","nvngx_dlssg.dll") | ForEach-Object { Copy-RequiredRuntime $_ }
+          New-Item -ItemType Directory -Force -Path "$pkg\source" | Out-Null
+          Copy-Item "$pwd\source\*" "$pkg\source" -Force
+          @"
+DLSS Ultra Performance Transformer - Clean Build
+=================================================
+
+HOW TO USE
+1. Keep the game in WINDOWED mode.
+2. Start DLSS-Presenter.exe and select the game window.
+3. Choose 2x, 3x, or 4x Frame Generation and press Start.
+4. Output is always BORDERLESS FULLSCREEN. There is no title bar/tab.
+5. F8 = pause/resume. F10 = stop.
+
+DLSS SR
+- Mode: Ultra Performance
+- Transformer preset: L
+- Streamline: 2.14.1
+- DLSS runtime: 310.9.1
+- Input: captured game client image
+- Output: monitor fullscreen resolution
+
+For 1920x1080, Ultra Performance's ideal input is approximately 640x360.
+The app logs the exact recommended input reported by the current DLSS runtime.
+
+This external-capture integration uses optical-flow/synthetic-depth data rather than
+the game's native engine depth/motion vectors, so image quality can differ from a
+native in-engine DLSS integration.
+"@ | Set-Content "$pkg\START-HERE.txt" -Encoding UTF8
+          $slLicense = Get-ChildItem "$pwd\ext\streamline" -Recurse -File | Where-Object { $_.Name -ieq "license.txt" } | Select-Object -First 1
+          if ($slLicense) { Copy-Item $slLicense.FullName "$pkg\LICENSE_Streamline.txt" -Force }
+          $dlssLicense = Get-ChildItem "$pwd\ext\dlss" -Recurse -File | Where-Object { $_.Name -match "license" } | Select-Object -First 1
+          if ($dlssLicense) { Copy-Item $dlssLicense.FullName "$pkg\LICENSE_DLSS.txt" -Force }
+          Compress-Archive "$pkg\*" "$pwd\DLSS-UltraPerf-Transformer-Fullscreen-Clean.zip" -CompressionLevel Optimal -Force
+          Get-FileHash "$pwd\DLSS-UltraPerf-Transformer-Fullscreen-Clean.zip" -Algorithm SHA256
+
+      - name: Upload ready-to-run ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: DLSS-UltraPerf-Transformer-Fullscreen-Clean
+          path: DLSS-UltraPerf-Transformer-Fullscreen-Clean.zip
+          if-no-files-found: error
