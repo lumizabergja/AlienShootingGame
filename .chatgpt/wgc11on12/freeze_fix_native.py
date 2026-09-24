@@ -38,20 +38,27 @@ new='''        if(frameEvent_){SetEvent(frameEvent_);CloseHandle(frameEvent_);fr
 '''
 s=s.replace(old,new,1)
 
-pat=r'on12_->ReleaseWrappedResources\\(wrapped,1\\);\\s*ctx_->Flush\\(\\);\\s*src11\\.Reset\\(\\);\\s*frame\\.Close\\(\\);frame=nullptr;'
-new='''on12_->ReleaseWrappedResources(wrapped,1);
-        ctx_->Flush();
-        const uint64_t value=++copyValue_;
-        HR(d12Queue_->Signal(copyFence_.Get(),value),"Signal WGC copy completion");
-        if(copyFence_->GetCompletedValue()<value){
-            HR(copyFence_->SetEventOnCompletion(value,copyEvent_),"Arm WGC copy completion event");
-            DWORD wr=WaitForSingleObject(copyEvent_,500);
-            if(wr!=WAIT_OBJECT_0) throw std::runtime_error("WGC GPU copy did not complete within 500 ms.");
-        }
-        src11.Reset();
-        frame.Close();frame=nullptr;'''
-s,n=re.subn(pat,new,s,count=1,flags=re.S)
-if n!=1: raise SystemExit("WGC copy release block not found")
+a=s.find("on12_->ReleaseWrappedResources(wrapped,1);")
+if a<0: raise SystemExit("WGC ReleaseWrappedResources call not found")
+line_start=s.rfind("\n",0,a)+1
+b=s.find("frame.Close();frame=nullptr;",a)
+if b<0: raise SystemExit("WGC frame close after copy not found")
+line_end=s.find("\n",b)
+if line_end<0: line_end=len(s)
+else: line_end+=1
+indent=s[line_start:a]
+new=(indent+'on12_->ReleaseWrappedResources(wrapped,1);\n'
+     +indent+'ctx_->Flush();\n'
+     +indent+'const uint64_t value=++copyValue_;\n'
+     +indent+'HR(d12Queue_->Signal(copyFence_.Get(),value),"Signal WGC copy completion");\n'
+     +indent+'if(copyFence_->GetCompletedValue()<value){\n'
+     +indent+'    HR(copyFence_->SetEventOnCompletion(value,copyEvent_),"Arm WGC copy completion event");\n'
+     +indent+'    DWORD wr=WaitForSingleObject(copyEvent_,500);\n'
+     +indent+'    if(wr!=WAIT_OBJECT_0) throw std::runtime_error("WGC GPU copy did not complete within 500 ms.");\n'
+     +indent+'}\n'
+     +indent+'src11.Reset();\n'
+     +indent+'frame.Close();frame=nullptr;\n')
+s=s[:line_start]+new+s[line_end:]
 
 old='    ComPtr<ID3D12Resource> input12_;ComPtr<ID3D11Resource> input11_;\n    HANDLE frameEvent_{};\n'
 if old not in s: raise SystemExit("WGC member insertion point not found")
