@@ -1,9 +1,9 @@
-name: ChatGPT DXGI Single-Monitor DDA Exclusion Build
+name: ChatGPT DXGI DWM-Composed Presenter Build
 
 on:
   push:
     branches:
-      - chatgpt-dxgi-dda-exclude-presenter
+      - chatgpt-dxgi-composed-presenter
   workflow_dispatch:
 
 jobs:
@@ -203,6 +203,13 @@ jobs:
           python "$pwd\.chatgpt\dxgi\apply_dda_presenter_exclusion.py"
           if ($LASTEXITCODE -ne 0) { throw "DDA presenter exclusion transform failed" }
 
+      - name: Force DWM-composed single-monitor presenter
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          python "$pwd\.chatgpt\dxgi\apply_composed_presenter.py"
+          if ($LASTEXITCODE -ne 0) { throw "composed presenter transform failed" }
+
       - name: Fetch current NVIDIA headers
         shell: powershell
         run: |
@@ -219,11 +226,11 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$pwd\build" | Out-Null
           rc /nologo /fo "$pwd\build\app.res" "$pwd\source\app.rc"
           if ($LASTEXITCODE -ne 0) { throw "rc failed" }
-          cl /nologo /std:c++20 /O2 /EHsc /utf-8 /permissive- /W3 /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0A00 /I "$pwd\ext\streamline\include" /I "$pwd\ext\nvof" "$pwd\source\main.cpp" "$pwd\source\dlss_bridge.cpp" "$pwd\source\nvof_bridge.cpp" "$pwd\build\app.res" /Fe:"$pwd\build\DLSS-DXGI-DDAExcludedPresenter.exe" /link d3d11.lib d3d12.lib dxgi.lib d3dcompiler.lib user32.lib gdi32.lib comctl32.lib wintrust.lib crypt32.lib ole32.lib shell32.lib windowsapp.lib runtimeobject.lib avrt.lib
+          cl /nologo /std:c++20 /O2 /EHsc /utf-8 /permissive- /W3 /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0A00 /I "$pwd\ext\streamline\include" /I "$pwd\ext\nvof" "$pwd\source\main.cpp" "$pwd\source\dlss_bridge.cpp" "$pwd\source\nvof_bridge.cpp" "$pwd\build\app.res" /Fe:"$pwd\build\DLSS-DXGI-ComposedPresenter.exe" /link d3d11.lib d3d12.lib dxgi.lib d3dcompiler.lib user32.lib gdi32.lib comctl32.lib wintrust.lib crypt32.lib ole32.lib shell32.lib windowsapp.lib runtimeobject.lib avrt.lib
           if ($LASTEXITCODE -ne 0) { throw "compile failed" }
 
       - uses: actions/upload-artifact@v4
         with:
-          name: DLSS-DXGI-DDAExcludedPresenter-build
-          path: build/DLSS-DXGI-DDAExcludedPresenter.exe
+          name: DLSS-DXGI-ComposedPresenter-build
+          path: build/DLSS-DXGI-ComposedPresenter.exe
           if-no-files-found: error
