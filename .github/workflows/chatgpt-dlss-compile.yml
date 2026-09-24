@@ -27,7 +27,7 @@ jobs:
         run: |
           git clone --depth 1 --branch v2.14.1 https://github.com/NVIDIA-RTX/Streamline.git "$pwd\ext\streamline"
           New-Item -ItemType Directory -Force -Path "$pwd\ext\nvof" | Out-Null
-          Invoke-WebRequest "https://raw.githubusercontent.com/NVIDIA/NVIDIAOpticalFlowSDK/master/nvOpticalFlowCommon.h" -OutFile "$pwd\ext\nvof\nvOpticalFlowCommon.h"
+          Invoke-WebRequest "https://raw.githubusercontent.com/SlimRG/NvidiaOF5/main/nvOpticalFlowCommon.h" -OutFile "$pwd\ext\nvof\nvOpticalFlowCommon.h"
           Invoke-WebRequest "https://raw.githubusercontent.com/SlimRG/NvidiaOF5/main/nvOpticalFlowD3D12.h" -OutFile "$pwd\ext\nvof\nvOpticalFlowD3D12.h"
       - name: Compile
         shell: powershell
