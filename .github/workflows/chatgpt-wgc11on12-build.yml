@@ -1,0 +1,52 @@
+name: ChatGPT WGC D3D11On12 Zero Copy Build
+
+on:
+  push:
+    branches:
+      - chatgpt-wgc11on12-zero-copy
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Decode source
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $parts = Get-ChildItem "$pwd\.chatgpt\wgc11on12\part*.txt" | Sort-Object Name
+          if ($parts.Count -ne 5) { throw "Expected 5 source chunks, found $($parts.Count)" }
+          $b64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ""
+          [IO.File]::WriteAllBytes("$pwd\source.zip", [Convert]::FromBase64String($b64))
+          Expand-Archive "$pwd\source.zip" "$pwd\source" -Force
+
+      - name: Fetch current NVIDIA headers
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          git clone --depth 1 --branch v2.14.1 https://github.com/NVIDIA-RTX/Streamline.git "$pwd\ext\streamline"
+          New-Item -ItemType Directory -Force -Path "$pwd\ext\nvof" | Out-Null
+          Invoke-WebRequest "https://raw.githubusercontent.com/SlimRG/NvidiaOF5/main/nvOpticalFlowCommon.h" -OutFile "$pwd\ext\nvof\nvOpticalFlowCommon.h"
+          Invoke-WebRequest "https://raw.githubusercontent.com/SlimRG/NvidiaOF5/main/nvOpticalFlowD3D12.h" -OutFile "$pwd\ext\nvof\nvOpticalFlowD3D12.h"
+
+      - name: Compile x64 Release
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path "$pwd\build" | Out-Null
+          rc /nologo /fo "$pwd\build\app.res" "$pwd\source\app.rc"
+          if ($LASTEXITCODE -ne 0) { throw "rc failed" }
+          cl /nologo /std:c++20 /O2 /EHsc /utf-8 /permissive- /W3 /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0A00 /I "$pwd\ext\streamline\include" /I "$pwd\ext\nvof" "$pwd\source\main.cpp" "$pwd\source\dlss_bridge.cpp" "$pwd\source\nvof_bridge.cpp" "$pwd\build\app.res" /Fe:"$pwd\build\DLSS-WGC11On12-ZeroCopy.exe" /link d3d11.lib d3d12.lib dxgi.lib d3dcompiler.lib user32.lib gdi32.lib comctl32.lib wintrust.lib crypt32.lib ole32.lib shell32.lib windowsapp.lib runtimeobject.lib avrt.lib
+          if ($LASTEXITCODE -ne 0) { throw "compile failed" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DLSS-WGC11On12-ZeroCopy-build
+          path: build/DLSS-WGC11On12-ZeroCopy.exe
+          if-no-files-found: error
