@@ -39,7 +39,7 @@ jobs:
           $main = $main.Replace('IDirect3DDevice winrtDev_{nullptr};GraphicsCaptureItem item_{nullptr};Direct3D11CaptureFramePool pool_{nullptr};GraphicsCaptureSession session_{nullptr};', 'wd3d::IDirect3DDevice winrtDev_{nullptr};wgc::GraphicsCaptureItem item_{nullptr};wgc::Direct3D11CaptureFramePool pool_{nullptr};wgc::GraphicsCaptureSession session_{nullptr};')
           $main = $main.Replace('(unsigned long long)(drops-lastDrops)/std::max(0.001,sec)', '(unsigned long long)((drops-lastDrops)/std::max(0.001,sec))')
           Set-Content "$pwd\source\main.cpp" -Value $main -Encoding UTF8
-          git apply --unsafe-paths "$pwd\.chatgpt\wgc1\interop-fix.patch"
+          git apply --recount --unsafe-paths "$pwd\.chatgpt\wgc1\interop-fix.patch"
           if ($LASTEXITCODE -ne 0) { throw "interop patch failed" }
       - name: Fetch current NVIDIA headers
         shell: powershell
