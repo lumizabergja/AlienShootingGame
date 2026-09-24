@@ -3,7 +3,7 @@ name: ChatGPT WGC D3D11On12 Zero Copy Build
 on:
   push:
     branches:
-      - chatgpt-wgc1-freezefix-native
+      - chatgpt-wgc1-hostpaced-freezefix
   workflow_dispatch:
 
 jobs:
@@ -181,6 +181,13 @@ jobs:
           $ErrorActionPreference = "Stop"
           python "$pwd\.chatgpt\wgc11on12\freeze_fix_native.py"
           if ($LASTEXITCODE -ne 0) { throw "freeze-fix transform failed" }
+
+      - name: Apply host-paced waitable swapchain fix
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          python "$pwd\.chatgpt\wgc11on12\host_paced_swapchain.py"
+          if ($LASTEXITCODE -ne 0) { throw "host-paced swapchain transform failed" }
 
       - name: Fetch current NVIDIA headers
         shell: powershell
