@@ -35,11 +35,84 @@ jobs:
           }
 
       - name: Apply one-buffer release-before-DLSS fix
-        shell: powershell
+        shell: python
         run: |
-          $ErrorActionPreference = "Stop"
-          git apply "$pwd\.chatgpt\wgc11on12\capture-copy-fix.patch"
-          if ($LASTEXITCODE -ne 0) { throw "capture copy fix patch failed" }
+          from pathlib import Path
+          import re
+          p=Path("source/main.cpp")
+          s=p.read_text(encoding="utf-8-sig")
+
+          s=s.replace('WGC CreateFreeThreaded on D3D11On12: 1 physical buffer, 0 software queue, direct D3D12 unwrap, no capture copy.',
+                      'WGC CreateFreeThreaded on D3D11On12: 1 physical buffer, 0 software queue. Frames are copied GPU-only into a persistent D3D12 input and released immediately.')
+
+          s=s.replace('        on12_.Reset();ctx_.Reset();dev_.Reset();',
+                      '        input11_.Reset();input12_.Reset();on12_.Reset();ctx_.Reset();dev_.Reset();',1)
+
+          pat=r'''    void Unwrap\(wgc::Direct3D11CaptureFrame const& frame, ID3D12CommandQueue\* queue,.*?^    }\n    void Return\(ID3D11Texture2D\* tex11, ID3D12Fence\* fence, uint64_t value\)\{.*?^    }\n'''
+          rep='''    void CreatePersistentInput(ID3D12Device* d12){
+              D3D12_HEAP_PROPERTIES hp{};hp.Type=D3D12_HEAP_TYPE_DEFAULT;hp.CreationNodeMask=1;hp.VisibleNodeMask=1;
+              D3D12_RESOURCE_DESC rd{};rd.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;rd.Width=width_;rd.Height=height_;rd.DepthOrArraySize=1;rd.MipLevels=1;
+              rd.Format=DXGI_FORMAT_B8G8R8A8_UNORM;rd.SampleDesc.Count=1;rd.Layout=D3D12_TEXTURE_LAYOUT_UNKNOWN;rd.Flags=D3D12_RESOURCE_FLAG_NONE;
+              HR(d12->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&rd,D3D12_RESOURCE_STATE_COMMON,nullptr,IID_PPV_ARGS(&input12_)),"Create persistent D3D12 capture input");
+              D3D11_RESOURCE_FLAGS rf{};rf.BindFlags=D3D11_BIND_SHADER_RESOURCE;
+              HR(on12_->CreateWrappedResource(input12_.Get(),&rf,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_COMMON,IID_PPV_ARGS(&input11_)),"Wrap persistent capture input for D3D11On12");
+              gLog.Write(L"Capture bridge: one persistent D3D12 BGRA8 input, GPU-only D3D11On12 copy, WGC frame released immediately.");
+          }
+          ID3D12Resource* Input12()const{return input12_.Get();}
+          void CopyFrameToPersistent(wgc::Direct3D11CaptureFrame& frame){
+              if(!frame||!input11_) throw std::runtime_error("Capture input is not ready.");
+              ComPtr<ID3D11Texture2D> src11;
+              auto access=frame.Surface().as<::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
+              check_hresult(access->GetInterface(IID_PPV_ARGS(src11.ReleaseAndGetAddressOf())));
+              ID3D11Resource* wrapped[]={input11_.Get()};
+              on12_->AcquireWrappedResources(wrapped,1);
+              ctx_->CopyResource(input11_.Get(),src11.Get());
+              on12_->ReleaseWrappedResources(wrapped,1);
+              ctx_->Flush();
+              src11.Reset();
+              frame.Close();frame=nullptr;
+          }
+          '''
+          s,n=re.subn(pat,rep,s,count=1,flags=re.S|re.M)
+          if n!=1: raise SystemExit("capture unwrap/return block not found")
+
+          s=s.replace('    ComPtr<ID3D11Device> dev_;ComPtr<ID3D11DeviceContext> ctx_;ComPtr<ID3D11On12Device2> on12_;',
+                      '    ComPtr<ID3D11Device> dev_;ComPtr<ID3D11DeviceContext> ctx_;ComPtr<ID3D11On12Device2> on12_;\n    ComPtr<ID3D12Resource> input12_;ComPtr<ID3D11Resource> input11_;',1)
+
+          s,n=re.subn(r'    bool RenderOne\(WgcCapture& cap,Dx12State& d,wgc::Direct3D11CaptureFrame& frame,ID3D11Texture2D\* tex11,ID3D12Resource\* source,',
+                      '    bool RenderOne(WgcCapture& cap,Dx12State& d,ID3D12Resource* source,',s,count=1)
+          if n!=1: raise SystemExit("RenderOne declaration not found")
+          s,n=re.subn(r'bool App::RenderOne\(WgcCapture& cap,Dx12State& d,wgc::Direct3D11CaptureFrame& frame,ID3D11Texture2D\* tex11,ID3D12Resource\* source,',
+                      'bool App::RenderOne(WgcCapture& cap,Dx12State& d,ID3D12Resource* source,',s,count=1)
+          if n!=1: raise SystemExit("RenderOne definition not found")
+
+          s=s.replace('    // Signal the exact point at which the WGC texture is back in COMMON and no longer used by our D3D12 work.\n',
+                      '    // Persistent input becomes reusable when this fence completes. No CPU wait is inserted.\n',1)
+          s=s.replace('    cap.Return(tex11,d.frameFence.Get(),d.frameValue);\n    frame.Close(); frame=nullptr;\n','',1)
+
+          old='        UINT cw=0,ch=0;cap.Init(target,d.device.Get(),d.queue.Get(),cw,ch);cap.SetCursor(s.cursor);cap.Start();\n        PostStatus(L"RUNNING: WGC1 D3D11On12 direct unwrap / 0 copy / queue 0 / one real frame in flight");\n'
+          new='''        UINT cw=0,ch=0;cap.Init(target,d.device.Get(),d.queue.Get(),cw,ch);cap.SetCursor(s.cursor);cap.CreatePersistentInput(d.device.Get());
+              PostStatus(L"Initializing DLSS / MFG before capture starts...");
+              gDLSS.Init(d.device.Get(),d.adapter.Get(),cap.Input12(),cap.Width(),cap.Height(),d.width,d.height,s.sr,s.preset,s.fg,s.multiplier,s.dynamicTarget,s.boost,s.nvof);
+              D3D12_SHADER_RESOURCE_VIEW_DESC v{};v.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;v.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;v.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;v.Texture2D.MipLevels=1;
+              d.device->CreateShaderResourceView(gDLSS.result.Get(),&v,d.srvHeap->GetCPUDescriptorHandleForHeapStart());d.dlssReady=true;
+              cap.Start();
+              PostStatus(L"RUNNING: WGC1 / 1 buffer / immediate GPU copy / frame released before DLSS / queue 0");
+          '''
+          new='\n'.join(line[10:] if line.startswith('          ') else line for line in new.splitlines())+'\n'
+          if old not in s: raise SystemExit("worker init sequence not found")
+          s=s.replace(old,new,1)
+
+          pat=r'''            ComPtr<ID3D11Texture2D> tex11;ComPtr<ID3D12Resource> source12;.*?            if\(!RenderOne\(cap,d,frame,tex11\.Get\(\),source12\.Get\(\),s,cq,ageSum,ageMax,ageN\)\)throw std::runtime_error\("Present failed\."\);\+\+frames;\n'''
+          rep='''            cap.CopyFrameToPersistent(frame); // release the 1-buffer WGC frame before DLSS/MFG work
+              if(!RenderOne(cap,d,cap.Input12(),s,cq,ageSum,ageMax,ageN))throw std::runtime_error("Present failed.");++frames;
+          '''
+          rep='\n'.join(line[10:] if line.startswith('          ') else line for line in rep.splitlines())+'\n'
+          s,n=re.subn(pat,rep,s,count=1,flags=re.S)
+          if n!=1: raise SystemExit("per-frame direct unwrap block not found")
+
+          s=s.replace('D3D11On12 direct unwrap | %s','WGC released before DLSS | persistent D3D12 input | %s',1)
+          p.write_text(s,encoding="utf-8")
 
       - name: Fetch current NVIDIA headers
         shell: powershell
