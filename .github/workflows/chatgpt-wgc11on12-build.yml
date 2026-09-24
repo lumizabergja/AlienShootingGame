@@ -25,6 +25,14 @@ jobs:
           $b64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ""
           [IO.File]::WriteAllBytes("$pwd\source.zip", [Convert]::FromBase64String($b64))
           Expand-Archive "$pwd\source.zip" "$pwd\source" -Force
+          # Restore unchanged helper files from the already build-verified WGC baseline.
+          $baseParts = Get-ChildItem "$pwd\.chatgpt\wgc1\part*.txt" | Sort-Object Name
+          $baseB64 = ($baseParts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ""
+          [IO.File]::WriteAllBytes("$pwd\baseline.zip", [Convert]::FromBase64String($baseB64))
+          Expand-Archive "$pwd\baseline.zip" "$pwd\baseline" -Force
+          @("nvof_bridge.cpp","nvof_bridge.h","motion_shader.h","app.manifest","app.rc") | ForEach-Object {
+            Copy-Item "$pwd\baseline\$_" "$pwd\source\$_" -Force
+          }
 
       - name: Fetch current NVIDIA headers
         shell: powershell
