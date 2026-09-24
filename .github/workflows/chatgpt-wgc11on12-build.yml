@@ -179,29 +179,21 @@ jobs:
         shell: python
         run: |
           from pathlib import Path
+          import re
           p=Path("source/main.cpp")
           s=p.read_text(encoding="utf-8-sig")
 
           old='pool_=wgc::Direct3D11CaptureFramePool::CreateFreeThreaded(winrtDev_,wdx::DirectXPixelFormat::B8G8R8A8UIntNormalized,1,{(int)width_,(int)height_});'
-          new='pool_=wgc::Direct3D11CaptureFramePool::CreateFreeThreaded(winrtDev_,wdx::DirectXPixelFormat::B8G8R8A8UIntNormalized,2,{(int)width_,(int)height_});'
           if old not in s: raise SystemExit("framepool creation not found")
-          s=s.replace(old,new,1)
+          s=s.replace(old,'pool_=wgc::Direct3D11CaptureFramePool::CreateFreeThreaded(winrtDev_,wdx::DirectXPixelFormat::B8G8R8A8UIntNormalized,2,{(int)width_,(int)height_});',1)
 
-          s=s.replace('1 physical buffer, 0 software queue. Frames are copied GPU-only into a persistent D3D12 input and released immediately.',
-                      '2 physical WGC buffers, 0 software queue, newest-frame-only. Frames are copied GPU-only into one persistent D3D12 input and released immediately.',1)
+          s=s.replace('WGC CreateFreeThreaded on D3D11On12: 1 physical buffer, 0 software queue. Frames are copied GPU-only into a persistent D3D12 input and released immediately.',
+                      'WGC CreateFreeThreaded on D3D11On12: 2 physical buffers, 0 software queue, newest-frame-only. GPU-only copy to persistent D3D12 input.',1)
 
-          old='''    wgc::Direct3D11CaptureFrame TakeFrame(){
-              auto frame=pool_?pool_.TryGetNextFrame():nullptr;
-              if(frame){auto cs=frame.ContentSize();if(cs.Width!=(int)width_||cs.Height!=(int)height_)sizeChanged_=true;}
-              return frame;
-          }
-          '''
-          old='\n'.join(line[10:] if line.startswith('          ') else line for line in old.splitlines())+'\n'
-          new='''    wgc::Direct3D11CaptureFrame TakeFrame(){
+          pat=r'    wgc::Direct3D11CaptureFrame TakeFrame\(\)\{.*?^    \}\n    void CreatePersistentInput'
+          rep='''    wgc::Direct3D11CaptureFrame TakeFrame(){
               auto frame=pool_?pool_.TryGetNextFrame():nullptr;
               if(!frame) return nullptr;
-              // With a 2-buffer pool, never intentionally render an older queued frame.
-              // Drain any already-available replacement and keep only the newest capture.
               for(;;){
                   auto newer=pool_.TryGetNextFrame();
                   if(!newer) break;
@@ -213,44 +205,39 @@ jobs:
               if(cs.Width!=(int)width_||cs.Height!=(int)height_)sizeChanged_=true;
               return frame;
           }
-          '''
-          new='\n'.join(line[10:] if line.startswith('          ') else line for line in new.splitlines())+'\n'
-          if old not in s: raise SystemExit("TakeFrame block not found")
-          s=s.replace(old,new,1)
+          void CreatePersistentInput'''
+          rep='\n'.join(line[10:] if line.startswith('          ') else line for line in rep.splitlines())
+          s,n=re.subn(pat,rep,s,count=1,flags=re.S|re.M)
+          if n!=1: raise SystemExit("TakeFrame regex not found")
 
-          # The DLSS-G completion fence is a GPU-side dependency. Put it before
-          # overwriting the persistent capture input, not inside RenderOne after the copy.
-          old='''bool App::RenderOne(WgcCapture& cap,Dx12State& d,ID3D12Resource* source,const Settings&s,LARGE_INTEGER cq,double& ageSum,double& ageMax,uint64_t& ageN){
-              HR(d.allocator->Reset(),"Allocator reset");HR(d.list->Reset(d.allocator.Get(),d.pso.Get()),"List reset");
-              gDLSS.BeforeFrame(d.queue.Get());
-          '''
-          old='\n'.join(line[10:] if line.startswith('          ') else line for line in old.splitlines())+'\n'
-          new='''bool App::RenderOne(WgcCapture& cap,Dx12State& d,ID3D12Resource* source,const Settings&s,LARGE_INTEGER cq,double& ageSum,double& ageMax,uint64_t& ageN){
-              HR(d.allocator->Reset(),"Allocator reset");HR(d.list->Reset(d.allocator.Get(),d.pso.Get()),"List reset");
-          '''
-          new='\n'.join(line[10:] if line.startswith('          ') else line for line in new.splitlines())+'\n'
-          if old not in s: raise SystemExit("RenderOne BeforeFrame block not found")
-          s=s.replace(old,new,1)
+          s=s.replace('Capture bridge: one persistent D3D12 BGRA8 input, GPU-only D3D11On12 copy, WGC frame released immediately.',
+                      'Capture bridge: one persistent D3D12 BGRA8 input; WGC2 feeds it newest-only with no software queue.',1)
+
+          old='    gDLSS.BeforeFrame(d.queue.Get());\n\n    gDLSS.Marker(sl::PCLMarker::eSimulationStart);'
+          if old not in s: raise SystemExit("RenderOne BeforeFrame location not found")
+          s=s.replace(old,'    gDLSS.Marker(sl::PCLMarker::eSimulationStart);',1)
+
+          s=s.replace('RUNNING: WGC1 / 1 buffer / immediate GPU copy / frame released before DLSS / queue 0',
+                      'RUNNING: WGC2 / 2 physical buffers / 0 software queue / newest-only / GPU-side FG input wait',1)
+          s=s.replace('Game window size changed. Stop and Start again so the one-buffer frame pool can be recreated exactly.',
+                      'Game window size changed. Stop and Start again so the capture pool can be recreated exactly.',1)
 
           old='''            // Lowest-latency policy: NEVER wait on the CPU with a captured frame in hand.
               // If the prior real frame is still on the GPU, discard this capture immediately and wait for a fresher one.
               if(d.frameValue&&d.frameFence->GetCompletedValue()<d.frameValue){frame.Close();cap.NoteDrop();continue;}
 
-              cap.CopyFrameToPersistent(frame); // release the 1-buffer WGC frame before DLSS/MFG work
+              cap.CopyFrameToPersistent(frame); // frame returned to the 1-buffer pool immediately after GPU copy submission
           '''
           old='\n'.join(line[10:] if line.startswith('          ') else line for line in old.splitlines())+'\n'
-          new='''            // No CPU wait and no CPU-side "previous frame still busy" rejection.
-              // DLSS-G exposes an input-consumption fence; queue the dependency on the GPU
-              // before the persistent input is overwritten, then submit the D3D11On12 copy.
+          new='''            // Queue the DLSS-G input-consumption dependency on the GPU before overwriting
+              // the persistent input. The CPU never waits and there is no software frame queue.
               gDLSS.BeforeFrame(d.queue.Get());
               cap.CopyFrameToPersistent(frame);
           '''
           new='\n'.join(line[10:] if line.startswith('          ') else line for line in new.splitlines())+'\n'
-          if old not in s: raise SystemExit("CPU drop gate block not found")
+          if old not in s: raise SystemExit("old CPU drop gate not found")
           s=s.replace(old,new,1)
 
-          s=s.replace('RUNNING: WGC1 / 1 buffer / immediate GPU copy / frame released before DLSS / queue 0',
-                      'RUNNING: WGC2 / 2 physical buffers / 0 software queue / newest-only / GPU-side FG input wait',1)
           s=s.replace('WGC released before DLSS | persistent D3D12 input | %s',
                       'WGC2 newest-only | GPU-side reuse wait | persistent D3D12 input | %s',1)
 
