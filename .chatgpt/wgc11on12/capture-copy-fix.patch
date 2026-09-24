@@ -1,0 +1,135 @@
+--- a/source/main.cpp
++++ b/source/main.cpp
+@@ -127,7 +127,7 @@
+         try { session_.IsCursorCaptureEnabled(false); } catch(...) {}
+         try { session_.IsBorderRequired(false); } catch(...) {}
+         token_=pool_.FrameArrived({this,&WgcCapture::OnFrame});
+-        gLog.Write(L"WGC CreateFreeThreaded on D3D11On12: 1 physical buffer, 0 software queue, direct D3D12 unwrap, no capture copy.");
++        gLog.Write(L"WGC CreateFreeThreaded on D3D11On12: 1 physical buffer, 0 software queue. Frames are copied GPU-only into a persistent D3D12 input and released immediately.");
+         return true;
+     }
+     void SetCursor(bool on){ cursor_=on; if(session_)try{session_.IsCursorCaptureEnabled(on);}catch(...){} }
+@@ -139,7 +139,7 @@
+         if(pool_){try{pool_.Close();}catch(...){}pool_=nullptr;}
+         item_=nullptr; winrtDev_=nullptr;
+         if(frameEvent_){SetEvent(frameEvent_);CloseHandle(frameEvent_);frameEvent_=nullptr;}
+-        on12_.Reset();ctx_.Reset();dev_.Reset();
++        input11_.Reset();input12_.Reset();on12_.Reset();ctx_.Reset();dev_.Reset();
+     }
+     HANDLE FrameEvent()const{return frameEvent_;}
+     UINT Width()const{return width_;} UINT Height()const{return height_;}
+@@ -153,17 +153,28 @@
+         if(frame){auto cs=frame.ContentSize();if(cs.Width!=(int)width_||cs.Height!=(int)height_)sizeChanged_=true;}
+         return frame;
+     }
+-    void Unwrap(wgc::Direct3D11CaptureFrame const& frame, ID3D12CommandQueue* queue,
+-                ComPtr<ID3D11Texture2D>& tex11, ComPtr<ID3D12Resource>& tex12){
+-        if(!frame) throw std::runtime_error("WGC returned an empty frame.");
+-        auto access=frame.Surface().as<::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
+-        check_hresult(access->GetInterface(IID_PPV_ARGS(tex11.ReleaseAndGetAddressOf())));
+-        HR(on12_->UnwrapUnderlyingResource(tex11.Get(),queue,IID_PPV_ARGS(tex12.ReleaseAndGetAddressOf())),"Unwrap WGC texture to D3D12");
++    void CreatePersistentInput(ID3D12Device* d12){
++        D3D12_HEAP_PROPERTIES hp{};hp.Type=D3D12_HEAP_TYPE_DEFAULT;hp.CreationNodeMask=1;hp.VisibleNodeMask=1;
++        D3D12_RESOURCE_DESC rd{};rd.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;rd.Width=width_;rd.Height=height_;rd.DepthOrArraySize=1;rd.MipLevels=1;
++        rd.Format=DXGI_FORMAT_B8G8R8A8_UNORM;rd.SampleDesc.Count=1;rd.Layout=D3D12_TEXTURE_LAYOUT_UNKNOWN;rd.Flags=D3D12_RESOURCE_FLAG_NONE;
++        HR(d12->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&rd,D3D12_RESOURCE_STATE_COMMON,nullptr,IID_PPV_ARGS(&input12_)),"Create persistent D3D12 capture input");
++        D3D11_RESOURCE_FLAGS rf{};rf.BindFlags=D3D11_BIND_SHADER_RESOURCE;
++        HR(on12_->CreateWrappedResource(input12_.Get(),&rf,D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_COMMON,IID_PPV_ARGS(&input11_)),"Wrap persistent capture input for D3D11On12");
++        gLog.Write(L"Capture bridge: one persistent D3D12 BGRA8 input, GPU-only D3D11On12 copy, WGC frame released immediately.");
+     }
+-    void Return(ID3D11Texture2D* tex11, ID3D12Fence* fence, uint64_t value){
+-        if(!tex11)return;
+-        ID3D12Fence* fences[]={fence}; UINT64 values[]={value};
+-        HR(on12_->ReturnUnderlyingResource(tex11,1,values,fences),"Return WGC texture to D3D11On12");
++    ID3D12Resource* Input12()const{return input12_.Get();}
++    void CopyFrameToPersistent(wgc::Direct3D11CaptureFrame& frame){
++        if(!frame||!input11_) throw std::runtime_error("Capture input is not ready.");
++        ComPtr<ID3D11Texture2D> src11;
++        auto access=frame.Surface().as<::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
++        check_hresult(access->GetInterface(IID_PPV_ARGS(src11.ReleaseAndGetAddressOf())));
++        ID3D11Resource* wrapped[]={input11_.Get()};
++        on12_->AcquireWrappedResources(wrapped,1);
++        ctx_->CopyResource(input11_.Get(),src11.Get());
++        on12_->ReleaseWrappedResources(wrapped,1);
++        ctx_->Flush();
++        src11.Reset();
++        frame.Close();frame=nullptr;
+     }
+ private:
+     void OnFrame(wgc::Direct3D11CaptureFramePool const&, winrt::Windows::Foundation::IInspectable const&) noexcept {
+@@ -173,6 +184,7 @@
+     }
+     HWND target_{}; UINT width_{},height_{}; bool cursor_{};
+     ComPtr<ID3D11Device> dev_;ComPtr<ID3D11DeviceContext> ctx_;ComPtr<ID3D11On12Device2> on12_;
++    ComPtr<ID3D12Resource> input12_;ComPtr<ID3D11Resource> input11_;
+     HANDLE frameEvent_{};
+     wd3d::IDirect3DDevice winrtDev_{nullptr};wgc::GraphicsCaptureItem item_{nullptr};wgc::Direct3D11CaptureFramePool pool_{nullptr};wgc::GraphicsCaptureSession session_{nullptr};
+     event_token token_{};
+@@ -200,7 +212,7 @@
+     bool InitDx12(HWND output,IDXGIAdapter1* adapter,const Settings&,Dx12State& d);
+     bool CreateSwapchain(HWND output,const Settings&,Dx12State& d);
+     bool CreateBlitPipeline(Dx12State& d);
+-    bool RenderOne(WgcCapture& cap,Dx12State& d,wgc::Direct3D11CaptureFrame& frame,ID3D11Texture2D* tex11,ID3D12Resource* source,const Settings&,LARGE_INTEGER captureQpc,double& ageSum,double& ageMax,uint64_t& ageN);
++    bool RenderOne(WgcCapture& cap,Dx12State& d,ID3D12Resource* source,const Settings&,LARGE_INTEGER captureQpc,double& ageSum,double& ageMax,uint64_t& ageN);
+     void DestroyDx12(Dx12State& d);void PostStatus(const std::wstring& s);
+     static BOOL CALLBACK EnumProc(HWND,LPARAM);static LRESULT CALLBACK CProc(HWND,UINT,WPARAM,LPARAM);static LRESULT CALLBACK PProc(HWND,UINT,WPARAM,LPARAM);
+     Settings ReadSettings();HWND CreatePresenter();
+@@ -335,7 +347,7 @@
+     return true;
+ }
+ 
+-bool App::RenderOne(WgcCapture& cap,Dx12State& d,wgc::Direct3D11CaptureFrame& frame,ID3D11Texture2D* tex11,ID3D12Resource* source,const Settings&s,LARGE_INTEGER cq,double& ageSum,double& ageMax,uint64_t& ageN){
++bool App::RenderOne(WgcCapture& cap,Dx12State& d,ID3D12Resource* source,const Settings&s,LARGE_INTEGER cq,double& ageSum,double& ageMax,uint64_t& ageN){
+     HR(d.allocator->Reset(),"Allocator reset");HR(d.list->Reset(d.allocator.Get(),d.pso.Get()),"List reset");
+     gDLSS.BeforeFrame(d.queue.Get());
+ 
+@@ -354,10 +366,8 @@
+     if(s.nvof&&!gDLSS.WaitMotion(d.queue.Get()))return false;
+     ID3D12CommandList* lists[]={d.list.Get()};gDLSS.Marker(sl::PCLMarker::eRenderSubmitStart);d.queue->ExecuteCommandLists(1,lists);gDLSS.Marker(sl::PCLMarker::eRenderSubmitEnd);
+ 
+-    // Signal the exact point at which the WGC texture is back in COMMON and no longer used by our D3D12 work.
++    // Persistent input becomes reusable when this fence completes. No CPU wait is inserted.
+     ++d.frameValue;HR(d.queue->Signal(d.frameFence.Get(),d.frameValue),"Frame fence signal");
+-    cap.Return(tex11,d.frameFence.Get(),d.frameValue);
+-    frame.Close(); frame=nullptr;
+ 
+     gDLSS.Marker(sl::PCLMarker::ePresentStart);UINT sync=s.vsync?1:0;UINT flags=(!s.vsync&&d.tearing)?DXGI_PRESENT_ALLOW_TEARING:0;HRESULT ph=d.swap->Present(sync,flags);gDLSS.Marker(sl::PCLMarker::ePresentEnd);if(FAILED(ph))return false;gDLSS.AfterPresent();
+     LARGE_INTEGER now{},freq{};QueryPerformanceCounter(&now);QueryPerformanceFrequency(&freq);if(cq.QuadPart&&freq.QuadPart&&now.QuadPart>=cq.QuadPart){double ms=1000.0*double(now.QuadPart-cq.QuadPart)/double(freq.QuadPart);ageSum+=ms;ageMax=std::max(ageMax,ms);++ageN;}
+@@ -373,8 +383,13 @@
+         ComPtr<IDXGIFactory6> tempF;ComPtr<IDXGIAdapter1> adapter;if(!PickAdapter(tempF,adapter))throw std::runtime_error("No suitable GPU adapter found.");
+         if(!presenter_)throw std::runtime_error("Presenter window was not created.");
+         if(!InitDx12(presenter_,adapter.Get(),s,d))throw std::runtime_error("DX12 initialization failed.");
+-        UINT cw=0,ch=0;cap.Init(target,d.device.Get(),d.queue.Get(),cw,ch);cap.SetCursor(s.cursor);cap.Start();
+-        PostStatus(L"RUNNING: WGC1 D3D11On12 direct unwrap / 0 copy / queue 0 / one real frame in flight");
++        UINT cw=0,ch=0;cap.Init(target,d.device.Get(),d.queue.Get(),cw,ch);cap.SetCursor(s.cursor);cap.CreatePersistentInput(d.device.Get());
++        PostStatus(L"Initializing DLSS / MFG before capture starts...");
++        gDLSS.Init(d.device.Get(),d.adapter.Get(),cap.Input12(),cap.Width(),cap.Height(),d.width,d.height,s.sr,s.preset,s.fg,s.multiplier,s.dynamicTarget,s.boost,s.nvof);
++        D3D12_SHADER_RESOURCE_VIEW_DESC v{};v.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;v.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;v.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;v.Texture2D.MipLevels=1;
++        d.device->CreateShaderResourceView(gDLSS.result.Get(),&v,d.srvHeap->GetCPUDescriptorHandleForHeapStart());d.dlssReady=true;
++        cap.Start();
++        PostStatus(L"RUNNING: WGC1 / 1 buffer / immediate GPU copy / frame released before DLSS / queue 0");
+         uint64_t frames=0,lastDrops=0,ageN=0;double ageSum=0,ageMax=0;auto report=std::chrono::steady_clock::now();
+         while(!stop_&&IsWindow(target)&&IsWindow(presenter_)){
+             if(paused_){Sleep(2);continue;}
+@@ -387,18 +402,11 @@
+             // If the prior real frame is still on the GPU, discard this capture immediately and wait for a fresher one.
+             if(d.frameValue&&d.frameFence->GetCompletedValue()<d.frameValue){frame.Close();cap.NoteDrop();continue;}
+ 
+-            ComPtr<ID3D11Texture2D> tex11;ComPtr<ID3D12Resource> source12;
+-            cap.Unwrap(frame,d.queue.Get(),tex11,source12);
+-            if(!d.dlssReady){
+-                gDLSS.Init(d.device.Get(),d.adapter.Get(),source12.Get(),cap.Width(),cap.Height(),d.width,d.height,s.sr,s.preset,s.fg,s.multiplier,s.dynamicTarget,s.boost,s.nvof);
+-                D3D12_SHADER_RESOURCE_VIEW_DESC v{};v.Format=DXGI_FORMAT_R16G16B16A16_FLOAT;v.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;v.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;v.Texture2D.MipLevels=1;d.device->CreateShaderResourceView(gDLSS.result.Get(),&v,d.srvHeap->GetCPUDescriptorHandleForHeapStart());
+-                d.dlssReady=true;
+-                PostStatus(L"RUNNING: WGC1 D3D11On12 direct unwrap / 0 capture copy | "+gDLSS.Status());
+-            }
+-            if(!RenderOne(cap,d,frame,tex11.Get(),source12.Get(),s,cq,ageSum,ageMax,ageN))throw std::runtime_error("Present failed.");++frames;
++            cap.CopyFrameToPersistent(frame); // frame returned to the 1-buffer pool immediately after GPU copy submission
++            if(!RenderOne(cap,d,cap.Input12(),s,cq,ageSum,ageMax,ageN))throw std::runtime_error("Present failed.");++frames;
+             gDLSS.PrepareFrame();
+             auto now=std::chrono::steady_clock::now();double sec=std::chrono::duration<double>(now-report).count();if(sec>=1.0){
+-                uint64_t drops=cap.Dropped();wchar_t msg[1000]{};double avg=ageN?ageSum/ageN:0;swprintf_s(msg,L"Base %.0f FPS | latency-policy drops %llu/s | capture->Present CPU age %.2f ms avg / %.2f max | D3D11On12 direct unwrap | %s",frames/sec,(unsigned long long)((drops-lastDrops)/std::max(0.001,sec)),avg,ageMax,gDLSS.Status().c_str());PostStatus(msg);gLog.Write(msg);frames=0;lastDrops=drops;ageN=0;ageSum=ageMax=0;report=now;
++                uint64_t drops=cap.Dropped();wchar_t msg[1000]{};double avg=ageN?ageSum/ageN:0;swprintf_s(msg,L"Base %.0f FPS | latency-policy drops %llu/s | capture->Present CPU age %.2f ms avg / %.2f max | WGC released before DLSS | persistent D3D12 input | %s",frames/sec,(unsigned long long)((drops-lastDrops)/std::max(0.001,sec)),avg,ageMax,gDLSS.Status().c_str());PostStatus(msg);gLog.Write(msg);frames=0;lastDrops=drops;ageN=0;ageSum=ageMax=0;report=now;
+             }
+         }
+     }catch(const std::exception&e){std::string m=e.what();std::wstring w(m.begin(),m.end());gLog.Write(L"Stopped: "+w);PostStatus(L"Stopped: "+w);}
