@@ -1,9 +1,9 @@
-name: ChatGPT WGC D3D11On12 Zero Copy Build
+name: ChatGPT DXGI Desktop Duplication Low Latency Build
 
 on:
   push:
     branches:
-      - chatgpt-wgc1-fg-tags-warmup
+      - chatgpt-dxgi-lowlatency
   workflow_dispatch:
 
 jobs:
@@ -175,6 +175,13 @@ jobs:
           s=s.replace(old,'    inputFence.Reset();inputFenceValue=0;fgArmed=false;\n',1)
 
           p.write_text(s,encoding="utf-8")
+      - name: Apply DXGI Desktop Duplication backend
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          python "$pwd\.chatgpt\dxgi\apply_dxgi.py"
+          if ($LASTEXITCODE -ne 0) { throw "DXGI backend transform failed" }
+
       - name: Fetch current NVIDIA headers
         shell: powershell
         run: |
@@ -191,11 +198,11 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$pwd\build" | Out-Null
           rc /nologo /fo "$pwd\build\app.res" "$pwd\source\app.rc"
           if ($LASTEXITCODE -ne 0) { throw "rc failed" }
-          cl /nologo /std:c++20 /O2 /EHsc /utf-8 /permissive- /W3 /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0A00 /I "$pwd\ext\streamline\include" /I "$pwd\ext\nvof" "$pwd\source\main.cpp" "$pwd\source\dlss_bridge.cpp" "$pwd\source\nvof_bridge.cpp" "$pwd\build\app.res" /Fe:"$pwd\build\DLSS-WGC11On12-ZeroCopy.exe" /link d3d11.lib d3d12.lib dxgi.lib d3dcompiler.lib user32.lib gdi32.lib comctl32.lib wintrust.lib crypt32.lib ole32.lib shell32.lib windowsapp.lib runtimeobject.lib avrt.lib
+          cl /nologo /std:c++20 /O2 /EHsc /utf-8 /permissive- /W3 /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0A00 /I "$pwd\ext\streamline\include" /I "$pwd\ext\nvof" "$pwd\source\main.cpp" "$pwd\source\dlss_bridge.cpp" "$pwd\source\nvof_bridge.cpp" "$pwd\build\app.res" /Fe:"$pwd\build\DLSS-DXGI-LowLatency.exe" /link d3d11.lib d3d12.lib dxgi.lib d3dcompiler.lib user32.lib gdi32.lib comctl32.lib wintrust.lib crypt32.lib ole32.lib shell32.lib windowsapp.lib runtimeobject.lib avrt.lib
           if ($LASTEXITCODE -ne 0) { throw "compile failed" }
 
       - uses: actions/upload-artifact@v4
         with:
-          name: DLSS-WGC11On12-ZeroCopy-build
-          path: build/DLSS-WGC11On12-ZeroCopy.exe
+          name: DLSS-DXGI-LowLatency-build
+          path: build/DLSS-DXGI-LowLatency.exe
           if-no-files-found: error
