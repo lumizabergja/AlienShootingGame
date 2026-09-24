@@ -23,6 +23,20 @@ jobs:
           $b64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ""
           [IO.File]::WriteAllBytes("$pwd\source.zip", [Convert]::FromBase64String($b64))
           Expand-Archive "$pwd\source.zip" "$pwd\source" -Force
+          $main = Get-Content "$pwd\source\main.cpp" -Raw
+          $main = $main.Replace('using namespace Windows::Graphics::Capture;', 'namespace wgc = winrt::Windows::Graphics::Capture;')
+          $main = $main.Replace('using namespace Windows::Graphics::DirectX;', 'namespace wdx = winrt::Windows::Graphics::DirectX;')
+          $main = $main.Replace('using namespace Windows::Graphics::DirectX::Direct3D11;', 'namespace wd3d = winrt::Windows::Graphics::DirectX::Direct3D11;')
+          $main = $main.Replace('GraphicsCaptureSession::IsSupported()', 'wgc::GraphicsCaptureSession::IsSupported()')
+          $main = $main.Replace('inspectable.as<IDirect3DDevice>()', 'inspectable.as<wd3d::IDirect3DDevice>()')
+          $main = $main.Replace('get_activation_factory<GraphicsCaptureItem,IGraphicsCaptureItemInterop>()', 'get_activation_factory<wgc::GraphicsCaptureItem,IGraphicsCaptureItemInterop>()')
+          $main = $main.Replace('guid_of<GraphicsCaptureItem>()', 'guid_of<wgc::GraphicsCaptureItem>()')
+          $main = $main.Replace('Direct3D11CaptureFramePool::CreateFreeThreaded', 'wgc::Direct3D11CaptureFramePool::CreateFreeThreaded')
+          $main = $main.Replace('DirectXPixelFormat::B8G8R8A8UIntNormalized', 'wdx::DirectXPixelFormat::B8G8R8A8UIntNormalized')
+          $main = $main.Replace('void OnFrame(Direct3D11CaptureFramePool const& sender, IInspectable const&)', 'void OnFrame(wgc::Direct3D11CaptureFramePool const& sender, IInspectable const&)')
+          $main = $main.Replace('IDirect3DDevice winrtDev_{nullptr};GraphicsCaptureItem item_{nullptr};Direct3D11CaptureFramePool pool_{nullptr};GraphicsCaptureSession session_{nullptr};', 'wd3d::IDirect3DDevice winrtDev_{nullptr};wgc::GraphicsCaptureItem item_{nullptr};wgc::Direct3D11CaptureFramePool pool_{nullptr};wgc::GraphicsCaptureSession session_{nullptr};')
+          $main = $main.Replace('(unsigned long long)(drops-lastDrops)/std::max(0.001,sec)', '(unsigned long long)((drops-lastDrops)/std::max(0.001,sec))')
+          Set-Content "$pwd\source\main.cpp" -Value $main -Encoding UTF8
       - name: Fetch current NVIDIA headers
         shell: powershell
         run: |
