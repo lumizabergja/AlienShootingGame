@@ -107,11 +107,60 @@ jobs:
           s=s.replace(old,new,1)
           p.write_text(s,encoding="utf-8")
       - name: Apply Streamline manual-hooking fix
-        shell: powershell
+        shell: python
         run: |
-          $ErrorActionPreference = "Stop"
-          git apply "$pwd\.chatgpt\wgc1\streamline-manual-fix.patch"
-          if ($LASTEXITCODE -ne 0) { throw "Streamline manual-hooking patch failed" }
+          from pathlib import Path
+
+          h=Path("source/dlss_bridge.h")
+          s=h.read_text(encoding="utf-8-sig")
+          s=s.replace('    using FactoryFn = HRESULT(WINAPI*)(REFIID,void**);\n    using DeviceFn = HRESULT(WINAPI*)(IUnknown*,D3D_FEATURE_LEVEL,REFIID,void**);\n    FactoryFn factory{};\n    DeviceFn createDevice{};\n','')
+          s=s.replace('    void BindDevice(ID3D12Device* d) {Check(setDevice(d),"slSetD3DDevice");}\n','    void BindDevice(ID3D12Device* d) {Check(setDevice(d),"slSetD3DDevice");}\n    void UpgradeInterface(void** p) {Check(upgradeInterface(p),"slUpgradeInterface");}\n')
+          s=s.replace('    PFun_slSetD3DDevice* setDevice{};\n','    PFun_slSetD3DDevice* setDevice{};\n    PFun_slUpgradeInterface* upgradeInterface{};\n')
+          h.write_text(s,encoding="utf-8")
+
+          p=Path("source/dlss_bridge.cpp")
+          s=p.read_text(encoding="utf-8-sig")
+          s=s.replace('    Export(init,"slInit"); Export(shutdown,"slShutdown"); Export(setDevice,"slSetD3DDevice");\n','    Export(init,"slInit"); Export(shutdown,"slShutdown"); Export(setDevice,"slSetD3DDevice"); Export(upgradeInterface,"slUpgradeInterface");\n')
+          s=s.replace('    Export(evaluate,"slEvaluateFeature");Export(freeResources,"slFreeResources");\n    Export(factory,"CreateDXGIFactory1"); Export(createDevice,"D3D12CreateDevice");\n','    Export(evaluate,"slEvaluateFeature");Export(freeResources,"slFreeResources");\n')
+          s=s.replace('    p.flags=sl::PreferenceFlags::eDisableCLStateTracking|sl::PreferenceFlags::eUseFrameBasedResourceTagging|sl::PreferenceFlags::eUseDXGIFactoryProxy;\n','    p.flags=sl::PreferenceFlags::eDisableCLStateTracking|sl::PreferenceFlags::eUseFrameBasedResourceTagging|sl::PreferenceFlags::eUseManualHooking;\n')
+          s=s.replace('    log(L"Streamline 2.14.1 initialized: DLSS SR all modes + DLSS Frame Generation fixed/auto/dynamic.");\n','    log(L"Streamline 2.14.1 initialized in manual-hooking mode: native D3D12 device + upgraded queue/factory/swapchain hooks.");\n')
+          p.write_text(s,encoding="utf-8")
+
+          p=Path("source/main.cpp")
+          s=p.read_text(encoding="utf-8-sig")
+          s=s.replace('    HRESULT hr=gDLSS.factory(IID_PPV_ARGS(&f));if(FAILED(hr)){PostStatus(L"DXGI factory: "+HrText(hr));return false;}\n','    HRESULT hr=CreateDXGIFactory2(0,IID_PPV_ARGS(&f));if(FAILED(hr)){PostStatus(L"DXGI factory: "+HrText(hr));return false;}\n')
+          old='''bool App::InitDx12(HWND output,WgcCapture& cap,IDXGIAdapter1* adapter,const Settings&s,Dx12State& d){
+              if(!adapter)return false;
+              HR(CreateDXGIFactory2(0,IID_PPV_ARGS(&d.factory)),"DXGI factory");
+              d.adapter=adapter;
+              HR(gDLSS.createDevice(d.adapter.Get(),D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&d.device)),"Streamline D3D12 device");gDLSS.BindDevice(d.device.Get());
+              D3D12_COMMAND_QUEUE_DESC q{};q.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;q.Priority=D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;HR(d.device->CreateCommandQueue(&q,IID_PPV_ARGS(&d.queue)),"DX12 queue");
+          '''
+          old='\n'.join(line[10:] if line.startswith('          ') else line for line in old.splitlines())+'\n'
+          new='''bool App::InitDx12(HWND output,WgcCapture& cap,IDXGIAdapter1* adapter,const Settings&s,Dx12State& d){
+              if(!adapter)return false;
+              d.adapter=adapter;
+
+              // Streamline manual-hooking mode: native device first, then only required proxies.
+              ComPtr<ID3D12Device> nativeDevice;
+              HR(D3D12CreateDevice(d.adapter.Get(),D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&nativeDevice)),"Native D3D12 device");
+              gDLSS.BindDevice(nativeDevice.Get());
+              ID3D12Device* proxyDevice=nativeDevice.Get();
+              gDLSS.UpgradeInterface(reinterpret_cast<void**>(&proxyDevice));
+              d.device=proxyDevice;
+
+              ComPtr<IDXGIFactory6> nativeFactory;
+              HR(CreateDXGIFactory2(0,IID_PPV_ARGS(&nativeFactory)),"Native DXGI factory");
+              IDXGIFactory6* proxyFactory=nativeFactory.Get();
+              gDLSS.UpgradeInterface(reinterpret_cast<void**>(&proxyFactory));
+              d.factory=proxyFactory;
+
+              D3D12_COMMAND_QUEUE_DESC q{};q.Type=D3D12_COMMAND_LIST_TYPE_DIRECT;q.Priority=D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;HR(d.device->CreateCommandQueue(&q,IID_PPV_ARGS(&d.queue)),"DX12 queue");
+          '''
+          new='\n'.join(line[10:] if line.startswith('          ') else line for line in new.splitlines())+'\n'
+          if old not in s: raise SystemExit("InitDx12 integration block not found")
+          s=s.replace(old,new,1)
+          p.write_text(s,encoding="utf-8")
       - name: Fetch current NVIDIA headers
         shell: powershell
         run: |
