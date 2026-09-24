@@ -46,8 +46,7 @@ new='''    void RecoverDuplication(){
 '''
 s=s.replace(old,new,1)
 
-old='    bool held_{},stopRecovery_{};uint64_t dropped_{},recoveries_{},copyValue_{};
-'
+old='    bool held_{},stopRecovery_{};uint64_t dropped_{},recoveries_{},copyValue_{};\n'
 if old not in s: raise SystemExit("DXGI recovery member line not found")
 s=s.replace(old,'    bool held_{},stopRecovery_{};uint64_t dropped_{},recoveries_{},copyValue_{};LONGLONG recoveryWindowQpc_{};uint32_t recoveriesThisSecond_{};\n',1)
 
