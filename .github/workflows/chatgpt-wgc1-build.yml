@@ -34,6 +34,7 @@ jobs:
           $main = $main.Replace('Direct3D11CaptureFramePool::CreateFreeThreaded', 'wgc::Direct3D11CaptureFramePool::CreateFreeThreaded')
           $main = $main.Replace('DirectXPixelFormat::B8G8R8A8UIntNormalized', 'wdx::DirectXPixelFormat::B8G8R8A8UIntNormalized')
           $main = $main.Replace('void OnFrame(Direct3D11CaptureFramePool const& sender, IInspectable const&)', 'void OnFrame(wgc::Direct3D11CaptureFramePool const& sender, IInspectable const&)')
+          $main = $main.Replace('void OnFrame(wgc::Direct3D11CaptureFramePool const& sender, IInspectable const&) noexcept', 'void OnFrame(wgc::Direct3D11CaptureFramePool const& sender, winrt::IInspectable const&) noexcept')
           $main = $main.Replace('frame.Surface().as<IDirect3DDxgiInterfaceAccess>()', 'frame.Surface().as<::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>()')
           $main = $main.Replace('IDirect3DDevice winrtDev_{nullptr};GraphicsCaptureItem item_{nullptr};Direct3D11CaptureFramePool pool_{nullptr};GraphicsCaptureSession session_{nullptr};', 'wd3d::IDirect3DDevice winrtDev_{nullptr};wgc::GraphicsCaptureItem item_{nullptr};wgc::Direct3D11CaptureFramePool pool_{nullptr};wgc::GraphicsCaptureSession session_{nullptr};')
           $main = $main.Replace('(unsigned long long)(drops-lastDrops)/std::max(0.001,sec)', '(unsigned long long)((drops-lastDrops)/std::max(0.001,sec))')
