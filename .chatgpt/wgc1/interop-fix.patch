@@ -1,0 +1,70 @@
+--- source/main.cpp
++++ source/main.cpp
+@@ -121,15 +121,6 @@
+         auto sz=item_.Size(); width=(UINT)std::max(1,sz.Width); height=(UINT)std::max(1,sz.Height);
+         width_=width;height_=height;
+ 
+-        D3D11_TEXTURE2D_DESC td{}; td.Width=width_;td.Height=height_;td.MipLevels=1;td.ArraySize=1;
+-        td.Format=DXGI_FORMAT_B8G8R8A8_UNORM;td.SampleDesc.Count=1;td.Usage=D3D11_USAGE_DEFAULT;
+-        td.BindFlags=D3D11_BIND_SHADER_RESOURCE|D3D11_BIND_RENDER_TARGET;
+-        td.MiscFlags=D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
+-        HR(dev_->CreateTexture2D(&td,nullptr,&shared11_),"WGC shared texture");
+-        ComPtr<IDXGIResource1> res; HR(shared11_.As(&res),"WGC shared IDXGIResource1");
+-        HR(res->CreateSharedHandle(nullptr,DXGI_SHARED_RESOURCE_READ|DXGI_SHARED_RESOURCE_WRITE,nullptr,&texHandle_),"WGC shared texture handle");
+-        HR(dev5_->CreateFence(0,D3D11_FENCE_FLAG_SHARED,IID_PPV_ARGS(&fence11_)),"WGC shared fence");
+-        HR(fence11_->CreateSharedHandle(nullptr,GENERIC_ALL,nullptr,&fenceHandle_),"WGC shared fence handle");
+         frameEvent_=CreateEventW(nullptr,FALSE,FALSE,nullptr);
+         if(!frameEvent_) throw std::runtime_error("Could not create capture event.");
+ 
+@@ -151,12 +142,14 @@
+         if(pool_){try{pool_.Close();}catch(...){}pool_=nullptr;}
+         item_=nullptr; winrtDev_=nullptr;
+         if(frameEvent_){SetEvent(frameEvent_);CloseHandle(frameEvent_);frameEvent_=nullptr;}
+-        if(texHandle_){CloseHandle(texHandle_);texHandle_=nullptr;}
+-        if(fenceHandle_){CloseHandle(fenceHandle_);fenceHandle_=nullptr;}
+         shared11_.Reset();fence11_.Reset();ctx4_.Reset();ctx_.Reset();dev5_.Reset();dev_.Reset();
+     }
+-    HANDLE TextureHandle()const{return texHandle_;}
+-    HANDLE FenceHandle()const{return fenceHandle_;}
++    void AttachShared(HANDLE textureHandle,HANDLE fenceHandle){
++        ComPtr<ID3D11Device1> dev1; HR(dev_.As(&dev1),"D3D11Device1 for shared interop");
++        HR(dev1->OpenSharedResource1(textureHandle,IID_PPV_ARGS(&shared11_)),"Open D3D12 shared texture in D3D11");
++        HR(dev5_->OpenSharedFence(fenceHandle,IID_PPV_ARGS(&fence11_)),"Open D3D12 shared fence in D3D11");
++        gLog.Write(L"WGC interop: D3D12-owned shared texture/fence opened in D3D11.");
++    }
+     HANDLE FrameEvent()const{return frameEvent_;}
+     UINT Width()const{return width_;} UINT Height()const{return height_;}
+     uint64_t TakeReady(){return pendingReady_.exchange(0,std::memory_order_acq_rel);}
+@@ -196,7 +189,7 @@
+     HWND target_{}; UINT width_{},height_{}; bool cursor_{};
+     ComPtr<ID3D11Device> dev_;ComPtr<ID3D11Device5> dev5_;ComPtr<ID3D11DeviceContext> ctx_;ComPtr<ID3D11DeviceContext4> ctx4_;
+     ComPtr<ID3D11Texture2D> shared11_;ComPtr<ID3D11Fence> fence11_;
+-    HANDLE texHandle_{},fenceHandle_{},frameEvent_{};
++    HANDLE frameEvent_{};
+     wd3d::IDirect3DDevice winrtDev_{nullptr};wgc::GraphicsCaptureItem item_{nullptr};wgc::Direct3D11CaptureFramePool pool_{nullptr};wgc::GraphicsCaptureSession session_{nullptr};
+     event_token token_{};
+     std::atomic<bool> running_{false},slotBusy_{false},sizeChanged_{false};
+@@ -336,7 +329,23 @@
+     D3D12_DESCRIPTOR_HEAP_DESC rh{};rh.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;rh.NumDescriptors=kBackBufferCount;HR(d.device->CreateDescriptorHeap(&rh,IID_PPV_ARGS(&d.rtvHeap)),"RTV heap");d.rtvStride=d.device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+     D3D12_DESCRIPTOR_HEAP_DESC sh{};sh.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;sh.NumDescriptors=1;sh.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;HR(d.device->CreateDescriptorHeap(&sh,IID_PPV_ARGS(&d.srvHeap)),"SRV heap");
+     HR(d.device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,IID_PPV_ARGS(&d.allocator)),"Allocator");HR(d.device->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_DIRECT,d.allocator.Get(),nullptr,IID_PPV_ARGS(&d.list)),"Command list");d.list->Close();
+-    HR(d.device->OpenSharedHandle(cap.TextureHandle(),IID_PPV_ARGS(&d.shared)),"Open capture texture");HR(d.device->OpenSharedHandle(cap.FenceHandle(),IID_PPV_ARGS(&d.sharedFence)),"Open capture fence");
++
++    // D3D12 owns the interop surface. Create it shared, then open it from the WGC D3D11 device.
++    D3D12_HEAP_PROPERTIES hp{};hp.Type=D3D12_HEAP_TYPE_DEFAULT;hp.CreationNodeMask=1;hp.VisibleNodeMask=1;
++    D3D12_RESOURCE_DESC rd{};rd.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;rd.Width=cap.Width();rd.Height=cap.Height();rd.DepthOrArraySize=1;rd.MipLevels=1;rd.Format=DXGI_FORMAT_B8G8R8A8_UNORM;rd.SampleDesc.Count=1;rd.Layout=D3D12_TEXTURE_LAYOUT_UNKNOWN;rd.Flags=D3D12_RESOURCE_FLAG_NONE;
++    HR(d.device->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_SHARED,&rd,D3D12_RESOURCE_STATE_COMMON,nullptr,IID_PPV_ARGS(&d.shared)),"Create D3D12-owned WGC interop texture");
++    HR(d.device->CreateFence(0,D3D12_FENCE_FLAG_SHARED,IID_PPV_ARGS(&d.sharedFence)),"Create D3D12 shared capture fence");
++    HANDLE textureHandle=nullptr,fenceHandle=nullptr;
++    HR(d.device->CreateSharedHandle(d.shared.Get(),nullptr,GENERIC_ALL,nullptr,&textureHandle),"Share D3D12 WGC interop texture");
++    try {
++        HR(d.device->CreateSharedHandle(d.sharedFence.Get(),nullptr,GENERIC_ALL,nullptr,&fenceHandle),"Share D3D12 capture fence");
++        cap.AttachShared(textureHandle,fenceHandle);
++    } catch(...) {
++        if(textureHandle)CloseHandle(textureHandle);if(fenceHandle)CloseHandle(fenceHandle);throw;
++    }
++    CloseHandle(textureHandle);CloseHandle(fenceHandle);
++
+     HR(d.device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&d.frameFence)),"Frame fence");d.fenceEvent=CreateEventW(nullptr,FALSE,FALSE,nullptr);if(!d.fenceEvent)return false;
+     CreateBlitPipeline(d);CreateSwapchain(output,s,d);
+     gDLSS.Init(d.device.Get(),d.adapter.Get(),d.shared.Get(),cap.Width(),cap.Height(),d.width,d.height,s.sr,s.preset,s.fg,s.multiplier,s.dynamicTarget,s.boost,s.nvof);
