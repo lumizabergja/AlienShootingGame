@@ -121,32 +121,21 @@ jobs:
 
           h=Path("source/dlss_bridge.h")
           s=h.read_text(encoding="utf-8-sig")
-          s=s.replace('    bool suspended{};\n    bool framePrepared{};\n',
-                      '    bool suspended{};\n    bool framePrepared{};\n    bool fgArmed{};\n',1)
+          old='    bool suspended{};\n    bool framePrepared{};\n'
+          if old not in s: raise SystemExit("fgArmed insertion point not found")
+          s=s.replace(old,'    bool suspended{};\n    bool framePrepared{};\n    bool fgArmed{};\n',1)
           h.write_text(s,encoding="utf-8")
 
           p=Path("source/dlss_bridge.cpp")
           s=p.read_text(encoding="utf-8-sig")
 
-          old='''        activeOptions=go;suspended=false;framePrepared=false;reportCalls=reportPresents=0;reportResult=sl::Result::eOk;reportStatus=sl::DLSSGStatus::eOk;
-              Check(fgOptions(viewport,go),"Enable selected NVIDIA Frame Generation mode");
-          '''
-          old='\n'.join(line[10:] if line.startswith('          ') else line for line in old.splitlines())+'\n'
-          new='''        activeOptions=go;suspended=false;framePrepared=false;fgArmed=false;reportCalls=reportPresents=0;reportResult=sl::Result::eOk;reportStatus=sl::DLSSGStatus::eOk;
-              sl::DLSSGOptions warmup=go;warmup.mode=sl::DLSSGMode::eOff;
-              Check(fgOptions(viewport,warmup),"Initialize Frame Generation disabled for one-frame warmup");
-          '''
-          new='\n'.join(line[10:] if line.startswith('          ') else line for line in new.splitlines())+'\n'
+          old='        activeOptions=go;suspended=false;framePrepared=false;reportCalls=reportPresents=0;reportResult=sl::Result::eOk;reportStatus=sl::DLSSGStatus::eOk;\n        Check(fgOptions(viewport,go),"Enable selected NVIDIA Frame Generation mode");\n'
+          new='        activeOptions=go;suspended=false;framePrepared=false;fgArmed=false;reportCalls=reportPresents=0;reportResult=sl::Result::eOk;reportStatus=sl::DLSSGStatus::eOk;\n        sl::DLSSGOptions warmup=go;warmup.mode=sl::DLSSGMode::eOff;\n        Check(fgOptions(viewport,warmup),"Initialize Frame Generation disabled for one-frame warmup");\n'
           if old not in s: raise SystemExit("FG enable block not found")
           s=s.replace(old,new,1)
 
-          anchor='''        Transition(list,result.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-              Transition(list,current.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,read);
-          }
-          if(fg) {
-          '''
-          anchor='\n'.join(line[10:] if line.startswith('          ') else line for line in anchor.splitlines())+'\n'
-          replacement='''        Transition(list,result.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+          old='        Transition(list,result.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);\n        Transition(list,current.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,read);\n    }\n    if(fg) {\n'
+          new='''        Transition(list,result.Get(),D3D12_RESOURCE_STATE_COPY_DEST,D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
               Transition(list,current.Get(),D3D12_RESOURCE_STATE_COPY_SOURCE,read);
           }
           if(fg && !sr) {
@@ -162,21 +151,17 @@ jobs:
           }
           if(fg) {
           '''
-          replacement='\n'.join(line[10:] if line.startswith('          ') else line for line in replacement.splitlines())+'\n'
-          if anchor not in s: raise SystemExit("SR-off FG tag insertion point not found")
-          s=s.replace(anchor,replacement,1)
+          new='\n'.join(line[10:] if line.startswith('          ') else line for line in new.splitlines())+'\n'
+          if old not in s: raise SystemExit("SR-off FG tag insertion point not found")
+          s=s.replace(old,new,1)
 
-          old='''void DlssExperiment::AfterPresent() {
-              if (!fg) return;
-              sl::DLSSGState state{};
-          '''
-          old='\n'.join(line[10:] if line.startswith('          ') else line for line in old.splitlines())+'\n'
+          old='void DlssExperiment::AfterPresent() {\n    if (!fg) return;\n    sl::DLSSGState state{};\n'
           new='''void DlssExperiment::AfterPresent() {
               if (!fg) return;
               if (!fgArmed) {
                   Check(fgOptions(viewport,activeOptions),"Arm selected Frame Generation mode after warmup present");
                   fgArmed=true;
-                  log(L"Frame Generation armed after one native warm-up present; all required FG inputs are tagged.");
+                  log(L"Frame Generation armed after one native warm-up present; required depth/motion/HUD-less inputs are active.");
                   return;
               }
               sl::DLSSGState state{};
@@ -185,8 +170,10 @@ jobs:
           if old not in s: raise SystemExit("AfterPresent block not found")
           s=s.replace(old,new,1)
 
-          s=s.replace('    inputFence.Reset();inputFenceValue=0;\n',
-                      '    inputFence.Reset();inputFenceValue=0;fgArmed=false;\n',1)
+          old='    inputFence.Reset();inputFenceValue=0;\n'
+          if old not in s: raise SystemExit("release reset block not found")
+          s=s.replace(old,'    inputFence.Reset();inputFenceValue=0;fgArmed=false;\n',1)
+
           p.write_text(s,encoding="utf-8")
       - name: Fetch current NVIDIA headers
         shell: powershell
