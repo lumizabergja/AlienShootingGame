@@ -243,9 +243,9 @@ void DlssExperiment::PrepareFrame() {
     if(fg) Check(reflexSleep(*token),"Reflex sleep");
     framePrepared = true;
 }
-bool DlssExperiment::PrepareMotion(ID3D12Fence* captureFence,uint64_t captureValue,UINT sourceIndex) {
+bool DlssExperiment::PrepareMotion(ID3D12Fence* captureFence,uint64_t captureValue,UINT sourceIndex,ID3D12Fence* historyFence,uint64_t historyValue) {
     activeSourceIndex=sourceIndex;
-    return nvof.Available() ? nvof.SubmitFrame(captureFence,captureValue,sourceIndex) : false;
+    return nvof.Available() ? nvof.SubmitFrame(captureFence,captureValue,sourceIndex,historyFence,historyValue) : false;
 }
 bool DlssExperiment::WaitMotion(ID3D12CommandQueue* queue) {
     return nvof.WaitOnFlow(queue);

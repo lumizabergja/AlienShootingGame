@@ -841,7 +841,9 @@ bool App::RenderFrame(CaptureState& c, Dx12State& d, UINT captureSlot, UINT64 co
     // the NVOFA fence wait only between the pre-motion and post-motion lists.
     if (captureSlot >= kCaptureSlots) return false;
     ID3D12Resource* source = d.sharedTextures[captureSlot].Get();
-    gDLSS.PrepareMotion(d.sharedFence.Get(),copyReady,captureSlot);
+    // Protect the shared optical-flow output and previous-frame texture from reuse
+    // until the previous graphics submission has finished consuming/updating them.
+    gDLSS.PrepareMotion(d.sharedFence.Get(),copyReady,captureSlot,d.renderFence.Get(),d.nextRenderFenceValue-1);
     UINT frame = d.swapchain->GetCurrentBackBufferIndex();
 
     // The worker has already waited for this backbuffer's frame fence, so a

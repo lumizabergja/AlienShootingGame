@@ -30,7 +30,7 @@ public:
 
     // Submit directly from the live DXGI capture texture. NVOFA waits on the
     // D3D11/D3D12 shared capture fence, so there is no pre-flow graphics copy.
-    bool SubmitFrame(ID3D12Fence* captureFence, uint64_t captureValue, UINT sourceIndex);
+    bool SubmitFrame(ID3D12Fence* captureFence, uint64_t captureValue, UINT sourceIndex, ID3D12Fence* historyFence, uint64_t historyValue);
     bool WaitOnFlow(ID3D12CommandQueue* queue) const;
     void BeginRead(ID3D12GraphicsCommandList* list);
     void EndRead(ID3D12GraphicsCommandList* list);

@@ -123,12 +123,12 @@ bool NvofBridge::Init(ID3D12Device* device, ID3D12Resource* const* liveSources, 
     return true;
 }
 
-bool NvofBridge::SubmitFrame(ID3D12Fence* captureFence,uint64_t captureValue,UINT sourceIndex){
+bool NvofBridge::SubmitFrame(ID3D12Fence* captureFence,uint64_t captureValue,UINT sourceIndex,ID3D12Fence* historyFence,uint64_t historyValue){
     if(!ready_||!captureFence||sourceIndex>=sourceHandles_.size()){flowValid_=false;return false;}
     if(!hasPrevious_){flowValid_=false;return false;}
-    NV_OF_FENCE_POINT wait{captureFence,captureValue}; NV_OF_FENCE_POINT done{ofaFence_.Get(),++ofaValue_};
+    NV_OF_FENCE_POINT waits[2]={{captureFence,captureValue},{historyFence,historyValue}}; NV_OF_FENCE_POINT done{ofaFence_.Get(),++ofaValue_};
     NV_OF_EXECUTE_INPUT_PARAMS_D3D12 in{}; in.inputFrame=static_cast<NvOFGPUBufferHandle>(sourceHandles_[sourceIndex]); in.referenceFrame=static_cast<NvOFGPUBufferHandle>(previousHandle_);
-    in.disableTemporalHints=disableTemporalOnce_?NV_OF_TRUE:NV_OF_FALSE; disableTemporalOnce_=false; in.numFencePoints=1; in.fencePoint=&wait;
+    in.disableTemporalHints=disableTemporalOnce_?NV_OF_TRUE:NV_OF_FALSE; disableTemporalOnce_=false; in.numFencePoints=(historyFence && historyValue)?2u:1u; in.fencePoint=waits;
     NV_OF_EXECUTE_OUTPUT_PARAMS_D3D12 out{}; out.outputBuffer=static_cast<NvOFGPUBufferHandle>(flowHandle_); out.outputCostBuffer=static_cast<NvOFGPUBufferHandle>(costHandle_);
     out.fencePoint=&done;
     auto st=api_->fn.nvOFExecuteD3D12(static_cast<NvOFHandle>(session_),&in,&out); flowValid_=st==NV_OF_SUCCESS;

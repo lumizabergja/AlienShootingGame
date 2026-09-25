@@ -37,7 +37,7 @@ public:
     void BindDevice(ID3D12Device* d) {Check(setDevice(d),"slSetD3DDevice");}
     void Init(ID3D12Device*,IDXGIAdapter1*,ID3D12Resource* const*,UINT,UINT,UINT,bool,bool,UINT,bool);
     void PrepareFrame();
-    bool PrepareMotion(ID3D12Fence*,uint64_t,UINT);
+    bool PrepareMotion(ID3D12Fence*,uint64_t,UINT,ID3D12Fence*,uint64_t);
     bool WaitMotion(ID3D12CommandQueue*);
     // V4 split path: record source/resample work first so it can overlap the
     // NVOFA engine.  Motion-vector consumption and history writes stay in the
