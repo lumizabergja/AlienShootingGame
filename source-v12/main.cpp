@@ -993,6 +993,7 @@ void App::Worker(HWND target, HWND outputWindow) {
     CaptureState c;
     {
     Dx12State d;
+    WgcCaptureBackend wgc;
     std::thread captureThread;
     std::atomic<bool> captureThreadStop{false};
     std::atomic<bool> captureEnabled{false};
@@ -1016,7 +1017,6 @@ void App::Worker(HWND target, HWND outputWindow) {
         }
         uint32_t width=0,height=0;
         if(!InitCapture(target,c,width,height,useWgc_)) throw std::runtime_error("Capture initialization failed. See earlier log entry.");
-        WgcCaptureBackend wgc;
         if (useWgc_) {
             std::wstring wgcError;
             if (!wgc.Init(target, c.device.Get(), d.qpcFrequency, wgcError))
@@ -1452,7 +1452,7 @@ void App::Worker(HWND target, HWND outputWindow) {
     captureEnabled.store(false,std::memory_order_release);
     captureThreadStop.store(true,std::memory_order_release);
     if(captureThread.joinable()) captureThread.join();
-        wgc.Shutdown();
+    wgc.Shutdown();
 
     if (d.queue) {
         try { gDLSS.BeforeFrame(d.queue.Get()); } catch (const std::exception& e) {

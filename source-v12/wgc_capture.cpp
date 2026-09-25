@@ -4,10 +4,10 @@
 #if V12_HAS_WGC
 using Microsoft::WRL::ComPtr;
 using namespace winrt;
-using namespace Windows::Graphics;
-using namespace Windows::Graphics::Capture;
-using namespace Windows::Graphics::DirectX;
-using namespace Windows::Graphics::DirectX::Direct3D11;
+using namespace winrt::Windows::Graphics;
+using namespace winrt::Windows::Graphics::Capture;
+using namespace winrt::Windows::Graphics::DirectX;
+using namespace winrt::Windows::Graphics::DirectX::Direct3D11;
 
 namespace {
 template <typename T>
