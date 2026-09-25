@@ -251,6 +251,7 @@ bool DlssExperiment::WaitMotion(ID3D12CommandQueue* queue) {
     return nvof.WaitOnFlow(queue);
 }
 void DlssExperiment::RecordPreMotion(ID3D12GraphicsCommandList* list,ID3D12Resource* source,UINT sourceIndex) {
+    if(!token || !framePrepared) throw std::runtime_error("DLSS frame token missing before command recording");
     activeSourceIndex=sourceIndex;
     framePrepared = false;
     Marker(sl::PCLMarker::eSimulationStart);Marker(sl::PCLMarker::eSimulationEnd);

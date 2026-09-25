@@ -1,5 +1,6 @@
 #include <windows.h>
 #include <commctrl.h>
+#include <dwmapi.h>
 #include <d3d11_4.h>
 #include <d3d12.h>
 #include <d3dcompiler.h>
@@ -33,7 +34,7 @@ using Microsoft::WRL::ComPtr;
 
 namespace {
 
-constexpr wchar_t kAppName[] = L"DX12 Presenter - DLSS FG 2x / 3x / 4x";
+constexpr wchar_t kAppName[] = L"DX12 Presenter V13 - DXGI / WGC - DLSS FG";
 constexpr wchar_t kControlClass[] = L"LoLDX12Presenter.Control";
 constexpr wchar_t kPresenterClass[] = L"LoLDX12Presenter.Output";
 constexpr UINT WM_APP_STATUS = WM_APP + 1;
@@ -185,6 +186,7 @@ struct CaptureState {
     ComPtr<ID3D11DeviceContext> context;
     ComPtr<ID3D11DeviceContext4> context4;
     bool duplicateOutput1{false};
+    std::mutex producerStatsMutex;
     double producerSubmitSumMs{}, producerSubmitMaxMs{};
     unsigned producerSubmitSamples{};
     std::array<CaptureSlot,kCaptureSlots> slots;
@@ -424,7 +426,7 @@ void App::Start() {
         }
     }
     LRESULT selected = SendMessageW(targetCombo_, CB_GETCURSEL, 0, 0);
-    if (selected == CB_ERR) { SetWindowTextW(status_, L"Select the League game window first."); return; }
+    if (selected == CB_ERR) { SetWindowTextW(status_, L"Select the game window first."); return; }
     HWND target = reinterpret_cast<HWND>(SendMessageW(targetCombo_, CB_GETITEMDATA, selected, 0));
     if (!IsWindow(target)) { RefreshTargets(); SetWindowTextW(status_, L"That window closed. Select it again."); return; }
     fullscreen_ = SendDlgItemMessageW(control_, IDC_FULLSCREEN, BM_GETCHECK, 0, 0) == BST_CHECKED;
@@ -441,7 +443,7 @@ void App::Start() {
     paused_ = false;
     recreateSwapchain_ = false;
     if (!CreatePresenter(target, fullscreen_)) {
-        SetWindowTextW(status_, L"Could not create the DX12 output window. Restore League, press Refresh, and select it again.");
+        SetWindowTextW(status_, L"Could not create the DX12 output window. Restore the game, press Refresh, and select it again.");
         return;
     }
     running_ = true;
@@ -539,14 +541,20 @@ bool App::InitCapture(HWND target, CaptureState& c, uint32_t& width, uint32_t& h
     if (!c.output) { PostStatus(L"Could not find the monitor containing League."); return false; }
     D3D_FEATURE_LEVEL levels[] = {D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0};
     D3D_FEATURE_LEVEL obtained{};
-    // V11: this D3D11 device is owned by the dedicated capture thread after
-    // initialization. SINGLETHREADED removes D3D11's unnecessary cross-thread
-    // serialization overhead while preserving our explicit mailbox ownership.
-    const UINT captureDeviceFlags = D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_SINGLETHREADED;
+    // DXGI has one capture owner; WGC also uses internal worker threads and
+    // requires a thread-safe device and protected immediate context.
+    const UINT captureDeviceFlags = D3D11_CREATE_DEVICE_BGRA_SUPPORT |
+        (useWgc ? 0u : D3D11_CREATE_DEVICE_SINGLETHREADED);
     hr = D3D11CreateDevice(c.adapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr,
         captureDeviceFlags, levels, ARRAYSIZE(levels), D3D11_SDK_VERSION,
         &c.device, &obtained, &c.context);
     if (FAILED(hr)) { PostStatus(L"D3D11 capture device failed: " + WinError(hr)); return false; }
+    if (useWgc) {
+        ComPtr<ID3D11Multithread> multithread;
+        hr = c.context.As(&multithread);
+        if (FAILED(hr)) { PostStatus(L"WGC D3D11 multithread interface failed: " + WinError(hr)); return false; }
+        multithread->SetMultithreadProtected(TRUE);
+    }
     hr = c.device.As(&c.device5);
     if (FAILED(hr)) { PostStatus(L"Windows/D3D11 shared-fence support is unavailable: " + WinError(hr)); return false; }
     hr = c.context.As(&c.context4);
@@ -994,6 +1002,10 @@ void App::Worker(HWND target, HWND outputWindow) {
     {
     Dx12State d;
     WgcCaptureBackend wgc;
+    struct FrameNotification {
+        HANDLE event{CreateEventW(nullptr, FALSE, FALSE, nullptr)};
+        ~FrameNotification() { if(event) CloseHandle(event); }
+    } notification;
     std::thread captureThread;
     std::atomic<bool> captureThreadStop{false};
     std::atomic<bool> captureEnabled{false};
@@ -1005,7 +1017,8 @@ void App::Worker(HWND target, HWND outputWindow) {
     std::atomic<unsigned> rendererClaimReplacements{0};
     std::atomic<int> sourceIntervalUs{8333};
     try {
-        gLog.Write(L"V12 A/B capture-backend build. DuplicateOutput1 when available / single-threaded D3D11 capture / discard-copy mailbox writes / measured-cadence freshest-claim scheduling / GPU stage timestamps. Selected multiplier: " + std::to_wstring(multiplier_) + L"x.");
+        PostStatus(L"V13: initializing capture and DLSS...");
+        gLog.Write(L"V13 repaired capture-backend build. DuplicateOutput1 when available / single-threaded D3D11 capture / discard-copy mailbox writes / freshest-claim scheduling / GPU stage timestamps. Selected multiplier: " + std::to_wstring(multiplier_) + L"x.");
         QueryPerformanceFrequency(&d.qpcFrequency);
         {
             std::wstring reason;
@@ -1019,7 +1032,7 @@ void App::Worker(HWND target, HWND outputWindow) {
         if(!InitCapture(target,c,width,height,useWgc_)) throw std::runtime_error("Capture initialization failed. See earlier log entry.");
         if (useWgc_) {
             std::wstring wgcError;
-            if (!wgc.Init(target, c.device.Get(), d.qpcFrequency, wgcError))
+            if (!wgc.Init(target, c.device.Get(), c.sharedFence.Get(), d.qpcFrequency, wgcError))
                 throw std::runtime_error(std::string("WGC initialization failed: ") + std::string(wgcError.begin(), wgcError.end()));
             gLog.Write(L"V12 active backend: Windows Graphics Capture (FreeThreaded frame pool).");
         } else {
@@ -1040,6 +1053,12 @@ void App::Worker(HWND target, HWND outputWindow) {
         // overwritten when the renderer has not claimed them, so stale capture
         // frames never form a queue.
         captureThread = std::thread([&, width, height]() {
+            HRESULT apartmentHr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            struct ApartmentGuard { HRESULT hr; ~ApartmentGuard() { if(SUCCEEDED(hr)) CoUninitialize(); } } apartment{apartmentHr};
+            if (useWgc_ && FAILED(apartmentHr)) {
+                gLog.Write(L"WGC capture-thread COM initialization failed: " + WinError(apartmentHr));
+                captureFault.store(true, std::memory_order_release); return;
+            }
             ConfigureLowLatencyThread(true);
             UINT64 sequence=1;
             unsigned captureMisses=0;
@@ -1072,15 +1091,29 @@ void App::Worker(HWND target, HWND outputWindow) {
                     }
                     if (!sourceTexture) {
                         LARGE_INTEGER nowQpc{}; QueryPerformanceCounter(&nowQpc);
-                        AdaptiveCaptureWait(captureMisses, nowQpc, lastCaptureQpc, expectedIntervalMs, d.qpcFrequency);
+                        wgc.WaitForFrame(2);
                         continue;
                     }
                 } else {
-                    hr=c.duplication->AcquireNextFrame(0,&info,&resource);
+                    hr=c.duplication->AcquireNextFrame(2,&info,&resource);
                     if(hr==DXGI_ERROR_WAIT_TIMEOUT) {
                         LARGE_INTEGER nowQpc{}; QueryPerformanceCounter(&nowQpc);
-                        AdaptiveCaptureWait(captureMisses, nowQpc, lastCaptureQpc, expectedIntervalMs, d.qpcFrequency);
                         continue;
+                    }
+                    if (hr == DXGI_ERROR_ACCESS_LOST) {
+                        c.duplication.Reset();
+                        gLog.Write(L"V13: DXGI access lost; recreating duplication.");
+                        for (unsigned attempt=0; attempt<20 && !stop_ && !captureThreadStop.load(); ++attempt) {
+                            ComPtr<IDXGIOutput5> out5;
+                            if(SUCCEEDED(c.output.As(&out5))) {
+                                const DXGI_FORMAT formats[]={DXGI_FORMAT_B8G8R8A8_UNORM};
+                                hr=out5->DuplicateOutput1(c.device.Get(),0,1,formats,&c.duplication);
+                            }
+                            if(!c.duplication) hr=c.output->DuplicateOutput(c.device.Get(),&c.duplication);
+                            if(SUCCEEDED(hr) && c.duplication) break;
+                            Sleep(50);
+                        }
+                        if(c.duplication) { gLog.Write(L"V13: DXGI duplication recovered."); continue; }
                     }
                     if(FAILED(hr)) {
                         gLog.Write(L"V12 DXGI AcquireNextFrame failed: "+WinError(hr));
@@ -1088,15 +1121,18 @@ void App::Worker(HWND target, HWND outputWindow) {
                         break;
                     }
                     if(!info.LastPresentTime.QuadPart || !info.AccumulatedFrames) { c.duplication->ReleaseFrame(); continue; }
-                    resource.As(&sourceTexture);
+                    hr=resource.As(&sourceTexture);
+                    if(FAILED(hr)) { c.duplication->ReleaseFrame(); captureFault.store(true); break; }
                     sourceTimestamp=info.LastPresentTime;
                 }
                 captureMisses = 0;
 
                 struct FrameLease {
                     IDXGIOutputDuplication* d{};
-                    ~FrameLease(){if(d)d->ReleaseFrame();}
-                } lease{useWgc_ ? nullptr : c.duplication.Get()};
+                    WgcCaptureBackend* wgc{};
+                    UINT64 copyValue{};
+                    ~FrameLease(){if(d)d->ReleaseFrame(); if(wgc)wgc->FinishFrame(copyValue);}
+                } lease{useWgc_ ? nullptr : c.duplication.Get(), useWgc_ ? &wgc : nullptr};
 
                 int chosen=-1;
                 const UINT64 released=c.renderFence ? c.renderFence->GetCompletedValue() : UINT64_MAX;
@@ -1165,9 +1201,19 @@ void App::Worker(HWND target, HWND outputWindow) {
                     break;
                 }
                 D3D11_TEXTURE2D_DESC sourceDesc{}; sourceTexture->GetDesc(&sourceDesc);
+                RECT currentClient{};
+                if(!GetClientScreenRect(target,currentClient) ||
+                   currentClient.right-currentClient.left != (LONG)width ||
+                   currentClient.bottom-currentClient.top != (LONG)height) {
+                    slot.state.store(0,std::memory_order_release);
+                    gLog.Write(L"Source window resized/closed; stop and restart capture at the new size.");
+                    captureFault.store(true); break;
+                }
+                c.sourceRect=currentClient;
                 D3D11_BOX box{};
                 if (useWgc_) {
-                    RECT wr{}; GetWindowRect(target,&wr);
+                    RECT wr{};
+                    if(FAILED(DwmGetWindowAttribute(target,DWMWA_EXTENDED_FRAME_BOUNDS,&wr,sizeof(wr)))) GetWindowRect(target,&wr);
                     box.left=(UINT)std::max<LONG>(0,c.sourceRect.left-wr.left);
                     box.top=(UINT)std::max<LONG>(0,c.sourceRect.top-wr.top);
                 } else {
@@ -1195,34 +1241,41 @@ void App::Worker(HWND target, HWND outputWindow) {
                 // be submitted before D3D12/NVOFA may consume this slot. Keep one
                 // asynchronous Flush here; removing it can leave the signal buffered.
                 c.context->Flush();
+                lease.copyValue=ready;
 
                 LARGE_INTEGER signalQpc{}; QueryPerformanceCounter(&signalQpc);
                 if (d.qpcFrequency.QuadPart > 0 && producerStart.QuadPart > 0 && signalQpc.QuadPart >= producerStart.QuadPart) {
                     const double producerMs = 1000.0 * double(signalQpc.QuadPart - producerStart.QuadPart) / double(d.qpcFrequency.QuadPart);
+                    std::lock_guard statsLock(c.producerStatsMutex);
                     c.producerSubmitSumMs += producerMs;
                     c.producerSubmitMaxMs = std::max(c.producerSubmitMaxMs, producerMs);
                     ++c.producerSubmitSamples;
                 }
-                if (lastCaptureQpc.QuadPart > 0 && d.qpcFrequency.QuadPart > 0 && signalQpc.QuadPart > lastCaptureQpc.QuadPart) {
-                    const double intervalMs = 1000.0 * double(signalQpc.QuadPart - lastCaptureQpc.QuadPart) /
+                if (lastCaptureQpc.QuadPart > 0 && d.qpcFrequency.QuadPart > 0 && sourceTimestamp.QuadPart > lastCaptureQpc.QuadPart) {
+                    const double intervalMs = 1000.0 * double(sourceTimestamp.QuadPart - lastCaptureQpc.QuadPart) /
                                               double(d.qpcFrequency.QuadPart);
                     if (intervalMs > 2.0 && intervalMs < 25.0) {
                         expectedIntervalMs = expectedIntervalMs * 0.90 + intervalMs * 0.10;
                         sourceIntervalUs.store((int)std::lround(expectedIntervalMs * 1000.0), std::memory_order_release);
                     }
                 }
-                lastCaptureQpc = signalQpc;
+                lastCaptureQpc = sourceTimestamp;
                 slot.readyValue=ready;
                 slot.sequence.store(sequence++,std::memory_order_release);
                 slot.presentTimestamp=sourceTimestamp;
                 slot.signalQpc=signalQpc;
                 slot.state.store(1,std::memory_order_release);
+                if(notification.event) SetEvent(notification.event);
             }
         });
 
         ConfigureLowLatencyThread(false);
         auto lastReport=std::chrono::steady_clock::now();auto lastFrame=lastReport;
         unsigned presented=0;bool visible=true;
+        bool pacingReady=false;
+        bool waitingForFocus=false;
+        auto lastNoFrameReport=std::chrono::steady_clock::now();
+        PostStatus(L"Ready: switch to your selected game window to begin capture.");
         while(!stop_&&IsWindow(target)&&IsWindow(outputWindow)) {
             if(captureFault.load(std::memory_order_acquire))
                 throw std::runtime_error("Capture thread stopped after a DXGI/D3D11 error. Check the log.");
@@ -1231,6 +1284,7 @@ void App::Worker(HWND target, HWND outputWindow) {
             bool active=foreground==target||foreground==outputWindow||
                         GetAncestor(foreground,GA_ROOT)==target;
             if(paused_||!active||IsIconic(target)) {
+                if(!waitingForFocus) { PostStatus(paused_ ? L"Paused (F8 resumes)." : L"Waiting for game focus: click your selected game window."); waitingForFocus=true; }
                 captureEnabled.store(false,std::memory_order_release);
                 for(auto& slot:c.slots) {
                     int expected=1;
@@ -1241,6 +1295,7 @@ void App::Worker(HWND target, HWND outputWindow) {
                 if(visible) {PostMessageW(outputWindow,WM_APP_OUTPUT_VISIBILITY,FALSE,0);visible=false;}
                 gDLSS.ResetHistory();Sleep(10);continue;
             }
+            if(waitingForFocus) { PostStatus(L"Game focused: waiting for first captured frame..."); waitingForFocus=false; }
             focus_compat::Enable(true);
             gDLSS.Suspend(false);
             if(!captureEnabled.exchange(true,std::memory_order_acq_rel)) {
@@ -1256,10 +1311,11 @@ void App::Worker(HWND target, HWND outputWindow) {
             if (stop_ || paused_) continue;
 
             // Render/present pacing is independent from Desktop Duplication now.
-            if (d.latencyWaitableObject) {
+            if (!pacingReady && d.latencyWaitableObject) {
                 DWORD wr = WaitForSingleObjectEx(d.latencyWaitableObject, 1000, FALSE);
                 if (wr != WAIT_OBJECT_0)
                     throw std::runtime_error("DXGI frame-latency wait timed out before render.");
+                pacingReady=true;
             }
 
             UINT preCaptureFrame=d.swapchain->GetCurrentBackBufferIndex();
@@ -1273,7 +1329,8 @@ void App::Worker(HWND target, HWND outputWindow) {
 
             // Pay Streamline's previous-input dependency before claiming a mailbox
             // frame so the chosen capture remains as fresh as possible.
-            gDLSS.BeforeFrame(d.queue.Get());
+            // Keep a pending token/pacing grant across empty capture polls.
+            gDLSS.PrepareFrame();
 
             // Claim the newest READY slot.  If a newer frame arrived while older
             // captures were waiting, discard those older READY slots immediately.
@@ -1288,39 +1345,22 @@ void App::Worker(HWND target, HWND outputWindow) {
                 }
                 if(candidate<0) break;
 
-                // V10: derive the stale limit from the measured source cadence.
-                // Keep it slightly below one source interval so an already-old
-                // READY frame is not carried into the next present opportunity.
-                // Clamp the value so temporary cadence estimation noise cannot
-                // cause pathological rejection at very high/low source rates.
-                LARGE_INTEGER claimNow{}; QueryPerformanceCounter(&claimNow);
-                if (d.qpcFrequency.QuadPart > 0 && c.slots[candidate].signalQpc.QuadPart > 0 &&
-                    claimNow.QuadPart >= c.slots[candidate].signalQpc.QuadPart) {
-                    const double mailboxAgeMs = 1000.0 *
-                        double(claimNow.QuadPart - c.slots[candidate].signalQpc.QuadPart) /
-                        double(d.qpcFrequency.QuadPart);
-                    const double measuredIntervalMs =
-                        std::max(0.001, sourceIntervalUs.load(std::memory_order_acquire) / 1000.0);
-                    const double staleLimitMs = std::clamp(measuredIntervalMs * 0.92,
-                        kMailboxStaleFloorMs, kMailboxStaleCeilMs);
-                    if (mailboxAgeMs > staleLimitMs) {
-                        int staleExpected=1;
-                        if(c.slots[candidate].state.compare_exchange_strong(staleExpected,0,std::memory_order_acq_rel)) {
-                            rendererAgeDrops.fetch_add(1,std::memory_order_relaxed);
-                            continue;
-                        }
-                    }
-                }
-
+                // Inspect frame metadata only after taking IN_USE ownership.
+                // The sole newest frame remains usable even if the game is static.
                 int expected=1;
                 if(c.slots[candidate].state.compare_exchange_strong(expected,2,std::memory_order_acq_rel)) {
                     chosen=candidate; break;
                 }
             }
             if(chosen<0) {
-                SwitchToThread();
+                if(notification.event) WaitForSingleObject(notification.event,2); else Sleep(1);
+                if(std::chrono::steady_clock::now()-lastNoFrameReport>std::chrono::seconds(3)) {
+                    PostStatus(L"No new captured frames yet. Keep the game visible; try borderless/windowed mode.");
+                    lastNoFrameReport=std::chrono::steady_clock::now();
+                }
                 continue;
             }
+            lastNoFrameReport=std::chrono::steady_clock::now();
 
             for(UINT i=0;i<kCaptureSlots;++i) {
                 if((int)i==chosen) continue;
@@ -1378,6 +1418,7 @@ void App::Worker(HWND target, HWND outputWindow) {
                 d.mailboxToClaimMaxMs = std::max(d.mailboxToClaimMaxMs, ms);
                 ++d.mailboxSamples;
             }
+            gDLSS.BeforeFrame(d.queue.Get());
             UINT64 renderDone=0;
             if(!RenderFrame(c,d,(UINT)chosen,renderSlot.readyValue,renderDone))
                 throw std::runtime_error("Present failed. Check NVIDIA Streamline logs.");
@@ -1387,6 +1428,8 @@ void App::Worker(HWND target, HWND outputWindow) {
             renderSlot.releaseValue=renderDone;
             renderSlot.state.store(0,std::memory_order_release);
 
+            pacingReady=false;
+            if(presented==0) gLog.Write(L"V13 frame successfully presented.");
             ++presented;
             now=std::chrono::steady_clock::now();double elapsed=std::chrono::duration<double>(now-lastReport).count();
             if(elapsed>=1.0) {
@@ -1411,11 +1454,17 @@ void App::Worker(HWND target, HWND outputWindow) {
                         d.claimToPresentSumMs / d.mailboxSamples, d.claimToPresentMaxMs);
                     gLog.Write(sched);
                 }
-                if (c.producerSubmitSamples) {
+                {
+                    double sumMs{},maxMs{}; unsigned samples{};
+                    { std::lock_guard statsLock(c.producerStatsMutex);
+                      sumMs=c.producerSubmitSumMs; maxMs=c.producerSubmitMaxMs; samples=c.producerSubmitSamples;
+                      c.producerSubmitSumMs=c.producerSubmitMaxMs=0; c.producerSubmitSamples=0; }
+                    if(samples) {
                     wchar_t producer[256]{};
                     swprintf_s(producer, L"V12 producer CPU: copy+signal+Flush avg %.3f ms max %.3f ms (%u samples).",
-                        c.producerSubmitSumMs / double(c.producerSubmitSamples), c.producerSubmitMaxMs, c.producerSubmitSamples);
+                        sumMs / double(samples), maxMs, samples);
                     gLog.Write(producer);
+                    }
                 }
                 if (d.gpuSamples) {
                     wchar_t gpu[384]{};
@@ -1440,7 +1489,7 @@ void App::Worker(HWND target, HWND outputWindow) {
                 d.gpuPreSumMs = d.gpuPreMaxMs = 0;
                 d.gpuWaitGapSumMs = d.gpuWaitGapMaxMs = 0;
                 d.gpuPostSumMs = d.gpuPostMaxMs = 0; d.gpuSamples = 0;
-                c.producerSubmitSumMs = c.producerSubmitMaxMs = 0.0; c.producerSubmitSamples = 0;
+
                 PostStatus(L"Captured/base presents: "+std::to_wstring(unsigned(presented/elapsed))+L" FPS | "+gDLSS.Status());
                 presented=0;lastReport=now;
             }
@@ -1452,6 +1501,11 @@ void App::Worker(HWND target, HWND outputWindow) {
     captureEnabled.store(false,std::memory_order_release);
     captureThreadStop.store(true,std::memory_order_release);
     if(captureThread.joinable()) captureThread.join();
+    // All submitted WGC copies must complete before their leased surfaces close.
+    if(useWgc_ && c.sharedFence && c.nextFenceValue>1) {
+        HANDLE done=CreateEventW(nullptr,FALSE,FALSE,nullptr);
+        if(done) { if(SUCCEEDED(c.sharedFence->SetEventOnCompletion(c.nextFenceValue-1,done))) WaitForSingleObject(done,3000); CloseHandle(done); }
+    }
     wgc.Shutdown();
 
     if (d.queue) {
