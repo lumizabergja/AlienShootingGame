@@ -1,0 +1,35 @@
+name: Build V12 WGC executable
+on:
+  push:
+    branches: [dlss-fg-v12-wgc-exe]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Get SDK headers
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch v2.14.1 https://github.com/NVIDIA-RTX/Streamline.git Streamline
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          git clone --depth 1 https://github.com/mbucchia/Optical-Flow-SDK.git OpticalFlow
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Build x64 Release with WGC
+        shell: cmd
+        run: |
+          cd source-v12
+          rc /nologo /fo app.res app.rc
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++20 /O2 /MT /EHsc /W4 /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0A00 /DWINVER=0x0A00 /I"..\Streamline\include" /I"..\OpticalFlow\NvOFInterface" main.cpp dlss_bridge.cpp nvof_bridge.cpp wgc_capture.cpp app.res /Fe:DX12-DLSS-FG-V12-WGC.exe /link /SUBSYSTEM:WINDOWS d3d12.lib d3d11.lib dxgi.lib d3dcompiler.lib dwmapi.lib comctl32.lib shell32.lib ole32.lib user32.lib gdi32.lib wintrust.lib crypt32.lib windowsapp.lib
+          if errorlevel 1 exit /b 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DX12-DLSS-FG-V12-WGC-executable
+          path: source-v12/DX12-DLSS-FG-V12-WGC.exe
+          if-no-files-found: error
