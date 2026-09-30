@@ -1,0 +1,29 @@
+name: ChatGPT V24 Windows Build
+
+on:
+  push:
+    branches:
+      - chatgpt-v24-build
+    paths:
+      - .github/workflows/chatgpt-v24-build.yml
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - name: Checkout build branch
+        uses: actions/checkout@v4
+
+      - name: Build V24 x64 Release
+        shell: pwsh
+        run: ./chatgpt_v24/build.ps1
+
+      - name: Upload V24 executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: DX12-DLSS-FG-V24-Windows-x64
+          path: chatgpt_v24/stage/out/DX12-DLSS-FG-V24-ZERO-RASTER-PARALLEL-COPY.exe
+          if-no-files-found: error
+          retention-days: 1
