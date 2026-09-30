@@ -1,4 +1,5 @@
-name: ChatGPT V24 Windows Build\n# rebuild: static CRT
+name: ChatGPT V24 Windows Build
+# rebuild: static CRT v3
 
 on:
   push:
