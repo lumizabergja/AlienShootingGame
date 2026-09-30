@@ -47,7 +47,7 @@ $cpp = @(
     (Join-Path $src 'wgc_capture.cpp')
 )
 $clArgs = @(
-    '/nologo','/std:c++20','/EHsc','/O2','/MD','/Zc:__cplusplus',
+    '/nologo','/std:c++20','/EHsc','/O2','/MT','/Zc:__cplusplus',
     '/DUNICODE','/D_UNICODE','/DWIN32_LEAN_AND_MEAN','/DNOMINMAX',
     "/I$src", "/I$sl\include", "/I$nvof",
     "/Fe:$exe"
