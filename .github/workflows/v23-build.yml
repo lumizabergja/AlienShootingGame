@@ -1,0 +1,112 @@
+name: Build V23 DXGI Base Latency
+
+on:
+  push:
+    branches: [chatgpt-v23-build-20261006]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Download dependencies and build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = $env:GITHUB_WORKSPACE
+          $work = Join-Path $root '_v23work'
+          $src = Join-Path $work 'source'
+          $deps = Join-Path $work 'deps'
+          $out = Join-Path $work 'DX12-DLSS-FG-V23-DXGI-BASELATENCY'
+          New-Item -ItemType Directory -Force -Path $work,$deps,$out | Out-Null
+          Expand-Archive -LiteralPath (Join-Path $root 'v23build/source.zip') -DestinationPath $work -Force
+          if (!(Test-Path (Join-Path $src 'main.cpp'))) { throw 'source.zip did not expand to source/main.cpp' }
+
+          $slZip = Join-Path $deps 'streamline.zip'
+          Invoke-WebRequest -Uri 'https://github.com/NVIDIA-RTX/Streamline/releases/download/v2.14.1/streamline-sdk-v2.14.1.zip' -OutFile $slZip
+          $slRoot = Join-Path $deps 'streamline'
+          Expand-Archive -LiteralPath $slZip -DestinationPath $slRoot -Force
+          $slHeader = Get-ChildItem $slRoot -Recurse -Filter 'sl.h' -File | Where-Object { $_.FullName -match '[\\/]include[\\/]' } | Select-Object -First 1
+          if (!$slHeader) { throw 'Could not find Streamline sl.h' }
+          $slInclude = $slHeader.Directory.FullName
+
+          $nvof = Join-Path $deps 'NvidiaOF5'
+          git clone --depth 1 https://github.com/SlimRG/NvidiaOF5.git $nvof
+          if (!(Test-Path (Join-Path $nvof 'nvOpticalFlowD3D12.h'))) { throw 'Could not find NVOF headers' }
+
+          & rc.exe /nologo /fo (Join-Path $work 'app.res') (Join-Path $src 'app.rc')
+          if ($LASTEXITCODE -ne 0) { throw "rc.exe failed: $LASTEXITCODE" }
+
+          $exe = Join-Path $out 'DX12-DLSS-FG-V23-DXGI-BASELATENCY.exe'
+          $clArgs = @(
+            '/nologo','/std:c++20','/O2','/GL','/EHsc','/MD','/DNDEBUG','/DUNICODE','/D_UNICODE','/DWIN32_LEAN_AND_MEAN','/utf-8',
+            "/I$src", "/I$slInclude", "/I$nvof",
+            (Join-Path $src 'main.cpp'),
+            (Join-Path $src 'dlss_bridge.cpp'),
+            (Join-Path $src 'nvof_bridge.cpp'),
+            (Join-Path $src 'wgc_capture.cpp'),
+            (Join-Path $work 'app.res'),
+            '/link', "/OUT:$exe", '/SUBSYSTEM:WINDOWS','/LTCG',
+            'd3d11.lib','d3d12.lib','dxgi.lib','d3dcompiler.lib','comctl32.lib','user32.lib','gdi32.lib','ole32.lib','runtimeobject.lib','shcore.lib','windowsapp.lib','wintrust.lib','crypt32.lib'
+          )
+          & cl.exe @clArgs
+          if ($LASTEXITCODE -ne 0) { throw "cl.exe failed: $LASTEXITCODE" }
+          if (!(Test-Path $exe)) { throw 'Build completed without producing EXE' }
+
+          $dllNames = @('sl.common.dll','sl.dlss_g.dll','sl.interposer.dll','sl.pcl.dll','sl.reflex.dll','nvngx_dlssg.dll')
+          foreach ($name in $dllNames) {
+            $matches = @(Get-ChildItem $slRoot -Recurse -Filter $name -File)
+            if ($matches.Count -eq 0) { throw "Missing SDK runtime $name" }
+            $pick = $matches | Where-Object { $_.FullName -match '(x64|_x64|\\x64\\)' } | Select-Object -First 1
+            if (!$pick) { $pick = $matches | Select-Object -First 1 }
+            Copy-Item -LiteralPath $pick.FullName -Destination (Join-Path $out $name) -Force
+          }
+
+          Copy-Item -LiteralPath $src -Destination (Join-Path $out 'source') -Recurse -Force
+          @'
+          DX12 DLSS-G V23 — DXGI BASE-LATENCY
+
+          Latency changes from V22:
+          - Flush-first capture producer: Copy -> shared-fence Signal -> D3D11 Flush -> NVOFA submit.
+          - Split DX12 submission: captured color can render before the NVOFA fence wait; the wait is moved immediately before motion/depth/DLSS-G work.
+          - Just-in-time latest-frame latch after Reflex sleep; an older claimed mailbox is replaced when a newer completed capture is already available.
+          - Per-frame GPU/OFA/Reflex timing instrumentation removed from the release hot path.
+          - No additional buffered frame was added. Latest-frame/drop behavior is preserved.
+
+          Recommended latency test:
+          - Capture backend: DXGI
+          - Low latency / tearing: ON
+          - Reflex: Pre-capture + Boost
+          - Compare the same game/FPS cap against V22.
+
+          Expected result:
+          Typical steady-state base-latency improvement is small/sub-ms, but the freshness latch can avoid a full stale base-frame in timing-race cases.
+          '@ | Set-Content -LiteralPath (Join-Path $out 'README-FIRST.txt') -Encoding UTF8
+
+          $hashLines = Get-ChildItem $out -File | Sort-Object Name | ForEach-Object {
+            $h = Get-FileHash -Algorithm SHA256 -LiteralPath $_.FullName
+            "$($h.Hash.ToLower())  $($_.Name)"
+          }
+          $hashLines | Set-Content -LiteralPath (Join-Path $out 'SHA256SUMS.txt') -Encoding ascii
+
+          $zipOut = Join-Path $work 'DX12-DLSS-FG-V23-DXGI-BASELATENCY-Ready-To-Run.zip'
+          Compress-Archive -Path (Join-Path $out '*') -DestinationPath $zipOut -CompressionLevel Optimal -Force
+          Write-Host "Built: $zipOut"
+
+      - name: Upload ready-to-run V23
+        uses: actions/upload-artifact@v4
+        with:
+          name: DX12-DLSS-FG-V23-DXGI-BASELATENCY-Ready-To-Run
+          path: _v23work/DX12-DLSS-FG-V23-DXGI-BASELATENCY-Ready-To-Run.zip
+          if-no-files-found: error
+          retention-days: 3
