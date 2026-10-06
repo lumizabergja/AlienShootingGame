@@ -30,7 +30,7 @@ using Microsoft::WRL::ComPtr;
 
 namespace {
 
-constexpr wchar_t kAppName[] = L"DX12 Presenter V25 - DLSS FG 2x / 3x / 4x";
+constexpr wchar_t kAppName[] = L"DX12 Presenter V26 - DLSS FG 2x / 3x / 4x";
 constexpr wchar_t kControlClass[] = L"LoLDX12Presenter.Control";
 constexpr wchar_t kPresenterClass[] = L"LoLDX12Presenter.Output";
 constexpr UINT WM_APP_STATUS = WM_APP + 1;
@@ -40,7 +40,7 @@ constexpr DWORD WDA_EXCLUDEFROMCAPTURE_VALUE = 0x00000011;
 constexpr UINT kFrameCount = 2;
 constexpr UINT kAllocatorCount = 4;
 constexpr UINT kCaptureSlots = 3;
-constexpr UINT kGpuQueriesPerFrame = 5;
+constexpr UINT kGpuQueriesPerFrame = 7; // final list 0..4, early copy 5..6
 constexpr UINT kPreprocessQueriesPerFrame = 2;
 
 enum ControlId : int {
@@ -136,7 +136,10 @@ struct Dx12State {
     ComPtr<ID3D12GraphicsCommandList> list;
     ComPtr<ID3D12CommandAllocator> transferAllocators[kAllocatorCount];
     ComPtr<ID3D12GraphicsCommandList> transferCopyList;
-    uint64_t parallelCopyFrames{}, rasterFrames{};
+    uint64_t parallelCopyFrames{}, rasterFrames{}, lateLatchChecks{}, lateLatchReplaced{};
+    bool profileHadCopy[kAllocatorCount]{};
+    uint64_t copySamples{};
+    double copySumMs{}, copyMaxMs{}, joinGapSumMs{}, joinGapMaxMs{};
     ComPtr<ID3D12CommandAllocator> preprocessAllocators[kAllocatorCount];
     ComPtr<ID3D12GraphicsCommandList> preprocessList;
     ComPtr<ID3D12RootSignature> rootSignature;
@@ -191,7 +194,7 @@ void ConsumeGpuProfile(Dx12State& d, UINT allocatorIndex) {
         !d.gpuQueryData || !d.gpuTimestampFrequency) return;
     const UINT64* q = d.gpuQueryData + SIZE_T(allocatorIndex) * kGpuQueriesPerFrame;
     bool monotonic = true;
-    for (UINT i = 1; i < kGpuQueriesPerFrame; ++i) if (q[i] < q[i - 1]) monotonic = false;
+    for (UINT i = 1; i < 5; ++i) if (q[i] < q[i - 1]) monotonic = false;
     if (monotonic && q[4] > q[0]) {
         const double scale = 1000.0 / double(d.gpuTimestampFrequency);
         d.gpuTagSumMs += double(q[1] - q[0]) * scale;
@@ -202,6 +205,14 @@ void ConsumeGpuProfile(Dx12State& d, UINT allocatorIndex) {
         d.gpuTotalSumMs += total;
         d.gpuTotalMaxMs = std::max(d.gpuTotalMaxMs, total);
         ++d.gpuProfileSamples;
+    }
+    if (d.profileHadCopy[allocatorIndex] && q[6] >= q[5] && q[0] >= q[6]) {
+        const double scale = 1000.0 / double(d.gpuTimestampFrequency);
+        const double copyMs = double(q[6]-q[5])*scale;
+        const double gapMs = double(q[0]-q[6])*scale;
+        d.copySumMs += copyMs; d.copyMaxMs = std::max(d.copyMaxMs,copyMs);
+        d.joinGapSumMs += gapMs; d.joinGapMaxMs = std::max(d.joinGapMaxMs,gapMs);
+        ++d.copySamples;
     }
     d.gpuProfileValid[allocatorIndex] = false;
 }
@@ -568,7 +579,7 @@ bool App::InitCapture(HWND target, CaptureState& c, uint32_t& width, uint32_t& h
     hr = c.context.As(&c.context4);
     if (FAILED(hr)) { PostStatus(L"D3D11 context shared-fence support is unavailable: " + WinError(hr)); return false; }
     if (!useWgc) {
-        // V23: prefer DuplicateOutput1 so DXGI can use the modern duplication path
+        // V26: prefer DuplicateOutput1 so DXGI can use the modern duplication path
         // and return the exact BGRA format consumed by the rest of the pipeline.
         // Fall back to DuplicateOutput on older systems/drivers rather than making
         // the new backend less robust than V22.
@@ -577,16 +588,16 @@ bool App::InitCapture(HWND target, CaptureState& c, uint32_t& width, uint32_t& h
             hr = c.output5->DuplicateOutput1(c.device.Get(), 0, ARRAYSIZE(formats), formats, &c.duplication);
             if (SUCCEEDED(hr)) {
                 c.duplicateOutput1 = true;
-                gLog.Write(L"V23 DXGI capture: IDXGIOutput5::DuplicateOutput1 active (BGRA8 direct format).");
+                gLog.Write(L"V26 DXGI capture: IDXGIOutput5::DuplicateOutput1 active (BGRA8 direct format).");
             } else {
-                gLog.Write(L"V23 DuplicateOutput1 unavailable/failed; falling back to DuplicateOutput: " + WinError(hr));
+                gLog.Write(L"V26 DuplicateOutput1 unavailable/failed; falling back to DuplicateOutput: " + WinError(hr));
                 c.duplication.Reset();
             }
         }
         if (!c.duplication) {
             hr = c.output->DuplicateOutput(c.device.Get(), &c.duplication);
             if (FAILED(hr)) { PostStatus(L"Desktop capture failed. Close other capture apps and retry: " + WinError(hr)); return false; }
-            gLog.Write(L"V23 DXGI capture: DuplicateOutput compatibility fallback active.");
+            gLog.Write(L"V26 DXGI capture: DuplicateOutput compatibility fallback active.");
         }
 
         RECT& desktop = c.outputDesc.DesktopCoordinates;
@@ -872,18 +883,25 @@ bool App::RenderFrame(CaptureState& c, Dx12State& d, UINT sourceSlot, UINT64 cop
             HR(d.frameFence->SetEventOnCompletion(done, d.frameEvent), "Transfer allocator fence");
             if (WaitForSingleObject(d.frameEvent, 3000) != WAIT_OBJECT_0) return false;
         }
+        // Consume the previous generation before reusing its query slots.
+        ConsumeGpuProfile(d, transferIndex);
+        const UINT copyQueryBase = transferIndex * kGpuQueriesPerFrame;
         HR(d.transferAllocators[transferIndex]->Reset(), "Reset transfer allocator");
         HR(d.transferCopyList->Reset(d.transferAllocators[transferIndex].Get(), nullptr), "Reset transfer copy");
+        d.transferCopyList->EndQuery(d.gpuQueryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, copyQueryBase+5);
         Transition(d.transferCopyList.Get(), d.backBuffers[frame].Get(),
                    D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_DEST);
         d.transferCopyList->CopyResource(d.backBuffers[frame].Get(), d.sharedTextures[sourceSlot].Get());
         Transition(d.transferCopyList.Get(), d.backBuffers[frame].Get(),
                    D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET);
+        d.transferCopyList->EndQuery(d.gpuQueryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, copyQueryBase+6);
         HR(d.transferCopyList->Close(), "Close transfer copy");
         HR(d.queue->Wait(d.captureFence.Get(), copyReady), "Early copy capture wait");
-        // Finish optical-flow source access first. Simultaneous-access sources
-        // promote to COPY_SOURCE / NON_PIXEL on each reader and decay to COMMON.
-        if (!gDLSS.WaitMotion(d.queue.Get())) return false;
+        // Capture completion is the sole dependency of the color copy.
+        // The immutable simultaneous-access source may be read by OFA and
+        // this copy concurrently; no source transition or write is recorded.
+        // Only the compute queue waits for OFA before consuming its OUTPUT.
+        // Finalization still joins preprocessing before source-slot release.
         ID3D12CommandList* copy[] = {d.transferCopyList.Get()};
         d.queue->ExecuteCommandLists(1, copy);
         ++d.parallelCopyFrames;
@@ -891,7 +909,7 @@ bool App::RenderFrame(CaptureState& c, Dx12State& d, UINT sourceSlot, UINT64 cop
         ++d.rasterFrames;
     }
 
-    // V23 stage 1: record and submit motion/depth preprocessing on a dedicated
+    // V26 stage 1: record and submit motion/depth preprocessing on a dedicated
     // compute queue. This queue waits directly on capture + NVOFA fences. The
     // presenter queue sees only one final preprocess-fence dependency.
     const UINT preprocessAllocatorIndex = d.nextPreprocessAllocator++ % kAllocatorCount;
@@ -952,7 +970,7 @@ bool App::RenderFrame(CaptureState& c, Dx12State& d, UINT sourceSlot, UINT64 cop
     // holding them until the later Present path completes.
     gDLSS.MarkMotionConsumed(d.preprocessFence.Get(), preprocessDone);
 
-    // V23 stage 2: record the final presenter list while the compute queue can
+    // V26 stage 2: record the final presenter list while the compute queue can
     // still be working. The direct queue will wait on exactly one preprocess fence.
     const UINT allocatorIndex = d.nextAllocator++ % kAllocatorCount;
     const UINT64 allocatorDone = d.allocatorFenceValues[allocatorIndex];
@@ -1043,6 +1061,11 @@ bool App::RenderFrame(CaptureState& c, Dx12State& d, UINT sourceSlot, UINT64 cop
     backBarrier.Transition.StateAfter = D3D12_RESOURCE_STATE_PRESENT;
     d.list->ResourceBarrier(1, &backBarrier);
     d.list->EndQuery(d.gpuQueryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, queryBase + 4);
+    if (!parallelCopy) {
+        // Every resolved query must have been written, including fallback frames.
+        d.list->EndQuery(d.gpuQueryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, queryBase + 5);
+        d.list->EndQuery(d.gpuQueryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, queryBase + 6);
+    }
     d.list->ResolveQueryData(d.gpuQueryHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, queryBase,
                              kGpuQueriesPerFrame, d.gpuQueryReadback.Get(),
                              UINT64(queryBase) * sizeof(UINT64));
@@ -1067,6 +1090,7 @@ bool App::RenderFrame(CaptureState& c, Dx12State& d, UINT sourceSlot, UINT64 cop
     hr = d.queue->Signal(d.frameFence.Get(), allocatorFenceValue);
     if (FAILED(hr)) return false;
     d.allocatorFenceValues[allocatorIndex] = allocatorFenceValue;
+    d.profileHadCopy[allocatorIndex] = parallelCopy;
     d.gpuProfileValid[allocatorIndex] = true;
 
     // History remains the last actually presented capture, independent of any
@@ -1166,7 +1190,7 @@ void App::Worker(HWND target, HWND outputWindow) {
     };
 
     try {
-        gLog.Write(L"V23 DuplicateOutput1 + async-preprocess build. Backend: " + std::wstring(useWgc_ ? L"WGC" : L"DXGI DuplicateOutput1") +
+        gLog.Write(L"V26 Late-OFA-wait + latest-frame-latch build. Backend: " + std::wstring(useWgc_ ? L"WGC" : L"DXGI DuplicateOutput1") +
                    L" / DX12. Selected multiplier: " + std::to_wstring(multiplier_) + L"x. NVOFA grid request: " +
                    std::to_wstring(nvofGrid_) + L"x" + std::to_wstring(nvofGrid_) + L" FAST.");
         QueryPerformanceFrequency(&d.qpcFrequency);
@@ -1193,7 +1217,7 @@ void App::Worker(HWND target, HWND outputWindow) {
         }
 
         mailboxEvent=CreateEventW(nullptr,FALSE,FALSE,nullptr);
-        if(!mailboxEvent) throw std::runtime_error("Could not create V23 capture-mailbox event.");
+        if(!mailboxEvent) throw std::runtime_error("Could not create V26 capture-mailbox event.");
 
         // Dedicated capture producer. It owns all post-initialization D3D11/DXGI/WGC
         // capture work. The render worker only consumes already-published mailboxes.
@@ -1205,13 +1229,13 @@ void App::Worker(HWND target, HWND outputWindow) {
                     if(!wgc.Init(target,c.device.Get(),d.qpcFrequency,wgcError))
                         throw std::runtime_error(std::string("WGC initialization failed: ")+
                             std::string(wgcError.begin(),wgcError.end()));
-                    gLog.Write(L"V23 producer active: Windows Graphics Capture, three-slot latest-frame mailbox.");
+                    gLog.Write(L"V26 producer active: Windows Graphics Capture, three-slot latest-frame mailbox.");
                 } else {
                     gLog.Write(c.duplicateOutput1
-                        ? L"V23 producer active: DXGI DuplicateOutput1, three-slot latest-frame mailbox."
-                        : L"V23 producer active: DXGI DuplicateOutput compatibility fallback, three-slot latest-frame mailbox.");
+                        ? L"V26 producer active: DXGI DuplicateOutput1, three-slot latest-frame mailbox."
+                        : L"V26 producer active: DXGI DuplicateOutput compatibility fallback, three-slot latest-frame mailbox.");
                 }
-                gLog.Write(L"V25 capture ordering: Copy -> capture-fence Signal -> immediate D3D11 Flush -> OFA submit -> release capture frame -> publish mailbox.");
+                gLog.Write(L"V26 capture ordering: Copy -> capture-fence Signal -> immediate D3D11 Flush -> OFA submit -> release capture frame -> publish mailbox.");
                 uint64_t sequence=0;
                 while(!stop_&&IsWindow(target)&&IsWindow(outputWindow)) {
                     HWND foreground=GetForegroundWindow();
@@ -1339,19 +1363,19 @@ void App::Worker(HWND target, HWND outputWindow) {
             } catch(const std::exception& e) {
                 captureFailureMessage=e.what();
                 captureFailed.store(true,std::memory_order_release);
-                gLog.Write(L"V23 capture producer stopped: "+std::wstring(captureFailureMessage.begin(),captureFailureMessage.end()));
+                gLog.Write(L"V26 capture producer stopped: "+std::wstring(captureFailureMessage.begin(),captureFailureMessage.end()));
             }
             wgc.Shutdown();
             if(mailboxEvent)SetEvent(mailboxEvent);
         });
 
-        auto claimLatestMailbox=[&]()->int {
+        auto claimLatestMailbox=[&](uint64_t newerThan=0)->int {
             for(int attempt=0;attempt<2;++attempt) {
                 int best=-1;uint64_t bestSequence=0;
                 for(UINT i=0;i<kCaptureSlots;++i) {
                     if(c.mailboxes[i].state.load(std::memory_order_acquire)==CaptureState::kReady) {
                         const uint64_t seq=c.mailboxes[i].sequence.load(std::memory_order_acquire);
-                        if(best<0||seq>bestSequence){best=static_cast<int>(i);bestSequence=seq;}
+                        if(seq>newerThan && (best<0||seq>bestSequence)){best=static_cast<int>(i);bestSequence=seq;}
                     }
                 }
                 if(best<0)return -1;
@@ -1374,9 +1398,13 @@ void App::Worker(HWND target, HWND outputWindow) {
                 // mailbox is claimed. Free them immediately; never build a queue.
                 for(UINT i=0;i<kCaptureSlots;++i) if(static_cast<int>(i)!=best) {
                     LONG stale=CaptureState::kReady;
-                    if(c.mailboxes[i].state.compare_exchange_strong(stale,CaptureState::kFree,
+                    // Keep ownership until sequence-dependent cleanup finishes.
+                    // Publishing FREE first could let the producer replace the
+                    // sequence while we are discarding the old prepared flow.
+                    if(c.mailboxes[i].state.compare_exchange_strong(stale,CaptureState::kConsuming,
                         std::memory_order_acq_rel,std::memory_order_acquire)) {
                         gDLSS.DiscardPreparedMotion(c.mailboxes[i].sequence.load(std::memory_order_acquire));
+                        c.mailboxes[i].state.store(CaptureState::kFree,std::memory_order_release);
                         producerDropped.fetch_add(1,std::memory_order_relaxed);
                     }
                 }
@@ -1423,11 +1451,48 @@ void App::Worker(HWND target, HWND outputWindow) {
                 c.mailboxes[sourceSlot].state.store(CaptureState::kFree,std::memory_order_release);
                 continue;
             }
+            // Complete optional sleep and allocator backpressure BEFORE the
+            // final bounded latch. No consumer GPU work is committed yet.
+            if(reflexTiming_!=1)gDLSS.PrepareFrame(true);
+            const UINT directIndex = d.nextAllocator % kAllocatorCount;
+            const UINT computeIndex = d.nextPreprocessAllocator % kAllocatorCount;
+            auto waitReusable = [&](ID3D12Fence* fence, UINT64 value, bool compute) {
+                if (!value || fence->GetCompletedValue() >= value) return;
+                LARGE_INTEGER begin{},end{};QueryPerformanceCounter(&begin);
+                HR(fence->SetEventOnCompletion(value,d.frameEvent), "Pre-latch allocator fence");
+                if (WaitForSingleObject(d.frameEvent,3000) != WAIT_OBJECT_0)
+                    throw std::runtime_error("Pre-latch allocator wait failed or timed out.");
+                QueryPerformanceCounter(&end);
+                const double ms=1000.0*double(end.QuadPart-begin.QuadPart)/double(d.qpcFrequency.QuadPart);
+                if(compute){++d.preprocessAllocatorWaitCount;d.preprocessAllocatorWaitSumMs+=ms;d.preprocessAllocatorWaitMaxMs=std::max(d.preprocessAllocatorWaitMaxMs,ms);}
+                else{++d.allocatorWaitCount;d.allocatorWaitSumMs+=ms;d.allocatorWaitMaxMs=std::max(d.allocatorWaitMaxMs,ms);}
+            };
+            waitReusable(d.frameFence.Get(),d.allocatorFenceValues[directIndex],false);
+            waitReusable(d.preprocessFence.Get(),d.preprocessFenceValues[computeIndex],true);
+            if(stop_ || paused_) {
+                gDLSS.DiscardPreparedMotion(c.mailboxes[sourceSlot].sequence.load(std::memory_order_acquire));
+                c.mailboxes[sourceSlot].state.store(CaptureState::kFree,std::memory_order_release);
+                continue;
+            }
+            ++d.lateLatchChecks;
+            const uint64_t oldSequence=c.mailboxes[sourceSlot].sequence.load(std::memory_order_acquire);
+            const int fresher=claimLatestMailbox(oldSequence);
+            if(fresher>=0) {
+                gDLSS.DiscardPreparedMotion(oldSequence);
+                c.mailboxes[sourceSlot].state.store(CaptureState::kFree,std::memory_order_release);
+                sourceSlot=fresher;
+                ++d.lateLatchReplaced;
+                producerDropped.fetch_add(1,std::memory_order_relaxed);
+            }
+            // Reset stale temporal history before selecting flow for this frame.
+            auto now=std::chrono::steady_clock::now();
+            if(now-lastFrame>std::chrono::milliseconds(100))releaseLiveHistory();
+            lastFrame=now;
             const UINT64 ready=c.mailboxes[sourceSlot].readyValue;
             const uint64_t frameSequence=c.mailboxes[sourceSlot].sequence.load(std::memory_order_acquire);
             const int expectedHistory=c.historySlot.load(std::memory_order_acquire);
             const UINT64 priorHistoryDone=c.lastHistoryDone.load(std::memory_order_acquire);
-            // V23: consume the producer-prepared flow only if it was generated
+            // V26: consume the producer-prepared flow only if it was generated
             // against the mailbox that is still the previous actually-presented
             // frame. If render advanced history after producer submission, discard
             // the mismatched flow and fall back to a correct render-side submit.
@@ -1438,11 +1503,7 @@ void App::Worker(HWND target, HWND outputWindow) {
                                        d.captureFence.Get(),ready,d.releaseFence.Get(),priorHistoryDone))
                     gDLSS.SelectPreparedMotion(frameSequence,expectedHistory);
             }
-            if(reflexTiming_!=1)gDLSS.PrepareFrame(true);
             d.captureTimestamp=c.mailboxes[sourceSlot].sourceTimestamp;
-            auto now=std::chrono::steady_clock::now();
-            if(now-lastFrame>std::chrono::milliseconds(100))releaseLiveHistory();
-            lastFrame=now;
             if(!RenderFrame(c,d,static_cast<UINT>(sourceSlot),ready))
                 throw std::runtime_error("Present failed. Check NVIDIA Streamline logs.");
             ++presented;
@@ -1450,10 +1511,21 @@ void App::Worker(HWND target, HWND outputWindow) {
             now=std::chrono::steady_clock::now();double elapsed=std::chrono::duration<double>(now-lastReport).count();
             if(elapsed>=1.0) {
                 gLog.Write(focus_compat::Report());
-                gLog.Write(L"V25 image path: parallel copy=" + std::to_wstring(d.parallelCopyFrames) +
+                gLog.Write(L"V26 image path: parallel copy=" + std::to_wstring(d.parallelCopyFrames) +
                     L", raster fallback=" + std::to_wstring(d.rasterFrames) +
                     L". GPU final-list profile excludes the early copy.");
                 d.parallelCopyFrames = d.rasterFrames = 0;
+                gLog.Write(L"V26 late latch: checks="+std::to_wstring(d.lateLatchChecks)+
+                    L", fresher replacements="+std::to_wstring(d.lateLatchReplaced));
+                d.lateLatchChecks=d.lateLatchReplaced=0;
+                if(d.copySamples) {
+                    wchar_t timing[400]{};
+                    swprintf_s(timing,L"V26 early copy GPU: avg %.3f ms / max %.3f ms; copy-end to final-start GPU gap: avg %.3f ms / max %.3f ms (%llu samples). Gap includes dependencies and CPU submission; not pure OFA time.",
+                        d.copySumMs/d.copySamples,d.copyMaxMs,d.joinGapSumMs/d.copySamples,d.joinGapMaxMs,
+                        static_cast<unsigned long long>(d.copySamples));
+                    gLog.Write(timing);
+                }
+                d.copySamples=0;d.copySumMs=d.copyMaxMs=d.joinGapSumMs=d.joinGapMaxMs=0;
                 if(d.ageSamples) {
                     wchar_t age[240]{};
                     swprintf_s(age,L"Desktop-update age at Present call (CPU): avg %.2f ms, max %.2f ms. Not input-to-screen latency.",
@@ -1461,30 +1533,30 @@ void App::Worker(HWND target, HWND outputWindow) {
                 }
                 if(d.allocatorWaitCount) {
                     wchar_t alloc[240]{};
-                    swprintf_s(alloc,L"V23 allocator recycle CPU waits: %llu, avg %.3f ms, max %.3f ms.",
+                    swprintf_s(alloc,L"V26 allocator recycle CPU waits: %llu, avg %.3f ms, max %.3f ms.",
                         static_cast<unsigned long long>(d.allocatorWaitCount),
                         d.allocatorWaitSumMs/d.allocatorWaitCount,d.allocatorWaitMaxMs);gLog.Write(alloc);
-                } else gLog.Write(L"V23 allocator recycle CPU waits: 0 in report interval.");
+                } else gLog.Write(L"V26 allocator recycle CPU waits: 0 in report interval.");
                 if(d.preprocessAllocatorWaitCount) {
                     wchar_t alloc[260]{};
-                    swprintf_s(alloc,L"V23 preprocess allocator CPU waits: %llu, avg %.3f ms, max %.3f ms.",
+                    swprintf_s(alloc,L"V26 preprocess allocator CPU waits: %llu, avg %.3f ms, max %.3f ms.",
                         static_cast<unsigned long long>(d.preprocessAllocatorWaitCount),
                         d.preprocessAllocatorWaitSumMs/d.preprocessAllocatorWaitCount,d.preprocessAllocatorWaitMaxMs);gLog.Write(alloc);
-                } else gLog.Write(L"V23 preprocess allocator CPU waits: 0 in report interval.");
+                } else gLog.Write(L"V26 preprocess allocator CPU waits: 0 in report interval.");
                 d.ageSumMs=d.ageMaxMs=0;d.ageSamples=0;
                 d.allocatorWaitCount=0;d.allocatorWaitSumMs=d.allocatorWaitMaxMs=0;
                 d.preprocessAllocatorWaitCount=0;d.preprocessAllocatorWaitSumMs=d.preprocessAllocatorWaitMaxMs=0;
                 const uint64_t fgRecycleWaits=gDLSS.ConsumeInputRecycleWaits();
-                gLog.Write(L"V23 DLSS-G recycled-input GPU waits queued: "+std::to_wstring(fgRecycleWaits)+L" in report interval.");
+                gLog.Write(L"V26 DLSS-G recycled-input GPU waits queued: "+std::to_wstring(fgRecycleWaits)+L" in report interval.");
                 if(d.preprocessProfileSamples) {
                     wchar_t pre[280]{};
-                    swprintf_s(pre,L"V23 async preprocess GPU: avg %.3f ms / max %.3f ms (%llu samples).",
+                    swprintf_s(pre,L"V26 async preprocess GPU: avg %.3f ms / max %.3f ms (%llu samples).",
                         d.preprocessGpuSumMs/d.preprocessProfileSamples,d.preprocessGpuMaxMs,
                         static_cast<unsigned long long>(d.preprocessProfileSamples)); gLog.Write(pre);
                 }
                 if(d.gpuProfileSamples) {
                     wchar_t gpu[380]{};
-                    swprintf_s(gpu,L"V23 presenter GPU list: input-tag %.3f ms, setup %.3f ms, draw %.3f ms, finish/tag %.3f ms, total %.3f ms avg / %.3f ms max (%llu samples).",
+                    swprintf_s(gpu,L"V26 presenter GPU list: input-tag %.3f ms, setup %.3f ms, draw %.3f ms, finish/tag %.3f ms, total %.3f ms avg / %.3f ms max (%llu samples).",
                         d.gpuTagSumMs/d.gpuProfileSamples,d.gpuSetupSumMs/d.gpuProfileSamples,
                         d.gpuDrawSumMs/d.gpuProfileSamples,d.gpuFinishSumMs/d.gpuProfileSamples,
                         d.gpuTotalSumMs/d.gpuProfileSamples,d.gpuTotalMaxMs,
@@ -1492,7 +1564,7 @@ void App::Worker(HWND target, HWND outputWindow) {
                 }
                 if(d.dependencySamples) {
                     wchar_t deps[420]{};
-                    swprintf_s(deps,L"V23 dependency readiness: preprocess submit capture pending %llu/%llu, NVOFA pending %llu/%llu; presenter submit preprocess pending %llu/%llu.",
+                    swprintf_s(deps,L"V26 dependency readiness: preprocess submit capture pending %llu/%llu, NVOFA pending %llu/%llu; presenter submit preprocess pending %llu/%llu.",
                         static_cast<unsigned long long>(d.captureFencePending),static_cast<unsigned long long>(d.dependencySamples),
                         static_cast<unsigned long long>(d.nvofFencePending),static_cast<unsigned long long>(d.dependencySamples),
                         static_cast<unsigned long long>(d.preprocessFencePending),static_cast<unsigned long long>(d.dependencySamples)); gLog.Write(deps);
@@ -1501,7 +1573,7 @@ void App::Worker(HWND target, HWND outputWindow) {
                 gDLSS.ConsumeNvofTimingStats(ofaSamples,ofaAvg,ofaMax);
                 if(ofaSamples) {
                     wchar_t ofa[320]{};
-                    swprintf_s(ofa,L"V23 NVOFA submit-to-completion: avg %.3f ms, max %.3f ms (%llu samples), confidence cost=%s.",
+                    swprintf_s(ofa,L"V26 NVOFA submit-to-completion: avg %.3f ms, max %.3f ms (%llu samples), confidence cost=%s.",
                         ofaAvg,ofaMax,static_cast<unsigned long long>(ofaSamples),nvofCost_?L"ON":L"OFF");
                     gLog.Write(ofa);
                 }
@@ -1510,7 +1582,7 @@ void App::Worker(HWND target, HWND outputWindow) {
                 gDLSS.ConsumeNvofOverlapStats(producerOFA,preparedHits,fallbackOFA,discardedOFA,noFlowSlot,leadAvg,leadMax);
                 {
                     wchar_t overlap[420]{};
-                    swprintf_s(overlap,L"V23 OFA overlap: producer submits %llu, prepared hits %llu, render fallbacks %llu, discarded %llu, no-free-flow-slot %llu, submit-to-render lead avg %.3f ms / max %.3f ms.",
+                    swprintf_s(overlap,L"V26 OFA overlap: producer submits %llu, prepared hits %llu, render fallbacks %llu, discarded %llu, no-free-flow-slot %llu, submit-to-render lead avg %.3f ms / max %.3f ms.",
                         static_cast<unsigned long long>(producerOFA),static_cast<unsigned long long>(preparedHits),
                         static_cast<unsigned long long>(fallbackOFA),static_cast<unsigned long long>(discardedOFA),
                         static_cast<unsigned long long>(noFlowSlot),leadAvg,leadMax);
@@ -1518,14 +1590,14 @@ void App::Worker(HWND target, HWND outputWindow) {
                 }
                 if(d.presentSamples) {
                     wchar_t present[240]{};
-                    swprintf_s(present,L"V23 Present CPU call: avg %.3f ms, max %.3f ms (%llu calls).",
+                    swprintf_s(present,L"V26 Present CPU call: avg %.3f ms, max %.3f ms (%llu calls).",
                         d.presentSumMs/d.presentSamples,d.presentMaxMs,static_cast<unsigned long long>(d.presentSamples)); gLog.Write(present);
                 }
                 uint64_t reflexCalls=0; double reflexAvg=0.0,reflexMax=0.0;
                 gDLSS.ConsumeReflexSleepStats(reflexCalls,reflexAvg,reflexMax);
                 if(reflexCalls) {
                     wchar_t reflex[240]{};
-                    swprintf_s(reflex,L"V23 Reflex sleep CPU: avg %.3f ms, max %.3f ms (%llu calls).",
+                    swprintf_s(reflex,L"V26 Reflex sleep CPU: avg %.3f ms, max %.3f ms (%llu calls).",
                         reflexAvg,reflexMax,static_cast<unsigned long long>(reflexCalls)); gLog.Write(reflex);
                 }
                 d.preprocessProfileSamples=0; d.preprocessGpuSumMs=d.preprocessGpuMaxMs=0;
@@ -1537,7 +1609,7 @@ void App::Worker(HWND target, HWND outputWindow) {
                 const uint64_t capturedDelta=capturedNow-lastCapturedReport;
                 const uint64_t droppedDelta=droppedNow-lastDroppedReport;
                 lastCapturedReport=capturedNow;lastDroppedReport=droppedNow;
-                gLog.Write(L"V23 producer: "+std::to_wstring(capturedDelta)+L" captures, "+
+                gLog.Write(L"V26 producer: "+std::to_wstring(capturedDelta)+L" captures, "+
                            std::to_wstring(droppedDelta)+L" stale/dropped updates in report interval.");
                 PostStatus(L"Captured/base presents: "+std::to_wstring(unsigned(presented/elapsed))+L" FPS | "+gDLSS.Status());
                 presented=0;lastReport=now;

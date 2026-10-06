@@ -232,7 +232,7 @@ void DlssExperiment::Init(ID3D12Device* dev,IDXGIAdapter1* adapter,ID3D12Resourc
         HR(dev->CreateComputePipelineState(&pd,IID_PPV_ARGS(&nvofResolvePSO)),"NVOFA resolve pipeline");
     }
     log(L"Native-resolution FG input/output "+std::to_wstring(ow)+L"x"+std::to_wstring(oh)+L"; DLSS scaling is not loaded.");
-    log(nvof.Available()?L"Motion source: NVIDIA Optical Flow Accelerator; V23 pre-flush OFA + async D3D12 preprocess queue active.":L"Motion source: original software estimator fallback; direct-source presenter remains active.");
+    log(nvof.Available()?L"Motion source: NVIDIA Optical Flow Accelerator; V26 flush-first capture + late OFA wait; async D3D12 preprocess queue active.":L"Motion source: original software estimator fallback; direct-source presenter remains active.");
 }
 void DlssExperiment::Marker(sl::PCLMarker m) { if(fg&&token&&marker) Check(marker(m,*token),"Reflex frame marker"); }
 void DlssExperiment::PrepareFrame(bool sleepNow) {
