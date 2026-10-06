@@ -29,24 +29,34 @@ jobs:
           $deps = Join-Path $work 'deps'
           $out = Join-Path $work 'DX12-DLSS-FG-V23-DXGI-BASELATENCY'
           New-Item -ItemType Directory -Force -Path $work,$deps,$out | Out-Null
-          Expand-Archive -LiteralPath (Join-Path $root 'v23build/source.zip') -DestinationPath $work -Force
+
+          Write-Host 'Extracting V23 source...'
+          & tar.exe -xf (Join-Path $root 'v23build/source.zip') -C $work
+          if ($LASTEXITCODE -ne 0) { throw "source tar extraction failed: $LASTEXITCODE" }
           if (!(Test-Path (Join-Path $src 'main.cpp'))) { throw 'source.zip did not expand to source/main.cpp' }
 
+          Write-Host 'Downloading Streamline 2.14.1...'
           $slZip = Join-Path $deps 'streamline.zip'
           Invoke-WebRequest -Uri 'https://github.com/NVIDIA-RTX/Streamline/releases/download/v2.14.1/streamline-sdk-v2.14.1.zip' -OutFile $slZip
           $slRoot = Join-Path $deps 'streamline'
-          Expand-Archive -LiteralPath $slZip -DestinationPath $slRoot -Force
+          New-Item -ItemType Directory -Force -Path $slRoot | Out-Null
+          & tar.exe -xf $slZip -C $slRoot
+          if ($LASTEXITCODE -ne 0) { throw "Streamline tar extraction failed: $LASTEXITCODE" }
           $slHeader = Get-ChildItem $slRoot -Recurse -Filter 'sl.h' -File | Where-Object { $_.FullName -match '[\\/]include[\\/]' } | Select-Object -First 1
           if (!$slHeader) { throw 'Could not find Streamline sl.h' }
           $slInclude = $slHeader.Directory.FullName
 
+          Write-Host 'Fetching NVOF headers...'
           $nvof = Join-Path $deps 'NvidiaOF5'
           git clone --depth 1 https://github.com/SlimRG/NvidiaOF5.git $nvof
+          if ($LASTEXITCODE -ne 0) { throw "NVOF git clone failed: $LASTEXITCODE" }
           if (!(Test-Path (Join-Path $nvof 'nvOpticalFlowD3D12.h'))) { throw 'Could not find NVOF headers' }
 
+          Write-Host 'Compiling resources...'
           & rc.exe /nologo /fo (Join-Path $work 'app.res') (Join-Path $src 'app.rc')
           if ($LASTEXITCODE -ne 0) { throw "rc.exe failed: $LASTEXITCODE" }
 
+          Write-Host 'Compiling V23...'
           $exe = Join-Path $out 'DX12-DLSS-FG-V23-DXGI-BASELATENCY.exe'
           $clArgs = @(
             '/nologo','/std:c++20','/O2','/GL','/EHsc','/MD','/DNDEBUG','/DUNICODE','/D_UNICODE','/DWIN32_LEAN_AND_MEAN','/utf-8',
@@ -63,6 +73,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "cl.exe failed: $LASTEXITCODE" }
           if (!(Test-Path $exe)) { throw 'Build completed without producing EXE' }
 
+          Write-Host 'Collecting runtime DLLs...'
           $dllNames = @('sl.common.dll','sl.dlss_g.dll','sl.interposer.dll','sl.pcl.dll','sl.reflex.dll','nvngx_dlssg.dll')
           foreach ($name in $dllNames) {
             $matches = @(Get-ChildItem $slRoot -Recurse -Filter $name -File)
