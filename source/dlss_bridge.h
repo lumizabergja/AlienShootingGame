@@ -26,7 +26,14 @@ public:
     DeviceFn createDevice{};
     Log log;
     UINT rw{},rh{},ow{},oh{};
-    ComPtr<ID3D12Resource> current,previous,motion,depth,result;
+    static constexpr UINT kInputSets = 3;
+    struct InputSet {
+        ComPtr<ID3D12Resource> current,motion,depth;
+        ComPtr<ID3D12Fence> completionFence;
+        uint64_t completionValue{};
+    };
+    InputSet inputSets[kInputSets];
+    ComPtr<ID3D12Resource> previous;
     bool sr{},fg{},initialized{},history{};
     bool srEvaluated{};
     sl::FrameToken* token{};
@@ -34,14 +41,35 @@ public:
     std::wstring error;
     void Load();
     void BindDevice(ID3D12Device* d) {Check(setDevice(d),"slSetD3DDevice");}
-    void Init(ID3D12Device*,IDXGIAdapter1*,ID3D12Resource*,UINT,UINT,bool,bool,UINT,bool);
-    void PrepareFrame();
-    bool PrepareMotion(ID3D12Fence*,uint64_t);
+    void Init(ID3D12Device*,IDXGIAdapter1*,ID3D12Resource*,ID3D12Resource*,ID3D12Resource*,UINT,UINT,bool,bool,UINT,bool,UINT,UINT,bool);
+    void PrepareFrame(bool sleepNow);
+    void SleepPreparedFrame();
+    bool ProducerPrepareMotion(UINT sourceIndex,UINT referenceIndex,uint64_t sequence,ID3D12Fence* captureFence,uint64_t captureValue,ID3D12Fence* historyFence,uint64_t historyValue);
+    bool PrepareMotion(UINT sourceIndex,UINT referenceIndex,uint64_t sequence,ID3D12Fence* captureFence,uint64_t captureValue,ID3D12Fence* historyFence,uint64_t historyValue);
+    bool SelectPreparedMotion(uint64_t sequence,int expectedReferenceIndex);
+    void DiscardPreparedMotion(uint64_t sequence) { nvof.DiscardPrepared(sequence); }
+    bool CanReuseMotionSource(UINT sourceIndex) const { return nvof.CanReuseSource(sourceIndex); }
     bool WaitMotion(ID3D12CommandQueue*);
-    void Record(ID3D12GraphicsCommandList*,ID3D12Resource*);
+    bool MotionWouldBlockNow() const { return nvof.Available() && nvof.FlowPending(); }
+    void MarkMotionConsumed(ID3D12Fence* fence,uint64_t value) { nvof.MarkActiveConsumed(fence,value); }
+    bool HasHardwareMotion() const { return nvof.Available() && nvof.FlowReady(); }
+    void RecordPreprocess(ID3D12GraphicsCommandList*,ID3D12Resource*,UINT,bool sharedCopyRead);
+    void TagInputs(ID3D12GraphicsCommandList*);
     void TagBackbuffer(ID3D12GraphicsCommandList*,ID3D12Resource*,D3D12_RESOURCE_STATES);
     void BeforeFrame(ID3D12CommandQueue*);
+    void DrainInputs(ID3D12CommandQueue*);
+    ID3D12Resource* InputColor(UINT i) const { return inputSets[i % kInputSets].current.Get(); }
+    UINT ActiveInputSet() const { return activeInputSet; }
     void AfterPresent();
+    uint64_t ConsumeInputRecycleWaits() { auto v=inputRecycleWaits; inputRecycleWaits=0; return v; }
+    void ConsumeNvofTimingStats(uint64_t& count,double& avgMs,double& maxMs) { nvof.ConsumeTimingStats(count,avgMs,maxMs); }
+    void ConsumeNvofOverlapStats(uint64_t& producerSubmits,uint64_t& preparedHits,uint64_t& fallbackSubmits,uint64_t& discarded,uint64_t& noOutput,double& avgLeadMs,double& maxLeadMs) {
+        nvof.ConsumeOverlapStats(producerSubmits,preparedHits,fallbackSubmits,discarded,noOutput,avgLeadMs,maxLeadMs);
+    }
+    void ConsumeReflexSleepStats(uint64_t& count,double& avgMs,double& maxMs) {
+        count=reflexSleepCount; avgMs=count?reflexSleepSumMs/double(count):0.0; maxMs=reflexSleepMaxMs;
+        reflexSleepCount=0; reflexSleepSumMs=reflexSleepMaxMs=0.0;
+    }
     void Suspend(bool);
     void Marker(sl::PCLMarker m);
     std::wstring Status();
@@ -61,11 +89,15 @@ private:
     sl::DLSSGOptions activeOptions{};
     bool suspended{};
     bool framePrepared{};
+    bool frameSlept{};
+    UINT reflexTiming{};
+    UINT activeInputSet{}, nextInputSet{};
+    uint64_t inputRecycleWaits{};
+    uint64_t reflexSleepCount{};
+    double reflexSleepSumMs{}, reflexSleepMaxMs{};
     uint64_t reportCalls{}, reportPresents{};
     sl::Result reportResult{sl::Result::eOk};
     sl::DLSSGStatus reportStatus{};
-    ComPtr<ID3D12Fence> inputFence;
-    uint64_t inputFenceValue{};
     PFun_slInit* init{};
     PFun_slShutdown* shutdown{};
     PFun_slSetD3DDevice* setDevice{};
