@@ -1,4 +1,4 @@
-name: Build V23 DXGI Base Latency
+name: Build V23.1 DXGI Base Latency
 
 on:
   push:
@@ -19,21 +19,141 @@ jobs:
         with:
           arch: x64
 
-      - name: Download dependencies and build
+      - name: Recover source, patch V23.1 and build
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           $root = $env:GITHUB_WORKSPACE
-          $work = Join-Path $root '_v23work'
+          $work = Join-Path $root '_v231work'
           $src = Join-Path $work 'source'
           $deps = Join-Path $work 'deps'
-          $out = Join-Path $work 'DX12-DLSS-FG-V23-DXGI-BASELATENCY'
+          $out = Join-Path $work 'DX12-DLSS-FG-V23.1-DXGI-BASELATENCY'
           New-Item -ItemType Directory -Force -Path $work,$deps,$out | Out-Null
 
-          Write-Host 'Extracting V23 source...'
-          & tar.exe -xf (Join-Path $root 'v23build/source.zip') -C $work
-          if ($LASTEXITCODE -ne 0) { throw "source tar extraction failed: $LASTEXITCODE" }
-          if (!(Test-Path (Join-Path $src 'main.cpp'))) { throw 'source.zip did not expand to source/main.cpp' }
+          Write-Host 'Recovering V23 source archive...'
+          $seven = 'C:\Program Files\7-Zip\7z.exe'
+          if (!(Test-Path $seven)) { throw '7-Zip not found on runner' }
+          & $seven x (Join-Path $root 'v23build/source.zip') "-o$work" -y
+          Write-Host "7-Zip exit code (CRC damage is expected for the old focus header only): $LASTEXITCODE"
+          if (!(Test-Path (Join-Path $src 'main.cpp'))) { throw 'main.cpp was not recovered from source archive' }
+          if (!(Test-Path (Join-Path $src 'dlss_bridge.cpp'))) { throw 'dlss_bridge.cpp was not recovered from source archive' }
+          if (!(Test-Path (Join-Path $src 'dlss_bridge.h'))) { throw 'dlss_bridge.h was not recovered from source archive' }
+          Copy-Item -LiteralPath (Join-Path $root 'v23build/focus_compat.h') -Destination (Join-Path $src 'focus_compat.h') -Force
+
+          Write-Host 'Applying V23.1 late-dependency patch...'
+          @'
+          from pathlib import Path
+
+          root = Path(r"__SRC__")
+
+          p = root / "dlss_bridge.h"
+          s = p.read_text(encoding="utf-8")
+          if "bool WaitInputReady(ID3D12CommandQueue*);" not in s:
+              s = s.replace("    void BeforeFrame(ID3D12CommandQueue*);\n",
+                            "    void BeforeFrame(ID3D12CommandQueue*);\n    bool WaitInputReady(ID3D12CommandQueue*);\n")
+              s = s.replace("    UINT activeInputSet{}, nextInputSet{};\n",
+                            "    UINT activeInputSet{}, nextInputSet{};\n    ComPtr<ID3D12Fence> pendingInputFence;\n    uint64_t pendingInputValue{};\n")
+          p.write_text(s, encoding="utf-8")
+
+          p = root / "dlss_bridge.cpp"
+          s = p.read_text(encoding="utf-8")
+          old = '''void DlssExperiment::BeforeFrame(ID3D12CommandQueue* queue) {
+              // V18: do not blindly recycle the next round-robin Streamline input set.
+              // Prefer any set whose prior DLSS-G input consumption is already complete,
+              // avoiding an unnecessary GPU queue wait when another set is immediately free.
+              UINT chosen=kInputSets;
+              for(UINT n=0;n<kInputSets;++n) {
+                  const UINT candidate=(nextInputSet+n)%kInputSets;
+                  auto& in=inputSets[candidate];
+                  if(!in.completionFence || !in.completionValue || in.completionFence->GetCompletedValue()>=in.completionValue) {
+                      chosen=candidate; break;
+                  }
+              }
+              if(chosen==kInputSets) chosen=nextInputSet%kInputSets;
+              activeInputSet=chosen; nextInputSet=(chosen+1)%kInputSets;
+              auto& in=inputSets[activeInputSet];
+              if(in.completionFence && in.completionValue && in.completionFence->GetCompletedValue()<in.completionValue) {
+                  ++inputRecycleWaits;
+                  HR(queue->Wait(in.completionFence.Get(),in.completionValue),"Wait for recycled FG input set");
+              }
+          }
+          '''
+          new = '''void DlssExperiment::BeforeFrame(ID3D12CommandQueue* queue) {
+              (void)queue;
+              // V23.1: choose the Streamline input set now so command recording has
+              // stable resource identities, but defer its recycle fence until phase A
+              // has already been submitted. This preserves color/OFA overlap.
+              UINT chosen=kInputSets;
+              for(UINT n=0;n<kInputSets;++n) {
+                  const UINT candidate=(nextInputSet+n)%kInputSets;
+                  auto& in=inputSets[candidate];
+                  if(!in.completionFence || !in.completionValue || in.completionFence->GetCompletedValue()>=in.completionValue) {
+                      chosen=candidate; break;
+                  }
+              }
+              if(chosen==kInputSets) chosen=nextInputSet%kInputSets;
+              activeInputSet=chosen; nextInputSet=(chosen+1)%kInputSets;
+              auto& in=inputSets[activeInputSet];
+              pendingInputFence = in.completionFence;
+              pendingInputValue = in.completionValue;
+          }
+          bool DlssExperiment::WaitInputReady(ID3D12CommandQueue* queue) {
+              if(!queue) return false;
+              if(pendingInputFence && pendingInputValue && pendingInputFence->GetCompletedValue()<pendingInputValue) {
+                  ++inputRecycleWaits;
+                  if(FAILED(queue->Wait(pendingInputFence.Get(),pendingInputValue))) return false;
+              }
+              pendingInputFence.Reset();
+              pendingInputValue=0;
+              return true;
+          }
+          '''
+          if old not in s and "bool DlssExperiment::WaitInputReady" not in s:
+              raise SystemExit("BeforeFrame block not found")
+          if old in s:
+              s = s.replace(old, new)
+          s = s.replace('''void DlssExperiment::DrainInputs(ID3D12CommandQueue* queue) {
+              for(auto& in:inputSets) if(in.completionFence && in.completionValue)
+                  HR(queue->Wait(in.completionFence.Get(),in.completionValue),"Drain FG input set");
+          }
+          ''','''void DlssExperiment::DrainInputs(ID3D12CommandQueue* queue) {
+              for(auto& in:inputSets) if(in.completionFence && in.completionValue)
+                  HR(queue->Wait(in.completionFence.Get(),in.completionValue),"Drain FG input set");
+              pendingInputFence.Reset(); pendingInputValue=0;
+          }
+          ''')
+          s = s.replace("    framePrepared = false; frameSlept=false;\n    history = false;\n",
+                        "    framePrepared = false; frameSlept=false;\n    pendingInputFence.Reset(); pendingInputValue=0;\n    history = false;\n")
+          s = s.replace("token=nullptr;framePrepared=false;frameSlept=false;history=false;previous.Reset();",
+                        "token=nullptr;framePrepared=false;frameSlept=false;history=false;previous.Reset();pendingInputFence.Reset();pendingInputValue=0;")
+          p.write_text(s, encoding="utf-8")
+
+          p = root / "main.cpp"
+          s = p.read_text(encoding="utf-8")
+          old = '''    if (!gDLSS.WaitMotion(d.queue.Get())) return false;
+              ID3D12CommandList* finalLists[] = {d.list.Get()};
+          '''
+          new = '''    if (!gDLSS.WaitMotion(d.queue.Get())) return false;
+              // V23.1: enqueue the recycled DLSS-G input dependency only after the
+              // independent color list is already on the queue.
+              if (!gDLSS.WaitInputReady(d.queue.Get())) return false;
+              ID3D12CommandList* finalLists[] = {d.list.Get()};
+          '''
+          if old not in s and "WaitInputReady(d.queue.Get())" not in s:
+              raise SystemExit("WaitMotion insertion point not found")
+          if old in s:
+              s = s.replace(old, new)
+          s = s.replace("V23 DXGI base-latency / flush-first split-submit build.",
+                        "V23.1 DXGI base-latency / late-dependency split-submit build.")
+          s = s.replace("V23 capture ordering:", "V23.1 capture ordering:")
+          s = s.replace("V23 producer active:", "V23.1 producer active:")
+          s = s.replace("V23 capture producer stopped:", "V23.1 capture producer stopped:")
+          p.write_text(s, encoding="utf-8")
+          '@.Replace('__SRC__', $src.Replace('\','\\')) | python -
+          if ($LASTEXITCODE -ne 0) { throw "V23.1 patch script failed: $LASTEXITCODE" }
+
+          Select-String -Path (Join-Path $src 'main.cpp') -Pattern 'WaitInputReady|V23.1' | ForEach-Object { Write-Host $_.Line }
+          Select-String -Path (Join-Path $src 'dlss_bridge.cpp') -Pattern 'WaitInputReady|pendingInputFence' | ForEach-Object { Write-Host $_.Line }
 
           Write-Host 'Downloading Streamline 2.14.1...'
           $slZip = Join-Path $deps 'streamline.zip'
@@ -41,7 +161,7 @@ jobs:
           $slRoot = Join-Path $deps 'streamline'
           New-Item -ItemType Directory -Force -Path $slRoot | Out-Null
           & tar.exe -xf $slZip -C $slRoot
-          if ($LASTEXITCODE -ne 0) { throw "Streamline tar extraction failed: $LASTEXITCODE" }
+          if ($LASTEXITCODE -ne 0) { throw "Streamline extraction failed: $LASTEXITCODE" }
           $slHeader = Get-ChildItem $slRoot -Recurse -Filter 'sl.h' -File | Where-Object { $_.FullName -match '[\\/]include[\\/]' } | Select-Object -First 1
           if (!$slHeader) { throw 'Could not find Streamline sl.h' }
           $slInclude = $slHeader.Directory.FullName
@@ -50,14 +170,13 @@ jobs:
           $nvof = Join-Path $deps 'NvidiaOF5'
           git clone --depth 1 https://github.com/SlimRG/NvidiaOF5.git $nvof
           if ($LASTEXITCODE -ne 0) { throw "NVOF git clone failed: $LASTEXITCODE" }
-          if (!(Test-Path (Join-Path $nvof 'nvOpticalFlowD3D12.h'))) { throw 'Could not find NVOF headers' }
 
           Write-Host 'Compiling resources...'
           & rc.exe /nologo /fo (Join-Path $work 'app.res') (Join-Path $src 'app.rc')
           if ($LASTEXITCODE -ne 0) { throw "rc.exe failed: $LASTEXITCODE" }
 
-          Write-Host 'Compiling V23...'
-          $exe = Join-Path $out 'DX12-DLSS-FG-V23-DXGI-BASELATENCY.exe'
+          Write-Host 'Compiling V23.1...'
+          $exe = Join-Path $out 'DX12-DLSS-FG-V23.1-DXGI-BASELATENCY.exe'
           $clArgs = @(
             '/nologo','/std:c++20','/O2','/GL','/EHsc','/MD','/DNDEBUG','/DUNICODE','/D_UNICODE','/DWIN32_LEAN_AND_MEAN','/utf-8',
             "/I$src", "/I$slInclude", "/I$nvof",
@@ -85,23 +204,21 @@ jobs:
 
           Copy-Item -LiteralPath $src -Destination (Join-Path $out 'source') -Recurse -Force
           @'
-          DX12 DLSS-G V23 — DXGI BASE-LATENCY
+          DX12 DLSS-G V23.1 — DXGI BASE-LATENCY
 
-          Latency changes from V22:
+          Changes from V22/V23:
           - Flush-first capture producer: Copy -> shared-fence Signal -> D3D11 Flush -> NVOFA submit.
-          - Split DX12 submission: captured color can render before the NVOFA fence wait; the wait is moved immediately before motion/depth/DLSS-G work.
-          - Just-in-time latest-frame latch after Reflex sleep; an older claimed mailbox is replaced when a newer completed capture is already available.
-          - Per-frame GPU/OFA/Reflex timing instrumentation removed from the release hot path.
-          - No additional buffered frame was added. Latest-frame/drop behavior is preserved.
+          - Split DX12 submission: independent color work is submitted before NVOFA motion dependency.
+          - DLSS-G recycled-input fence is also delayed until after phase-A color submission, preserving the intended overlap.
+          - Just-in-time latest-frame latch after Reflex sleep.
+          - Per-frame GPU timestamp/readback telemetry removed from the release hot path.
+          - No extra buffered frame; latest-frame/drop behavior remains.
 
           Recommended latency test:
           - Capture backend: DXGI
           - Low latency / tearing: ON
           - Reflex: Pre-capture + Boost
-          - Compare the same game/FPS cap against V22.
-
-          Expected result:
-          Typical steady-state base-latency improvement is small/sub-ms, but the freshness latch can avoid a full stale base-frame in timing-race cases.
+          - Same game, FPS cap and display settings as V22.
           '@ | Set-Content -LiteralPath (Join-Path $out 'README-FIRST.txt') -Encoding UTF8
 
           $hashLines = Get-ChildItem $out -File | Sort-Object Name | ForEach-Object {
@@ -110,14 +227,14 @@ jobs:
           }
           $hashLines | Set-Content -LiteralPath (Join-Path $out 'SHA256SUMS.txt') -Encoding ascii
 
-          $zipOut = Join-Path $work 'DX12-DLSS-FG-V23-DXGI-BASELATENCY-Ready-To-Run.zip'
+          $zipOut = Join-Path $work 'DX12-DLSS-FG-V23.1-DXGI-BASELATENCY-Ready-To-Run.zip'
           Compress-Archive -Path (Join-Path $out '*') -DestinationPath $zipOut -CompressionLevel Optimal -Force
           Write-Host "Built: $zipOut"
 
-      - name: Upload ready-to-run V23
+      - name: Upload ready-to-run V23.1
         uses: actions/upload-artifact@v4
         with:
-          name: DX12-DLSS-FG-V23-DXGI-BASELATENCY-Ready-To-Run
-          path: _v23work/DX12-DLSS-FG-V23-DXGI-BASELATENCY-Ready-To-Run.zip
+          name: DX12-DLSS-FG-V23.1-DXGI-BASELATENCY-Ready-To-Run
+          path: _v231work/DX12-DLSS-FG-V23.1-DXGI-BASELATENCY-Ready-To-Run.zip
           if-no-files-found: error
           retention-days: 3
