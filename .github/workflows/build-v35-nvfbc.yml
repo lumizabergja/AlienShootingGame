@@ -32,6 +32,14 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw 'V35 hotfix patch failed' }
           }
 
+      - name: Inspect NvFBC startup
+        shell: pwsh
+        run: |
+          Write-Host '--- nvfbc_cuda_capture.h ---'
+          Get-Content v35nvfbc/source/nvfbc_cuda_capture.h
+          Write-Host '--- create/status/init contexts ---'
+          Select-String -Path v35nvfbc/source/nvfbc_cuda_capture.cpp -Pattern 'NvFBC_CreateEx|NvFBC_GetStatusEx|NVFBC_SHARED_CUDA|bool NvFbcCudaCapture::|Initialize|init|open' -Context 20,45
+
       - name: Get SDK headers
         shell: pwsh
         run: |
