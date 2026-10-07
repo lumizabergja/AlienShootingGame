@@ -1,0 +1,130 @@
+name: Build V35.2 NvFBC DX9Vid
+
+on:
+  push:
+    branches: [ chatgpt-v35-2-nvfbc-dx9vid-20261007 ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reconstruct V35 source
+        shell: pwsh
+        run: |
+          $parts = Get-ChildItem v35nvfbc/source_part_*.b64 | Sort-Object Name
+          if ($parts.Count -ne 5) { throw "Expected 5 source bundle parts, found $($parts.Count)" }
+          $b64 = ($parts | ForEach-Object { (Get-Content $_.FullName -Raw).Trim() }) -join ''
+          [IO.File]::WriteAllBytes('v35nvfbc-source.tar.xz',[Convert]::FromBase64String($b64))
+          $hash=(Get-FileHash v35nvfbc-source.tar.xz -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne '35cdb1c3f4aca49fe0ce0e384edc048f5b35b00029acc2c9e2fd03198d7dc118') { throw "V35 source hash mismatch: $hash" }
+          New-Item -ItemType Directory -Force v35nvfbc | Out-Null
+          tar -xf v35nvfbc-source.tar.xz -C v35nvfbc
+          if ($LASTEXITCODE -ne 0) { throw 'V35 source extraction failed' }
+          if (-not (Test-Path v35nvfbc/source/main.cpp)) { throw 'V35 source extraction incomplete' }
+          if (Test-Path v35nvfbc/hotfix.patch) {
+            git apply v35nvfbc/hotfix.patch
+            if ($LASTEXITCODE -ne 0) { throw 'V35 hotfix patch failed' }
+          }
+
+      - name: Install V35.2 DX9Vid producer
+        shell: pwsh
+        run: |
+          Copy-Item v35nvfbc/nvfbc_dx9vid_capture.cpp v35nvfbc/source/nvfbc_cuda_capture.cpp -Force
+          $p='v35nvfbc/source/main.cpp'
+          $t=Get-Content $p -Raw
+          $t=$t.Replace('V35 NvFBC CUDA build. Backend: NvFBCToCuda -> native DX12 mailbox; no WGC/Desktop Duplication/D3D11 capture. Selected FG mode: ', 'V35.2 NvFBC DX9Vid build. Backend: NvFBCToDx9Vid -> CUDA GPU bridge -> native DX12 mailbox; no WGC/Desktop Duplication/D3D11 capture. Selected FG mode: ')
+          $t=$t.Replace('// V35 dedicated NvFBC producer. NvFBC writes into a rotating CUDA staging', '// V35.2 dedicated NvFBC producer. NvFBC writes into rotating D3D9 GPU surfaces')
+          $t=$t.Replace('// buffer; CUDA crops directly into the native DX12 mailbox and signals the', '// and CUDA copies GPU-to-GPU into the native DX12 mailbox and signals the')
+          $t=$t.Replace('NvFBC/CUDA initialization failed: ', 'NvFBC/DX9Vid initialization failed: ')
+          $t=$t.Replace('V35 producer active: NvFBCToCuda -> CUDA 2D crop/copy -> native DX12 three-slot latest-frame mailbox.', 'V35.2 producer active: NvFBCToDx9Vid CROP -> D3D9 GPU surfaces -> CUDA array copy -> native DX12 three-slot latest-frame mailbox.')
+          $t=$t.Replace('V35 capture is unkeyed/plain NvFBC: no WGC, no Desktop Duplication, no D3D11 capture, no game hook, no CPU readback.', 'V35.2 capture is plain NvFBCToDx9Vid: no WGC, no Desktop Duplication, no D3D11 capture, no game hook, no CPU pixel readback.')
+          $t=$t.Replace('V35 staging: three rotating NvFBC CUDA buffers + nonblocking CUDA events prevent capture/copy hazards without a per-frame CPU synchronize.', 'V35.2 staging: three rotating NvFBC D3D9 GPU surfaces + CUDA events prevent capture/copy hazards without a per-frame CPU synchronize.')
+          $t=$t.Replace('V35 NvFBC Alt-Tab: presenter hidden immediately; NvFBC/CUDA session retained.', 'V35.2 NvFBC Alt-Tab: presenter hidden immediately; NvFBC/DX9Vid session retained.')
+          $t=$t.Replace('V35 NvFBC capture resumed in-place; waiting for a fresh framebuffer update before showing presenter.', 'V35.2 NvFBC capture resumed in-place; waiting for a fresh framebuffer update before showing presenter.')
+          $t=$t.Replace('V35 presenter shown after first fresh post-Alt-Tab NvFBC frame.', 'V35.2 presenter shown after first fresh post-Alt-Tab NvFBC frame.')
+          $t=$t.Replace('V35 NvFBC producer stopped: ', 'V35.2 NvFBC producer stopped: ')
+          [IO.File]::WriteAllText($p,$t,[Text.UTF8Encoding]::new($false))
+
+      - name: Get SDK headers
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch v2.14.1 https://github.com/NVIDIA-RTX/Streamline.git Streamline
+          if ($LASTEXITCODE -ne 0) { throw 'Streamline clone failed' }
+          git clone --depth 1 https://github.com/mbucchia/Optical-Flow-SDK.git OpticalFlow
+          if ($LASTEXITCODE -ne 0) { throw 'Optical Flow clone failed' }
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Regenerate SM6 bytecode
+        shell: pwsh
+        run: |
+          $header = Get-Content v35nvfbc/source/motion_shader.h -Raw
+          $startMarker='R"HLSL('; $endMarker=')HLSL"'
+          $start=$header.IndexOf($startMarker); $end=$header.LastIndexOf($endMarker)
+          if ($start -lt 0 -or $end -le $start) { throw 'HLSL markers missing' }
+          $hlsl=$header.Substring($start+$startMarker.Length,$end-($start+$startMarker.Length))
+          [IO.File]::WriteAllText('v35nvfbc/source/motion_shader.hlsl',$hlsl,[Text.UTF8Encoding]::new($false))
+          $dxc=Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\dxc.exe' | Sort-Object FullName -Descending | Select-Object -First 1
+          & $dxc.FullName /nologo /T cs_6_0 /E Resample /O3 /Fo v35nvfbc/source/resample.cso v35nvfbc/source/motion_shader.hlsl
+          if ($LASTEXITCODE -ne 0) { throw 'Resample shader failed' }
+          & $dxc.FullName /nologo /T cs_6_0 /E Motion /O3 /Fo v35nvfbc/source/motion.cso v35nvfbc/source/motion_shader.hlsl
+          if ($LASTEXITCODE -ne 0) { throw 'Motion shader failed' }
+          function To-CArray([byte[]]$bytes){($bytes|ForEach-Object{[string]$_})-join ','}
+          $r=To-CArray([IO.File]::ReadAllBytes((Resolve-Path v35nvfbc/source/resample.cso)))
+          $m=To-CArray([IO.File]::ReadAllBytes((Resolve-Path v35nvfbc/source/motion.cso)))
+          [IO.File]::WriteAllText('v35nvfbc/source/compute_bytecode.h',"#pragma once`r`nstatic const unsigned char resampleCode[]={$r};`r`nstatic const unsigned char motionCode[]={$m};`r`n",[Text.UTF8Encoding]::new($false))
+
+      - name: Validate V35.2 source
+        shell: pwsh
+        run: |
+          $main = Get-Content v35nvfbc/source/main.cpp -Raw
+          $fbc = Get-Content v35nvfbc/source/nvfbc_cuda_capture.cpp -Raw
+          if ($main -match 'DuplicateOutput|AcquireNextFrame|WgcCaptureBackend') { throw 'Old Windows capture backend still present' }
+          if ($main -match 'D3D11CreateDevice|ID3D11Texture2D') { throw 'D3D11 capture bridge still present' }
+          if ($fbc -notmatch 'NVFBC_TO_DX9_VID' -or $fbc -notmatch 'cuGraphicsD3D9RegisterResource') { throw 'DX9Vid GPU bridge missing' }
+          if ($fbc -match 'NVFBC_SHARED_CUDA') { throw 'NvFBCCuda session path unexpectedly present' }
+          if ($fbc -match 'magic|enable_key|patch_driver') { throw 'Unexpected NvFBC gating bypass detected' }
+
+      - name: Compile Windows x64 elevated
+        shell: cmd
+        run: |
+          cd v35nvfbc\source
+          rc /nologo /fo app.res app.rc
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++20 /O2 /MT /EHsc /W4 /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0A00 /DWINVER=0x0A00 /I "..\..\Streamline\include" /I "..\..\OpticalFlow\NvOFInterface" main.cpp dlss_bridge.cpp nvof_bridge.cpp nvfbc_cuda_capture.cpp app.res /Fe:"..\..\DLSS-Presenter-NvFBC-V35.2.exe" /link /SUBSYSTEM:WINDOWS /MANIFESTUAC:"level='requireAdministrator' uiAccess='false'" d3d9.lib d3d12.lib dxgi.lib d3dcompiler.lib dwmapi.lib comctl32.lib shell32.lib ole32.lib user32.lib gdi32.lib wintrust.lib crypt32.lib
+          if errorlevel 1 exit /b 1
+
+      - name: Validate build
+        shell: pwsh
+        run: |
+          if (-not (Test-Path 'DLSS-Presenter-NvFBC-V35.2.exe')) { throw 'EXE missing' }
+          $hash=(Get-FileHash 'DLSS-Presenter-NvFBC-V35.2.exe' -Algorithm SHA256).Hash.ToLower()
+          @"
+          Build: V35.2 NvFBCToDx9Vid GPU bridge
+          Capture: NvFBCToDx9Vid only; no NvFBCCuda session, no WGC, no Desktop Duplication
+          Surface path: NvFBC CROP -> three D3D9 DEFAULT-pool GPU surfaces -> CUDA D3D9 interop -> shared DX12 mailbox
+          Pixels remain GPU resident; no CPU frame readback
+          UAC: requireAdministrator
+          Existing V34/V35 OFA, DLSS-G, mailbox, Reflex and split-ready timing retained
+          No private key, driver patch, proxy or anti-cheat bypass
+          DLSS-Presenter-NvFBC-V35.2.exe SHA256: $hash
+          "@ | Set-Content BUILD-VALIDATION-V35.2-NVFBC.txt
+          Get-Content BUILD-VALIDATION-V35.2-NVFBC.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DX12-DLSS-FG-V35.2-NVFBC-DX9VID
+          path: |
+            DLSS-Presenter-NvFBC-V35.2.exe
+            BUILD-VALIDATION-V35.2-NVFBC.txt
+            v35nvfbc/source/nvfbc_cuda_capture.cpp
+            v35nvfbc/source/nvfbc_cuda_capture.h
+          if-no-files-found: error
