@@ -1,0 +1,37 @@
+name: Dump V35 Source
+
+on:
+  push:
+    branches: [ chatgpt-v35-2-nvfbc-dx9vid-20261007 ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dump:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reconstruct V35 source
+        shell: pwsh
+        run: |
+          $parts = Get-ChildItem v35nvfbc/source_part_*.b64 | Sort-Object Name
+          $b64 = ($parts | ForEach-Object { (Get-Content $_.FullName -Raw).Trim() }) -join ''
+          [IO.File]::WriteAllBytes('v35nvfbc-source.tar.xz',[Convert]::FromBase64String($b64))
+          New-Item -ItemType Directory -Force v35nvfbc | Out-Null
+          tar -xf v35nvfbc-source.tar.xz -C v35nvfbc
+          if ($LASTEXITCODE -ne 0) { throw 'extract failed' }
+          if (Test-Path v35nvfbc/hotfix.patch) {
+            git apply v35nvfbc/hotfix.patch
+            if ($LASTEXITCODE -ne 0) { throw 'hotfix failed' }
+          }
+          ./v35nvfbc/v35_1_diag_patch.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: v35-source-dump
+          path: |
+            v35nvfbc/source/nvfbc_cuda_capture.cpp
+            v35nvfbc/source/nvfbc_cuda_capture.h
+            v35nvfbc/source/main.cpp
+          if-no-files-found: error
