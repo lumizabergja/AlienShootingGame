@@ -1,0 +1,109 @@
+name: Build V35 NvFBC CUDA
+
+on:
+  push:
+    branches: [ chatgpt-v35-nvfbc-20261007 ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reconstruct V35 source
+        shell: pwsh
+        run: |
+          $parts = Get-ChildItem v35nvfbc/source_part_*.b64 | Sort-Object Name
+          if ($parts.Count -ne 5) { throw "Expected 5 source bundle parts, found $($parts.Count)" }
+          $b64 = ($parts | ForEach-Object { (Get-Content $_.FullName -Raw).Trim() }) -join ''
+          [IO.File]::WriteAllBytes('v35nvfbc-source.tar.xz',[Convert]::FromBase64String($b64))
+          $hash=(Get-FileHash v35nvfbc-source.tar.xz -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne '35cdb1c3f4aca49fe0ce0e384edc048f5b35b00029acc2c9e2fd03198d7dc118') { throw "V35 source hash mismatch: $hash" }
+          New-Item -ItemType Directory -Force v35nvfbc | Out-Null
+          tar -xf v35nvfbc-source.tar.xz -C v35nvfbc
+          if ($LASTEXITCODE -ne 0) { throw 'V35 source extraction failed' }
+          if (-not (Test-Path v35nvfbc/source/main.cpp)) { throw 'V35 source extraction incomplete' }
+          if (Test-Path v35nvfbc/hotfix.patch) {
+            git apply v35nvfbc/hotfix.patch
+            if ($LASTEXITCODE -ne 0) { throw 'V35 hotfix patch failed' }
+          }
+
+      - name: Get SDK headers
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch v2.14.1 https://github.com/NVIDIA-RTX/Streamline.git Streamline
+          if ($LASTEXITCODE -ne 0) { throw 'Streamline clone failed' }
+          git clone --depth 1 https://github.com/mbucchia/Optical-Flow-SDK.git OpticalFlow
+          if ($LASTEXITCODE -ne 0) { throw 'Optical Flow clone failed' }
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Regenerate SM6 bytecode
+        shell: pwsh
+        run: |
+          $header = Get-Content v35nvfbc/source/motion_shader.h -Raw
+          $startMarker='R"HLSL('; $endMarker=')HLSL"'
+          $start=$header.IndexOf($startMarker); $end=$header.LastIndexOf($endMarker)
+          if ($start -lt 0 -or $end -le $start) { throw 'HLSL markers missing' }
+          $hlsl=$header.Substring($start+$startMarker.Length,$end-($start+$startMarker.Length))
+          [IO.File]::WriteAllText('v35nvfbc/source/motion_shader.hlsl',$hlsl,[Text.UTF8Encoding]::new($false))
+          $dxc=Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\dxc.exe' | Sort-Object FullName -Descending | Select-Object -First 1
+          & $dxc.FullName /nologo /T cs_6_0 /E Resample /O3 /Fo v35nvfbc/source/resample.cso v35nvfbc/source/motion_shader.hlsl
+          if ($LASTEXITCODE -ne 0) { throw 'Resample shader failed' }
+          & $dxc.FullName /nologo /T cs_6_0 /E Motion /O3 /Fo v35nvfbc/source/motion.cso v35nvfbc/source/motion_shader.hlsl
+          if ($LASTEXITCODE -ne 0) { throw 'Motion shader failed' }
+          function To-CArray([byte[]]$bytes){($bytes|ForEach-Object{[string]$_})-join ','}
+          $r=To-CArray([IO.File]::ReadAllBytes((Resolve-Path v35nvfbc/source/resample.cso)))
+          $m=To-CArray([IO.File]::ReadAllBytes((Resolve-Path v35nvfbc/source/motion.cso)))
+          [IO.File]::WriteAllText('v35nvfbc/source/compute_bytecode.h',"#pragma once`r`nstatic const unsigned char resampleCode[]={$r};`r`nstatic const unsigned char motionCode[]={$m};`r`n",[Text.UTF8Encoding]::new($false))
+
+      - name: Validate NvFBC architecture
+        shell: pwsh
+        run: |
+          $main = Get-Content v35nvfbc/source/main.cpp -Raw
+          $fbc = Get-Content v35nvfbc/source/nvfbc_cuda_capture.cpp -Raw
+          if ($main -match 'DuplicateOutput|AcquireNextFrame|WgcCaptureBackend') { throw 'Old Windows capture backend still present' }
+          if ($main -match 'D3D11CreateDevice|ID3D11Texture2D') { throw 'D3D11 capture bridge still present' }
+          if ($fbc -notmatch 'NVFBC_SHARED_CUDA' -or $fbc -notmatch 'cuMemcpy2DAsync_v2') { throw 'NvFBC CUDA path missing' }
+          if ($fbc -match 'privateData\s*=\s*[^n]' -or $fbc -match 'magic|enable_key|patch_driver') { throw 'Unexpected NvFBC gating bypass detected' }
+          if ($main -notmatch 'D3D12_HEAP_FLAG_SHARED' -or $main -notmatch 'D3D12_FENCE_FLAG_SHARED') { throw 'Native shared DX12 mailbox/fences missing' }
+
+      - name: Compile Windows x64
+        shell: cmd
+        run: |
+          cd v35nvfbc\source
+          rc /nologo /fo app.res app.rc
+          if errorlevel 1 exit /b 1
+          cl /nologo /std:c++20 /O2 /MT /EHsc /W4 /DUNICODE /D_UNICODE /DNOMINMAX /DWIN32_LEAN_AND_MEAN /D_WIN32_WINNT=0x0A00 /DWINVER=0x0A00 /I "..\..\Streamline\include" /I "..\..\OpticalFlow\NvOFInterface" main.cpp dlss_bridge.cpp nvof_bridge.cpp nvfbc_cuda_capture.cpp app.res /Fe:"..\..\DLSS-Presenter-NvFBC.exe" /link /SUBSYSTEM:WINDOWS d3d12.lib dxgi.lib d3dcompiler.lib dwmapi.lib comctl32.lib shell32.lib ole32.lib user32.lib gdi32.lib wintrust.lib crypt32.lib
+          if errorlevel 1 exit /b 1
+
+      - name: Validate build
+        shell: pwsh
+        run: |
+          if (-not (Test-Path DLSS-Presenter-NvFBC.exe)) { throw 'EXE missing' }
+          $hash=(Get-FileHash DLSS-Presenter-NvFBC.exe -Algorithm SHA256).Hash.ToLower()
+          @"
+          Build: V35 NvFBC CUDA -> DX12 -> OFA/DLSS-G
+          Capture: NvFBCToCuda only; no WGC/Desktop Duplication/D3D11 capture
+          Pixel path: NvFBC CUDA staging -> CUDA 2D crop/copy -> shared DX12 mailbox
+          Synchronization: imported DX12 capture/release fences + 3 rotating CUDA staging buffers/events
+          NvFBC policy: normal unkeyed NvFBC_CreateEx only; no private key/driver patch
+          FG: fixed 2x/3x/4x/5x/6x plus Dynamic MFG
+          OFA: 1x1/2x2/4x4/8x8 FAST + selectable resolution
+          DLSS-Presenter-NvFBC.exe SHA256: $hash
+          "@ | Set-Content BUILD-VALIDATION-V35-NVFBC.txt
+          Get-Content BUILD-VALIDATION-V35-NVFBC.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DX12-DLSS-FG-V35-NVFBC-CUDA
+          path: |
+            DLSS-Presenter-NvFBC.exe
+            BUILD-VALIDATION-V35-NVFBC.txt
+          if-no-files-found: error
