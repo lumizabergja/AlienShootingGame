@@ -1,1 +1,1 @@
-Trigger V35.2 NvFBC DX9Vid build 2026-10-07 16:58
+Trigger V35.3 NvFBC DX9Vid interfaceVersion build 2026-10-07 17:05
