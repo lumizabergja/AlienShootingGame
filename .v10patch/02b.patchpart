@@ -1,0 +1,91 @@
+*>(gateway)) == MH_OK) {
+-                gatewayHooked = true;
+-            }
+-        }
++    if (!commonDll)
++        throw std::runtime_error("V10 could not load sl.common.dll");
++    auto discovery = discoverCommonComputeSlot(commonDll);
++    commonComputeSlot = discovery.slot;
++    {
++        std::ostringstream os;
++        os << "sl.common direct compute slot resolved: publishRVA=0x" << std::hex << discovery.publishRva
++           << ", slotRVA=0x" << discovery.slotRva;
++        bootstrapStatus = os.str();
+     }
+ 
+     auto dirString = dir.wstring();
+@@ -122,72 +146,17 @@ void FrameGeneration::load(bool diagnostics) {
+     p.projectId = "e86d5d1d-b886-47ac-a90d-48708688358b";
+     p.renderAPI = sl::RenderAPI::eD3D12;
+     auto initResult = initFn(p, sl::kSDKVersion);
+-    if (gatewayHooked) {
+-        MH_DisableHook(reinterpret_cast<void*>(gateway));
+-        MH_RemoveHook(reinterpret_cast<void*>(gateway));
+-    }
+-    if (mhOwned) MH_Uninitialize();
+-    parameters = gCapturedParameters.exchange(nullptr, std::memory_order_acq_rel);
+-    bootstrapStatus = "sl.common gateway calls=" +
+-                      std::to_string(gGatewayCalls.load(std::memory_order_relaxed)) +
+-                      ", slOnPluginLoad wrapper calls=" +
+-                      std::to_string(gCommonLoadCalls.load(std::memory_order_relaxed)) +
+-                      ", parameters=" + (parameters ? std::string("captured") : std::string("missing"));
+     ck(initResult, "Streamline initialization");
+     initialized = true;
+ }
+ void FrameGeneration::bind(ID3D12Device* d) {
+-    if (!parameters)
+-        throw std::runtime_error("V9 cannot observe Streamline compute publish: parameter interface was not captured");
+-
+-    // Streamline v2.14.1 IParameters declares seven set overloads; set(const char*, void*)
+-    // is vtable slot 6. Hook it only while slSetD3DDevice initializes plugins. sl.common's
+-    // createCompute() must publish the exact live ICompute* through this setter.
+-    auto** vt = *reinterpret_cast<void***>(parameters);
+-    void* setter = vt ? vt[6] : nullptr;
+-    if (!setter)
+-        throw std::runtime_error("V9 Streamline parameter setter ABI is unavailable");
+-
+-    bool mhOwned = false, hooked = false;
+-    gPublishedCompute.store(nullptr, std::memory_order_release);
+-    gParamSetCalls.store(0, std::memory_order_relaxed);
+-    gOriginalParamSetPointer = nullptr;
+-
+-    auto mh = MH_Initialize();
+-    if (mh == MH_OK) mhOwned = true;
+-    if (mh != MH_OK && mh != MH_ERROR_ALREADY_INITIALIZED)
+-        throw std::runtime_error("V9 MinHook initialize failed during compute publish capture");
+-
+-    if (MH_CreateHook(setter, reinterpret_cast<void*>(&hookParamSetPointer),
+-                      reinterpret_cast<void**>(&gOriginalParamSetPointer)) != MH_OK ||
+-        MH_EnableHook(setter) != MH_OK) {
+-        if (mhOwned) MH_Uninitialize();
+-        throw std::runtime_error("V9 could not hook Streamline IParameters::set(void*) publish path");
+-    }
+-    hooked = true;
+-
+-    sl::Result result{};
+-    try {
+-        result = deviceFn(d);
+-    } catch (...) {
+-        if (hooked) { MH_DisableHook(setter); MH_RemoveHook(setter); }
+-        if (mhOwned) MH_Uninitialize();
+-        gOriginalParamSetPointer = nullptr;
+-        throw;
+-    }
+-
+-    if (hooked) { MH_DisableHook(setter); MH_RemoveHook(setter); }
+-    if (mhOwned) MH_Uninitialize();
+-    gOriginalParamSetPointer = nullptr;
+-
+-    compute = gPublishedCompute.exchange(nullptr, std::memory_order_acq_rel);
+-    bootstrapStatus += ", parameter set(void*) calls=" +
+-                       std::to_string(gParamSetCalls.load(std::memory_order_relaxed)) +
+-                       ", compute publish=" + (compute ? std::string("captured") : std::string("missing"));
+-
+-    ck(result, "Set Streamline device");
++    if (!commonComputeSlot)
++        throw std::runtime_error("V10 sl.common compute slot was not resolved");
++    ck(deviceFn(d), "Set Streamline device");
++    compute = *commonComputeSlot;
++    bootstrapStatus += ", compute pointer=" + (compute ? std::string("captured") : std::string("missing"));
+     if (!compute)
+-        throw std::runtime_error("V9 did not observe sl.common publishing sl.param.common.computeAPI: " + boots
