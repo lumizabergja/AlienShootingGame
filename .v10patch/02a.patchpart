@@ -1,0 +1,78 @@
+for (size_t off = 0; off + sizeof(key) <= size; ++off) {
++                if (!memcmp(begin + off, key, sizeof(key))) {
++                    if (stringAddr) throw std::runtime_error("V10 compute key is not unique in sl.common");
++                    stringAddr = begin + off;
++                }
++            }
++        }
+     }
+-    return result;
+-}
++    if (!textBegin || !textSize || !stringAddr)
++        throw std::runtime_error("V10 could not locate sl.common text/compute key");
+ 
+-void __fastcall hookParamSetPointer(void* self, const char* key, void* value) {
+-    gParamSetCalls.fetch_add(1, std::memory_order_relaxed);
+-    if (gOriginalParamSetPointer)
+-        gOriginalParamSetPointer(self, key, value);
+-    if (key && value && strcmp(key, "sl.param.common.computeAPI") == 0)
+-        gPublishedCompute.store(value, std::memory_order_release);
++    void** foundSlot{};
++    uintptr_t foundPublish{};
++    for (size_t i = 0; i + 16 <= textSize; ++i) {
++        auto* q = textBegin + i;
++        // Exact x64 sequence in the pinned NVIDIA sl.common publish path:
++        //   mov r8,  [rip+disp32]   ; ctx.compute
++        //   lea rdx, [rip+disp32]   ; "sl.param.common.computeAPI"
++        //   call qword ptr [rax]    ; IParameters::set(const char*, void*)
++        if (q[0] != 0x4c || q[1] != 0x8b || q[2] != 0x05 ||
++            q[7] != 0x48 || q[8] != 0x8d || q[9] != 0x15 ||
++            q[14] != 0xff || q[15] != 0x10)
++            continue;
++        int32_t movDisp{}, leaDisp{};
++        memcpy(&movDisp, q + 3, sizeof(movDisp));
++        memcpy(&leaDisp, q + 10, sizeof(leaDisp));
++        auto* keyTarget = q + 14 + leaDisp;
++        if (keyTarget != stringAddr) continue;
++        auto* slotAddr = q + 7 + movDisp;
++        if (slotAddr < base || slotAddr + sizeof(void*) > base + imageSize)
++            throw std::runtime_error("V10 recovered compute slot outside sl.common image");
++        if (foundSlot && foundSlot != reinterpret_cast<void**>(slotAddr))
++            throw std::runtime_error("V10 found multiple compute publish slots in sl.common");
++        foundSlot = reinterpret_cast<void**>(slotAddr);
++        foundPublish = uintptr_t(q - base);
++    }
++    if (!foundSlot)
++        throw std::runtime_error("V10 could not recover sl.common ctx.compute publish slot");
++    return { foundSlot, uintptr_t(reinterpret_cast<uint8_t*>(foundSlot) - base), foundPublish };
+ }
+ }
+ void FrameGeneration::load(bool diagnostics) {
+@@ -78,31 +113,20 @@ void FrameGeneration::load(bool diagnostics) {
+     load(createFactory, "CreateDXGIFactory1");
+     load(createDevice, "D3D12CreateDevice");
+ 
+-    // V9: capture Streamline's shared IParameters pointer through sl.common's exported
+-    // slGetPluginFunction gateway. The plugin manager itself must call this gateway to
+-    // obtain slOnPluginLoad, so returning our wrapper here is deterministic and avoids
+-    // detouring the private slOnPluginLoad implementation directly.
++    // V10: no IParameters ABI calls or detours. Resolve sl.common's own ctx.compute
++    // storage by following the machine-code publish reference to the literal key.
+     auto commonFile = (dir / L"sl.common.dll").wstring();
+     commonDll = LoadLibraryExW(commonFile.c_str(), nullptr,
+                               LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+-    auto gateway = commonDll ? reinterpret_cast<SlGetPluginFunctionFn>(
+-                                  GetProcAddress(commonDll, "slGetPluginFunction")) : nullptr;
+-    bool gatewayHooked = false, mhOwned = false;
+-    gCapturedParameters.store(nullptr, std::memory_order_release);
+-    gGatewayCalls.store(0, std::memory_order_relaxed);
+-    gCommonLoadCalls.store(0, std::memory_order_relaxed);
+-    gOriginalCommonLoad = nullptr;
+-    gOriginalCommonGateway = nullptr;
+-    if (gateway) {
+-        auto mh = MH_Initialize();
+-        if (mh == MH_OK) mhOwned = true;
+-        if (mh == MH_OK || mh == MH_ERROR_ALREADY_INITIALIZED) {
+-            if (MH_CreateHook(reinterpret_cast<void*>(gateway), reinterpret_cast<void*>(&hookCommonGateway),
+-                              reinterpret_cast<void**>(&gOriginalCommonGateway)) == MH_OK &&
+-                MH_EnableHook(reinterpret_cast<void
