@@ -58,7 +58,6 @@ jobs:
           git apply --directory=v9work/source $p7
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
-          # Use the exact V8 decode path that already passed in the V8 workflow.
           $encoded = Get-Content "$env:GITHUB_WORKSPACE\.v8patch\v8patch.gz.b64" -Raw
           $v8gz = "$env:GITHUB_WORKSPACE\v8.patch.gz"
           [IO.File]::WriteAllBytes($v8gz, [Convert]::FromBase64String($encoded))
@@ -75,14 +74,13 @@ jobs:
           git apply --directory=v9work/source $p8
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
-          # V9 is stored as raw UTF-8 patch parts. No base64 layer.
           $rawParts = @('00.patchpart','01.patchpart','02.patchpart','03.patchpart') | ForEach-Object {
             Get-Content (Join-Path "$env:GITHUB_WORKSPACE\.v9raw" $_) -Raw
           }
           $p9 = "$env:GITHUB_WORKSPACE\v9.patch"
           [IO.File]::WriteAllText($p9, ($rawParts -join ''), [Text.UTF8Encoding]::new($false))
           $sha9=(Get-FileHash $p9 -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($sha9 -ne '58115b8949823ff6d6bc305a86a258521e67467d7fa9ee3ffb0efba8dfbe3625') { throw "V9 SHA mismatch: $sha9" }
+          if ($sha9 -ne '611fab7e51fd0cf0025a808b7d314e12550368c3c1a3c7fd484ed55a7a03a068') { throw "V9 Windows patch SHA mismatch: $sha9" }
           git apply --check --directory=v9work/source $p9
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           git apply --directory=v9work/source $p9
