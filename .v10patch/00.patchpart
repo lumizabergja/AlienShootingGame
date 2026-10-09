@@ -1,0 +1,134 @@
+diff --git a/src/engine.cpp b/src/engine.cpp
+index 9e98bc6..e6304a6 100644
+--- a/src/engine.cpp
++++ b/src/engine.cpp
+@@ -193,13 +193,13 @@ void Engine::init() {
+     if (postMode()) {
+         {
+             const auto& bs = fg.streamlineBootstrapStatus();
+-            capture.Diagnostic(std::wstring(L"V9 CHI BOOTSTRAP: ") + std::wstring(bs.begin(), bs.end()));
++            capture.Diagnostic(std::wstring(L"V10 CHI BOOTSTRAP: ") + std::wstring(bs.begin(), bs.end()));
+         }
+         post=std::make_unique<PostPresentWarp>();
+         post->init(device.Get(),queue.Get(),fg.streamlineCompute(),output,width,height,options,control);
+         post->check();
+         post->attach(swap.Get());
+-        capture.Diagnostic(L"V9 CHI FINAL-PRESENT WARP ACTIVE: CHI hooks installed; DLSS-G generated/real subframes are late-warped on the exact Streamline CHI present queue. See PostPresent-Diagnostics.log.");
++        capture.Diagnostic(L"V10 CHI FINAL-PRESENT WARP ACTIVE: CHI hooks installed; DLSS-G generated/real subframes are late-warped on the exact Streamline CHI present queue. See PostPresent-Diagnostics.log.");
+     }
+     producer = std::thread([this] { captureLoop(); });
+ }
+@@ -474,7 +474,7 @@ void Engine::lateWarpLoop() {
+ void Engine::loop() {
+     if (options.lateWarp && options.multiplier == 1) { lateWarpLoop(); return; }
+     if (options.lateWarp && options.multiplier > 1) {
+-        capture.Diagnostic(std::wstring(L"V9 CHI FINAL-PRESENT WARP ACTIVE: fresh mouse at every CHI generated/real final present; selected FG=") +
++        capture.Diagnostic(std::wstring(L"V10 CHI FINAL-PRESENT WARP ACTIVE: fresh mouse at every CHI generated/real final present; selected FG=") +
+                            std::to_wstring(options.multiplier) + L"x.");
+     }
+     int previous = -1;
+diff --git a/src/main.cpp b/src/main.cpp
+index 2bd91d5..cd966fc 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -307,7 +307,7 @@ LRESULT CALLBACK proc(HWND w, UINT m, WPARAM a, LPARAM b) {
+                                      (unsigned long long)dropped, (unsigned long long)LateMouse::count(), ow, oh);
+                         } else if (sessionLateWarp) {
+                             swprintf(text,700,
+-                                L"V9 CHI FINAL-PRESENT LATE WARP | %.1f base FPS | %.1f SDK presents/s\nLate warp runs inside Streamline CHI on each DLSS-G generated/real present.\nFresh mouse is sampled on the exact pacer queue immediately before final presentation.\nDetails: PostPresent-Diagnostics.log",
++                                L"V10 CHI FINAL-PRESENT LATE WARP | %.1f base FPS | %.1f SDK presents/s\nLate warp runs inside Streamline CHI on each DLSS-G generated/real present.\nFresh mouse is sampled on the exact pacer queue immediately before final presentation.\nDetails: PostPresent-Diagnostics.log",
+                                 base/1000.0, presents/1000.0);
+                         } else {
+                             swprintf(text, 700,
+diff --git a/src/post_present.cpp b/src/post_present.cpp
+index aeeb1fb..dafbdd7 100644
+--- a/src/post_present.cpp
++++ b/src/post_present.cpp
+@@ -158,7 +158,7 @@ struct PostPresentWarp::Impl {
+     }
+ 
+     void* identityKey(IDXGISwapChain* swap, ComPtr<IUnknown>& identity) {
+-        ::check(swap->QueryInterface(IID_PPV_ARGS(&identity)), "V9 swapchain identity");
++        ::check(swap->QueryInterface(IID_PPV_ARGS(&identity)), "V10 swapchain identity");
+         return identity.Get();
+     }
+ 
+@@ -170,24 +170,24 @@ struct PostPresentWarp::Impl {
+ 
+         auto r = std::make_unique<SwapResources>();
+         r->identity = identity;
+-        ::check(native->QueryInterface(IID_PPV_ARGS(&r->swap)), "V9 CHI swapchain3");
++        ::check(native->QueryInterface(IID_PPV_ARGS(&r->swap)), "V10 CHI swapchain3");
+         DXGI_SWAP_CHAIN_DESC desc{};
+-        ::check(r->swap->GetDesc(&desc), "V9 CHI swapchain description");
++        ::check(r->swap->GetDesc(&desc), "V10 CHI swapchain description");
+         if (desc.BufferDesc.Width != width || desc.BufferDesc.Height != height)
+-            throw std::runtime_error("V9 CHI final swapchain size mismatch");
++            throw std::runtime_error("V10 CHI final swapchain size mismatch");
+         if (desc.BufferDesc.Format != DXGI_FORMAT_B8G8R8A8_UNORM)
+-            throw std::runtime_error("V9 requires BGRA8 final presentation buffers");
++            throw std::runtime_error("V10 requires BGRA8 final presentation buffers");
+         const UINT count = std::max<UINT>(2, desc.BufferCount);
+         r->back.resize(count);
+         r->scratch.resize(count);
+         D3D12_DESCRIPTOR_HEAP_DESC hd{};
+         hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+         hd.NumDescriptors = count;
+-        ::check(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&r->rtv)), "V9 RTV heap");
++        ::check(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&r->rtv)), "V10 RTV heap");
+         r->rtvStride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+         auto handle = r->rtv->GetCPUDescriptorHandleForHeapStart();
+         for (UINT i = 0; i < count; ++i) {
+-            ::check(r->swap->GetBuffer(i, IID_PPV_ARGS(&r->back[i])), "V9 final backbuffer");
++            ::check(r->swap->GetBuffer(i, IID_PPV_ARGS(&r->back[i])), "V10 final backbuffer");
+             device->CreateRenderTargetView(r->back[i].Get(), nullptr, handle);
+             handle.ptr += r->rtvStride;
+             auto td = r->back[i]->GetDesc();
+@@ -204,7 +204,7 @@ struct PostPresentWarp::Impl {
+             bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+             ::check(device->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd,
+                         D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&sc.buffer)),
+-                    "V9 warp scratch buffer");
++                    "V10 warp scratch buffer");
+         }
+         auto* result = r.get();
+         swaps.emplace(key, std::move(r));
+@@ -218,55 +218,55 @@ struct PostPresentWarp::Impl {
+         for (auto& c : contexts) {
+             if (!c.allocator)
+                 ::check(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+-                            IID_PPV_ARGS(&c.allocator)), "V9 command allocator");
++                            IID_PPV_ARGS(&c.allocator)), "V10 command allocator");
+             if (!c.list) {
+                 ::check(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, c.allocator.Get(),
+-                            nullptr, IID_PPV_ARGS(&c.list)), "V9 command list");
+-                ::check(c.list->Close(), "V9 close initial command list");
++                            nullptr, IID_PPV_ARGS(&c.list)), "V10 command list");
++                ::check(c.list->Close(), "V10 close initial command list");
+             }
+             if (!c.fence)
+                 ::check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&c.fence)),
+-                        "V9 per-context fence");
++                        "V10 per-context fence");
+         }
+     }
+ 
+     void ensureHook() {
+         if (hooked.load(std::memory_order_acquire)) return;
+-        if (!probeQueue) throw std::runtime_error("V9 probe queue is unavailable");
+-        if (!compute) throw std::runtime_error("V9 live Streamline ICompute pointer is unavailable");
++        if (!probeQueue) throw std::runtime_error("V10 probe queue is unavailable");
++        if (!compute) throw std::runtime_error("V10 live Streamline ICompute pointer is unavailable");
+         auto** cvt = *reinterpret_cast<void***>(compute);
+         auto create = reinterpret_cast<CreateContextFn>(cvt[ComputeCreateContextSlot]);
+         auto destroy = reinterpret_cast<DestroyContextFn>(cvt[ComputeDestroyContextSlot]);
+-        if (!create || !destroy) throw std::runtime_error("V9 CHI compute ABI validation failed");
++        if (!create || !destroy) throw std::runtime_error("V10 CHI compute ABI validation failed");
+         void* probe{};
+-        int status = create(compute, probeQueue.Get(), 2, &probe, "v9.chi-probe");
+-        if (status != 0 || !probe) throw std::runtime_error("V9 could not create CHI D3D12 probe context");
++        int status = create(compute, probeQueue.Get(), 2, &probe, "v10.chi-probe");
++        if (status != 0 || !probe) throw std::runtime_error("V10 could not create CHI D3D12 probe context");
+         auto** pvt = *reinterpret_cast<void***>(probe);
+         void* p = pvt[ContextPresentSlot];
+         void* b = pvt[ContextDelimitFrameSlot];
