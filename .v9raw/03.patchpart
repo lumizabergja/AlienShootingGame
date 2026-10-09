@@ -1,0 +1,56 @@
+        result = deviceFn(d);
++    } catch (...) {
++        if (hooked) { MH_DisableHook(setter); MH_RemoveHook(setter); }
++        if (mhOwned) MH_Uninitialize();
++        gOriginalParamSetPointer = nullptr;
++        throw;
++    }
++
++    if (hooked) { MH_DisableHook(setter); MH_RemoveHook(setter); }
++    if (mhOwned) MH_Uninitialize();
++    gOriginalParamSetPointer = nullptr;
++
++    compute = gPublishedCompute.exchange(nullptr, std::memory_order_acq_rel);
++    bootstrapStatus += ", parameter set(void*) calls=" +
++                       std::to_string(gParamSetCalls.load(std::memory_order_relaxed)) +
++                       ", compute publish=" + (compute ? std::string("captured") : std::string("missing"));
++
++    ck(result, "Set Streamline device");
++    if (!compute)
++        throw std::runtime_error("V9 did not observe sl.common publishing sl.param.common.computeAPI: " + bootstrapStatus);
++}
++
+ void FrameGeneration::configure(IDXGIAdapter1 *a, UINT w, UINT h, UINT multiplier, bool vsync) {
+     width = w;
+     height = h;
+diff --git a/src/runtime.h b/src/runtime.h
+index 632edf0..b713d9f 100644
+--- a/src/runtime.h
++++ b/src/runtime.h
+@@ -7,6 +7,7 @@
+ class FrameGeneration {
+     HMODULE dll{}, commonDll{};
+     void* parameters{};
++    void* compute{};
+     std::string bootstrapStatus{};
+     bool initialized{};
+     UINT index{}, activeFrame{}, width{}, height{};
+@@ -52,13 +53,11 @@ class FrameGeneration {
+     Factory createFactory{};
+     Device createDevice{};
+     void load(bool diagnostics);
+-    void bind(ID3D12Device *d) {
+-        ck(deviceFn(d), "Set Streamline device");
+-    }
+-    void* streamlineParameters() const {
+-        if (!parameters)
+-            throw std::runtime_error("V8 CHI bootstrap failed: " + bootstrapStatus);
+-        return parameters;
++    void bind(ID3D12Device *d);
++    void* streamlineCompute() const {
++        if (!compute)
++            throw std::runtime_error("V9 CHI compute publish was not captured: " + bootstrapStatus);
++        return compute;
+     }
+     const std::string& streamlineBootstrapStatus() const { return bootstrapStatus; }
+     UINT currentFrame() const { return activeFrame; }
