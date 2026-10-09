@@ -1,0 +1,27 @@
+trapStatus);
++        throw std::runtime_error("V10 sl.common ctx.compute is null after slSetD3DDevice: " + bootstrapStatus);
+ }
+ 
+ void FrameGeneration::configure(IDXGIAdapter1 *a, UINT w, UINT h, UINT multiplier, bool vsync) {
+diff --git a/src/runtime.h b/src/runtime.h
+index b713d9f..94c2639 100644
+--- a/src/runtime.h
++++ b/src/runtime.h
+@@ -6,7 +6,7 @@
+ #include <sl_reflex.h>
+ class FrameGeneration {
+     HMODULE dll{}, commonDll{};
+-    void* parameters{};
++    void** commonComputeSlot{};
+     void* compute{};
+     std::string bootstrapStatus{};
+     bool initialized{};
+@@ -56,7 +56,7 @@ class FrameGeneration {
+     void bind(ID3D12Device *d);
+     void* streamlineCompute() const {
+         if (!compute)
+-            throw std::runtime_error("V9 CHI compute publish was not captured: " + bootstrapStatus);
++            throw std::runtime_error("V10 CHI compute pointer was not captured: " + bootstrapStatus);
+         return compute;
+     }
+     const std::string& streamlineBootstrapStatus() const { return bootstrapStatus; }
