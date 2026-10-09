@@ -1,0 +1,161 @@
+name: Build V10 Direct Compute Slot Late Warp
+
+on:
+  push:
+    branches:
+      - chatgpt-v10-direct-compute-slot-20261009
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reconstruct exact V9 source and apply V10 no-hook patch
+        shell: pwsh
+        run: |
+          $chunks = Get-ChildItem "$env:GITHUB_WORKSPACE\.v5payload" -Filter '*.txt' | Sort-Object Name
+          if ($chunks.Count -ne 8) { throw "Expected 8 V5 chunks, found $($chunks.Count)" }
+          $b64 = ($chunks | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
+          $zip = "$env:GITHUB_WORKSPACE\v5base.zip"
+          [IO.File]::WriteAllBytes($zip, [Convert]::FromBase64String($b64))
+          Expand-Archive $zip "$env:GITHUB_WORKSPACE\v10work" -Force
+          $src = "$env:GITHUB_WORKSPACE\v10work\source"
+
+          $dir = "$env:GITHUB_WORKSPACE\.v6patch2"
+          $first = Get-Content "$dir\00.txt" -Raw
+          $pieces = @($first.Substring(0, 6000))
+          foreach ($i in 1..6) { $pieces += (Get-Content (Join-Path $dir ("{0:D2}.txt" -f $i)) -Raw) }
+          $p6 = "$env:GITHUB_WORKSPACE\v6.patch"
+          [IO.File]::WriteAllBytes($p6, [Convert]::FromBase64String(($pieces -join '')))
+          if ((Get-FileHash $p6 -Algorithm SHA256).Hash.ToLowerInvariant() -ne '11d27d692845d72048314760b6e92e9f34094e1c5e019fca0e7079427a556cc1') { throw 'V6 SHA mismatch' }
+          git apply --directory=v10work/source $p6
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+          $p6ui = "$env:GITHUB_WORKSPACE\v6-ui.patch"
+          [IO.File]::WriteAllBytes($p6ui, [Convert]::FromBase64String((Get-Content "$dir\ui-cleanup.txt" -Raw)))
+          if ((Get-FileHash $p6ui -Algorithm SHA256).Hash.ToLowerInvariant() -ne '7b01691db1b612944a5062327a489ec9dc4af45af4f89a9a487dee3d7bb1a713') { throw 'V6 UI SHA mismatch' }
+          git apply --directory=v10work/source $p6ui
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+          $v7parts = @('00.txt','01.txt','02.txt') | ForEach-Object { Get-Content (Join-Path "$env:GITHUB_WORKSPACE\.v7gz" $_) -Raw }
+          $v7gz = "$env:GITHUB_WORKSPACE\v7.gz"
+          [IO.File]::WriteAllBytes($v7gz, [Convert]::FromBase64String(($v7parts -join '')))
+          $p7 = "$env:GITHUB_WORKSPACE\v7.patch"
+          $input=[IO.File]::OpenRead($v7gz)
+          try {
+            $gzip=[IO.Compression.GzipStream]::new($input,[IO.Compression.CompressionMode]::Decompress)
+            try { $out=[IO.File]::Create($p7); try { $gzip.CopyTo($out) } finally { $out.Dispose() } }
+            finally { $gzip.Dispose() }
+          } finally { $input.Dispose() }
+          if ((Get-FileHash $p7 -Algorithm SHA256).Hash.ToLowerInvariant() -ne '94a9009b12d6e702511574733c9ea9148cfbc733a37291d891d477766d22ed8a') { throw 'V7 SHA mismatch' }
+          git apply --directory=v10work/source $p7
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+          $encoded = Get-Content "$env:GITHUB_WORKSPACE\.v8patch\v8patch.gz.b64" -Raw
+          $v8gz = "$env:GITHUB_WORKSPACE\v8.patch.gz"
+          [IO.File]::WriteAllBytes($v8gz, [Convert]::FromBase64String($encoded))
+          $p8 = "$env:GITHUB_WORKSPACE\v8.patch"
+          $input=[IO.File]::OpenRead($v8gz)
+          try {
+            $gzip=[IO.Compression.GzipStream]::new($input,[IO.Compression.CompressionMode]::Decompress)
+            try { $out=[IO.File]::Create($p8); try { $gzip.CopyTo($out) } finally { $out.Dispose() } }
+            finally { $gzip.Dispose() }
+          } finally { $input.Dispose() }
+          if ((Get-FileHash $p8 -Algorithm SHA256).Hash.ToLowerInvariant() -ne '4a127cde81c1485051db5392813701887a3c794b6269aa6019e3a83991dbd6ff') { throw 'V8 SHA mismatch' }
+          git apply --directory=v10work/source $p8
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+          $raw9 = @('00.patchpart','01.patchpart','02.patchpart','03.patchpart') | ForEach-Object { Get-Content (Join-Path "$env:GITHUB_WORKSPACE\.v9raw" $_) -Raw }
+          $p9 = "$env:GITHUB_WORKSPACE\v9.patch"
+          [IO.File]::WriteAllText($p9, ($raw9 -join ''), [Text.UTF8Encoding]::new($false))
+          $sha9=(Get-FileHash $p9 -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($sha9 -ne '1fbebdc7819ab4a18e7cd97b76fdec08a5c6e4f9775df27f1e345c747dbeb8e7') { throw "V9 SHA mismatch: $sha9" }
+          git apply --check --directory=v10work/source $p9
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          git apply --directory=v10work/source $p9
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+          $parts10 = @('00.patchpart','01.patchpart','02a.patchpart','02b.patchpart','03.patchpart') | ForEach-Object { Get-Content (Join-Path "$env:GITHUB_WORKSPACE\.v10patch" $_) -Raw }
+          $text10 = (($parts10 -join '') -replace "`r`n","`n")
+          $p10 = "$env:GITHUB_WORKSPACE\v10.patch"
+          [IO.File]::WriteAllText($p10, $text10, [Text.UTF8Encoding]::new($false))
+          $sha10=(Get-FileHash $p10 -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($sha10 -ne 'b58e87e10100c312117d3684c3a38561143fc44094f410932d5ab3ff3ca7f295') { throw "V10 patch SHA mismatch: $sha10" }
+          git apply --check --directory=v10work/source $p10
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          git apply --directory=v10work/source $p10
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+          $rt=Get-Content "$src\src\runtime.cpp" -Raw
+          $pp=Get-Content "$src\src\post_present.cpp" -Raw
+          if (-not $rt.Contains('discoverCommonComputeSlot')) { throw 'V10 compute-slot scanner missing' }
+          if (-not $rt.Contains('sl.common direct compute slot resolved:')) { throw 'V10 compute-slot diagnostic missing' }
+          if (-not $rt.Contains('compute pointer=')) { throw 'V10 compute-pointer diagnostic missing' }
+          if ($rt.Contains('hookParamSetPointer')) { throw 'V9 parameter setter hook survived into V10' }
+          if ($rt.Contains('parameter set(void*) calls=')) { throw 'V9 parameter setter diagnostics survived into V10' }
+          if (-not $pp.Contains('v10.chi-probe')) { throw 'V10 CHI probe marker missing' }
+          Write-Host "V10 exact no-hook patch validated and applied: $sha10"
+
+      - name: Install pinned build dependencies
+        shell: pwsh
+        run: |
+          $src = "$env:GITHUB_WORKSPACE\v10work\source"
+          New-Item -ItemType Directory -Path "$src\vendor" -Force | Out-Null
+          git clone https://github.com/TsudaKageyu/minhook.git "$src\vendor\minhook"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          git -C "$src\vendor\minhook" checkout 8af6b4acae5a9388fd742b56fa79ece89d96f823
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          git clone --depth 1 --branch v2.14.1 https://github.com/NVIDIA-RTX/Streamline.git "$env:GITHUB_WORKSPACE\Streamline"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Path "$src\vendor\streamline" -Force | Out-Null
+          Copy-Item "$env:GITHUB_WORKSPACE\Streamline\include\*" "$src\vendor\streamline" -Recurse -Force
+          git clone --depth 1 https://github.com/mbucchia/Optical-Flow-SDK.git "$env:GITHUB_WORKSPACE\OpticalFlow"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Path "$src\vendor\opticalflow" -Force | Out-Null
+          Copy-Item "$env:GITHUB_WORKSPACE\OpticalFlow\NvOFInterface\nvOpticalFlowCommon.h" "$src\vendor\opticalflow\nvOpticalFlowCommon.h" -Force
+          Copy-Item "$env:GITHUB_WORKSPACE\OpticalFlow\NvOFInterface\nvOpticalFlowD3D12.h" "$src\vendor\opticalflow\nvOpticalFlowD3D12.h" -Force
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure x64 Release
+        shell: cmd
+        run: |
+          cmake -S "%GITHUB_WORKSPACE%\v10work\source" -B "%GITHUB_WORKSPACE%\v10work\source\build" -A x64
+          if errorlevel 1 exit /b 1
+
+      - name: Build x64 Release
+        shell: cmd
+        run: |
+          cmake --build "%GITHUB_WORKSPACE%\v10work\source\build" --config Release --parallel
+          if errorlevel 1 exit /b 1
+
+      - name: Validate V10 binary
+        shell: pwsh
+        run: |
+          $exe="$env:GITHUB_WORKSPACE\v10work\source\build\Release\FrameGeneration.exe"
+          if (-not (Test-Path $exe)) { throw 'FrameGeneration.exe missing' }
+          $bytes=[IO.File]::ReadAllBytes($exe)
+          $all=[Text.Encoding]::ASCII.GetString($bytes)+"`n"+[Text.Encoding]::Unicode.GetString($bytes)
+          $required=@('V10 CHI FINAL-PRESENT WARP ACTIVE','V10 CHI FINAL-PRESENT LATE WARP','V10 CHI BOOTSTRAP:','sl.common direct compute slot resolved:','compute pointer=','sl.param.common.computeAPI','v10.chi-probe','CHI_HOOK_INSTALLED','CHI_BOUNDARY_FIRST','CHI_PRESENT_FIRST','chi_present=','generated=','real=','PostPresent-Diagnostics.log')
+          foreach($n in $required){ if(-not $all.Contains($n)){ throw "Missing V10 marker: $n" } }
+          $forbidden=@('hookParamSetPointer','parameter set(void*) calls=','slOnPluginLoad wrapper calls=','V8 could not obtain sl.param.common.computeAPI','HOOK_INSTALLED: native DXGI Present=','HOOK_INSTALLED: nvngx_dlssg.dll!NVSDK_NGX_D3D12_EvaluateFeature','EVAL_FIRST','GENERATED_FIRST')
+          foreach($n in $forbidden){ if($all.Contains($n)){ throw "Forbidden stale marker: $n" } }
+          $hash=(Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content "$env:GITHUB_WORKSPACE\v10-exe-sha256.txt" $hash
+          Write-Host "V10 binary validation passed. SHA256=$hash"
+
+      - name: Upload V10 executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: FrameGeneration-V10-DirectCompute-Slot-LateWarp
+          path: |
+            v10work/source/build/Release/FrameGeneration.exe
+            v10-exe-sha256.txt
+          if-no-files-found: error
