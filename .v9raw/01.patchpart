@@ -47,7 +47,7 @@ evice->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd,
 -        if (!create || !destroy) throw std::runtime_error("V8 CHI compute ABI validation failed");
 +        if (!create || !destroy) throw std::runtime_error("V9 CHI compute ABI validation failed");
          void* probe{};
--        int status = create(compute, probeQueue.Get(), 2, &probe, "v8.chi-probe");
+-        int status = create(compute, probeQueue.Get(), 2, &probe, "v7.chi-probe");
 -        if (status != 0 || !probe) throw std::runtime_error("V8 could not create CHI D3D12 probe context");
 +        int status = create(compute, probeQueue.Get(), 2, &probe, "v9.chi-probe");
 +        if (status != 0 || !probe) throw std::runtime_error("V9 could not create CHI D3D12 probe context");
