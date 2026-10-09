@@ -1,0 +1,79 @@
+name: Build V10 Direct Source Late Warp
+
+on:
+  push:
+    branches:
+      - chatgpt-v10-direct-compute-slot-20261009
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reconstruct exact V9 and install exact V10 runtime
+        shell: pwsh
+        run: .\.v10source\reconstruct.ps1
+
+      - name: Install pinned build dependencies
+        shell: pwsh
+        run: |
+          $src = "$env:GITHUB_WORKSPACE\v10work\source"
+          New-Item -ItemType Directory -Path "$src\vendor" -Force | Out-Null
+          git clone https://github.com/TsudaKageyu/minhook.git "$src\vendor\minhook"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          git -C "$src\vendor\minhook" checkout 8af6b4acae5a9388fd742b56fa79ece89d96f823
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          git clone --depth 1 --branch v2.14.1 https://github.com/NVIDIA-RTX/Streamline.git "$env:GITHUB_WORKSPACE\Streamline"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Path "$src\vendor\streamline" -Force | Out-Null
+          Copy-Item "$env:GITHUB_WORKSPACE\Streamline\include\*" "$src\vendor\streamline" -Recurse -Force
+          git clone --depth 1 https://github.com/mbucchia/Optical-Flow-SDK.git "$env:GITHUB_WORKSPACE\OpticalFlow"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Path "$src\vendor\opticalflow" -Force | Out-Null
+          Copy-Item "$env:GITHUB_WORKSPACE\OpticalFlow\NvOFInterface\nvOpticalFlowCommon.h" "$src\vendor\opticalflow\nvOpticalFlowCommon.h" -Force
+          Copy-Item "$env:GITHUB_WORKSPACE\OpticalFlow\NvOFInterface\nvOpticalFlowD3D12.h" "$src\vendor\opticalflow\nvOpticalFlowD3D12.h" -Force
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure x64 Release
+        shell: cmd
+        run: |
+          cmake -S "%GITHUB_WORKSPACE%\v10work\source" -B "%GITHUB_WORKSPACE%\v10work\source\build" -A x64
+          if errorlevel 1 exit /b 1
+
+      - name: Build x64 Release
+        shell: cmd
+        run: |
+          cmake --build "%GITHUB_WORKSPACE%\v10work\source\build" --config Release --parallel
+          if errorlevel 1 exit /b 1
+
+      - name: Validate V10 binary
+        shell: pwsh
+        run: |
+          $exe="$env:GITHUB_WORKSPACE\v10work\source\build\Release\FrameGeneration.exe"
+          if (-not (Test-Path $exe)) { throw 'FrameGeneration.exe missing' }
+          $bytes=[IO.File]::ReadAllBytes($exe)
+          $all=[Text.Encoding]::ASCII.GetString($bytes)+"`n"+[Text.Encoding]::Unicode.GetString($bytes)
+          $required=@('V10 CHI FINAL-PRESENT WARP ACTIVE','V10 CHI FINAL-PRESENT LATE WARP','V10 CHI BOOTSTRAP:','sl.common direct compute slot resolved:','compute pointer=','sl.param.common.computeAPI','v10.chi-probe','CHI_HOOK_INSTALLED','CHI_BOUNDARY_FIRST','CHI_PRESENT_FIRST','chi_present=','generated=','real=','PostPresent-Diagnostics.log')
+          foreach($n in $required){ if(-not $all.Contains($n)){ throw "Missing V10 marker: $n" } }
+          $forbidden=@('hookParamSetPointer','parameter set(void*) calls=','slOnPluginLoad wrapper calls=','V8 could not obtain sl.param.common.computeAPI','HOOK_INSTALLED: native DXGI Present=','HOOK_INSTALLED: nvngx_dlssg.dll!NVSDK_NGX_D3D12_EvaluateFeature','EVAL_FIRST','GENERATED_FIRST')
+          foreach($n in $forbidden){ if($all.Contains($n)){ throw "Forbidden stale marker: $n" } }
+          $hash=(Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content "$env:GITHUB_WORKSPACE\v10-exe-sha256.txt" $hash
+          Write-Host "V10 binary validation passed. SHA256=$hash"
+
+      - name: Upload V10 executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: FrameGeneration-V10-DirectCompute-Slot-LateWarp
+          path: |
+            v10work/source/build/Release/FrameGeneration.exe
+            v10-exe-sha256.txt
+          if-no-files-found: error
