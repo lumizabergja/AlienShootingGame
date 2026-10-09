@@ -1,0 +1,240 @@
+    auto getQ = reinterpret_cast<GetQueueFn>(pvt[ContextGetQueueSlot]);
+         void* q = getQ ? getQ(probe) : nullptr;
+         destroy(compute, probe);
+-        if (!p || !b || !q) throw std::runtime_error("V9 CHI probe context exposed an invalid presentation ABI");
++        if (!p || !b || !q) throw std::runtime_error("V10 CHI probe context exposed an invalid presentation ABI");
+ 
+         auto mh = MH_Initialize();
+         if (mh == MH_OK) minhookOwned = true;
+         else if (mh != MH_ERROR_ALREADY_INITIALIZED)
+-            throw std::runtime_error("V9 MinHook initialize failed");
++            throw std::runtime_error("V10 MinHook initialize failed");
+         if (MH_CreateHook(b, reinterpret_cast<void*>(&hookBoundary),
+                           reinterpret_cast<void**>(&originalBoundary)) != MH_OK)
+-            throw std::runtime_error("V9 CHI delimitFrame hook creation failed");
++            throw std::runtime_error("V10 CHI delimitFrame hook creation failed");
+         if (MH_CreateHook(p, reinterpret_cast<void*>(&hookPresent),
+                           reinterpret_cast<void**>(&originalPresent)) != MH_OK) {
+             MH_RemoveHook(b);
+-            throw std::runtime_error("V9 CHI present hook creation failed");
++            throw std::runtime_error("V10 CHI present hook creation failed");
+         }
+         instance.store(this, std::memory_order_release);
+         if (MH_EnableHook(b) != MH_OK || MH_EnableHook(p) != MH_OK) {
+             MH_DisableHook(b); MH_DisableHook(p);
+             MH_RemoveHook(b); MH_RemoveHook(p);
+             instance.store(nullptr, std::memory_order_release);
+-            throw std::runtime_error("V9 CHI presentation hooks could not be enabled");
++            throw std::runtime_error("V10 CHI presentation hooks could not be enabled");
+         }
+         presentTarget = p;
+         boundaryTarget = b;
+@@ -388,14 +388,14 @@ struct PostPresentWarp::Impl {
+         try {
+             auto& sr = resourcesFor(swap);
+             UINT bi = sr.swap->GetCurrentBackBufferIndex();
+-            if (bi >= sr.back.size()) throw std::runtime_error("V9 CHI backbuffer index exceeded cached swapchain");
++            if (bi >= sr.back.size()) throw std::runtime_error("V10 CHI backbuffer index exceeded cached swapchain");
+             auto& c = contexts[serial % contexts.size()];
+             const UINT cbIndex = UINT(serial % contexts.size());
+             ++serial;
+             if (c.value && c.fence->GetCompletedValue() < c.value)
+                 waitFence(c.fence.Get(), c.value, fenceEvent.h, &control->stop);
+-            ::check(c.allocator->Reset(), "V9 allocator reset");
+-            ::check(c.list->Reset(c.allocator.Get(), nullptr), "V9 command list reset");
++            ::check(c.allocator->Reset(), "V10 allocator reset");
++            ::check(c.list->Reset(c.allocator.Get(), nullptr), "V10 command list reset");
+             auto* bb = sr.back[bi].Get();
+             auto& sc = sr.scratch[bi];
+             barrier(c.list.Get(), bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_SOURCE);
+@@ -415,11 +415,11 @@ struct PostPresentWarp::Impl {
+             warp.record(c.list.Get(), sc.buffer.Get(), rh, cbIndex, width, height);
+             barrier(c.list.Get(), bb, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
+             barrier(c.list.Get(), sc.buffer.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
+-            ::check(c.list->Close(), "V9 close warp list");
++            ::check(c.list->Close(), "V10 close warp list");
+             ID3D12CommandList* lists[] = { c.list.Get() };
+             q->ExecuteCommandLists(1, lists);
+             ++c.value;
+-            ::check(q->Signal(c.fence.Get(), c.value), "V9 same-queue warp signal");
++            ::check(q->Signal(c.fence.Get(), c.value), "V10 same-queue warp signal");
+             ++warped;
+             if (isGenerated) ++generated;
+             else if (isReal) ++real;
+@@ -502,7 +502,7 @@ void PostPresentWarp::init(ID3D12Device* d, ID3D12CommandQueue* q, void* compute
+     p->warp.init(p->device.Get());
+     p->initWarpContexts();
+     p->log.open(besideExe(L"PostPresent-Diagnostics.log"), std::ios::trunc);
+-    p->writeLog("V9 CHI final-present late warp. No game-process hooks; no NGX export hook; no generic DXGI Present hook.");
++    p->writeLog("V10 CHI final-present late warp. No game-process hooks; no NGX export hook; no generic DXGI Present hook.");
+     p->writeLog("Hooks Streamline v2.14.1 ICommandListContext::present + delimitFrame from a live CHI D3D12 probe context.");
+     p->writeLog("Each generated/real DLSS-G subframe is warped on that CHI context's exact D3D12 present queue using a fresh raw-mouse sample.");
+     try { p->ensureHook(); }
+@@ -517,7 +517,7 @@ void PostPresentWarp::attach(IDXGISwapChain3* swap) {
+         if (SUCCEEDED(swap->QueryInterface(__uuidof(StreamlineRetrieveBaseInterfaceCompat), &raw)) && raw)
+             base.Attach(static_cast<IDXGISwapChain*>(raw));
+         else
+-            ::check(swap->QueryInterface(IID_PPV_ARGS(&base)), "V9 app swapchain fallback");
++            ::check(swap->QueryInterface(IID_PPV_ARGS(&base)), "V10 app swapchain fallback");
+         std::ostringstream os;
+         os << "APP_SWAP_ATTACHED proxy=" << swap << " native=" << base.Get() << " output=" << p->output;
+         p->writeLog(os.str());
+diff --git a/src/runtime.cpp b/src/runtime.cpp
+index 4a48fd4..d2ecb50 100644
+--- a/src/runtime.cpp
++++ b/src/runtime.cpp
+@@ -1,44 +1,79 @@
+ #include "runtime.h"
+ #include <softpub.h>
+ #include <wintrust.h>
+-#include <MinHook.h>
+-#include <atomic>
+ 
+ namespace {
+-using SlCommonLoadFn = bool(__cdecl*)(void*, const char*, const char**);
+-using SlGetPluginFunctionFn = void*(__cdecl*)(const char*);
+-using ParamsSetPointerFn = void(__fastcall*)(void*, const char*, void*);
+-std::atomic<void*> gCapturedParameters{};
+-std::atomic<uint32_t> gGatewayCalls{};
+-std::atomic<uint32_t> gCommonLoadCalls{};
+-std::atomic<void*> gPublishedCompute{};
+-std::atomic<uint32_t> gParamSetCalls{};
+-SlCommonLoadFn gOriginalCommonLoad{};
+-SlGetPluginFunctionFn gOriginalCommonGateway{};
+-ParamsSetPointerFn gOriginalParamSetPointer{};
++struct CommonComputeDiscovery {
++    void** slot{};
++    uintptr_t slotRva{};
++    uintptr_t publishRva{};
++};
+ 
+-bool __cdecl hookCommonLoad(void* params, const char* loaderJson, const char** pluginJson) {
+-    gCommonLoadCalls.fetch_add(1, std::memory_order_relaxed);
+-    gCapturedParameters.store(params, std::memory_order_release);
+-    return gOriginalCommonLoad ? gOriginalCommonLoad(params, loaderJson, pluginJson) : false;
+-}
++CommonComputeDiscovery discoverCommonComputeSlot(HMODULE module) {
++    if (!module) throw std::runtime_error("V10 sl.common module is unavailable");
++    auto* base = reinterpret_cast<uint8_t*>(module);
++    auto* dos = reinterpret_cast<IMAGE_DOS_HEADER*>(base);
++    if (dos->e_magic != IMAGE_DOS_SIGNATURE)
++        throw std::runtime_error("V10 sl.common DOS header is invalid");
++    auto* nt = reinterpret_cast<IMAGE_NT_HEADERS64*>(base + dos->e_lfanew);
++    if (nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
++        throw std::runtime_error("V10 sl.common PE header is invalid");
++
++    const auto imageSize = size_t(nt->OptionalHeader.SizeOfImage);
++    auto* sections = IMAGE_FIRST_SECTION(nt);
++    uint8_t* textBegin{};
++    size_t textSize{};
++    uint8_t* stringAddr{};
++    constexpr char key[] = "sl.param.common.computeAPI";
+ 
+-void* __cdecl hookCommonGateway(const char* functionName) {
+-    gGatewayCalls.fetch_add(1, std::memory_order_relaxed);
+-    void* result = gOriginalCommonGateway ? gOriginalCommonGateway(functionName) : nullptr;
+-    if (functionName && !strcmp(functionName, "slOnPluginLoad") && result) {
+-        gOriginalCommonLoad = reinterpret_cast<SlCommonLoadFn>(result);
+-        return reinterpret_cast<void*>(&hookCommonLoad);
++    for (unsigned i = 0; i < nt->FileHeader.NumberOfSections; ++i) {
++        auto& sec = sections[i];
++        char name[9]{};
++        memcpy(name, sec.Name, 8);
++        auto* begin = base + sec.VirtualAddress;
++        size_t size = std::min<size_t>(sec.Misc.VirtualSize ? sec.Misc.VirtualSize : sec.SizeOfRawData,
++                                       imageSize - sec.VirtualAddress);
++        if (!strcmp(name, ".text")) { textBegin = begin; textSize = size; }
++        if (!strcmp(name, ".rdata")) {
++            for (size_t off = 0; off + sizeof(key) <= size; ++off) {
++                if (!memcmp(begin + off, key, sizeof(key))) {
++                    if (stringAddr) throw std::runtime_error("V10 compute key is not unique in sl.common");
++                    stringAddr = begin + off;
++                }
++            }
++        }
+     }
+-    return result;
+-}
++    if (!textBegin || !textSize || !stringAddr)
++        throw std::runtime_error("V10 could not locate sl.common text/compute key");
+ 
+-void __fastcall hookParamSetPointer(void* self, const char* key, void* value) {
+-    gParamSetCalls.fetch_add(1, std::memory_order_relaxed);
+-    if (gOriginalParamSetPointer)
+-        gOriginalParamSetPointer(self, key, value);
+-    if (key && value && strcmp(key, "sl.param.common.computeAPI") == 0)
+-        gPublishedCompute.store(value, std::memory_order_release);
++    void** foundSlot{};
++    uintptr_t foundPublish{};
++    for (size_t i = 0; i + 16 <= textSize; ++i) {
++        auto* q = textBegin + i;
++        // Exact x64 sequence in the pinned NVIDIA sl.common publish path:
++        //   mov r8,  [rip+disp32]   ; ctx.compute
++        //   lea rdx, [rip+disp32]   ; "sl.param.common.computeAPI"
++        //   call qword ptr [rax]    ; IParameters::set(const char*, void*)
++        if (q[0] != 0x4c || q[1] != 0x8b || q[2] != 0x05 ||
++            q[7] != 0x48 || q[8] != 0x8d || q[9] != 0x15 ||
++            q[14] != 0xff || q[15] != 0x10)
++            continue;
++        int32_t movDisp{}, leaDisp{};
++        memcpy(&movDisp, q + 3, sizeof(movDisp));
++        memcpy(&leaDisp, q + 10, sizeof(leaDisp));
++        auto* keyTarget = q + 14 + leaDisp;
++        if (keyTarget != stringAddr) continue;
++        auto* slotAddr = q + 7 + movDisp;
++        if (slotAddr < base || slotAddr + sizeof(void*) > base + imageSize)
++            throw std::runtime_error("V10 recovered compute slot outside sl.common image");
++        if (foundSlot && foundSlot != reinterpret_cast<void**>(slotAddr))
++            throw std::runtime_error("V10 found multiple compute publish slots in sl.common");
++        foundSlot = reinterpret_cast<void**>(slotAddr);
++        foundPublish = uintptr_t(q - base);
++    }
++    if (!foundSlot)
++        throw std::runtime_error("V10 could not recover sl.common ctx.compute publish slot");
++    return { foundSlot, uintptr_t(reinterpret_cast<uint8_t*>(foundSlot) - base), foundPublish };
+ }
+ }
+ void FrameGeneration::load(bool diagnostics) {
+@@ -78,31 +113,20 @@ void FrameGeneration::load(bool diagnostics) {
+     load(createFactory, "CreateDXGIFactory1");
+     load(createDevice, "D3D12CreateDevice");
+ 
+-    // V9: capture Streamline's shared IParameters pointer through sl.common's exported
+-    // slGetPluginFunction gateway. The plugin manager itself must call this gateway to
+-    // obtain slOnPluginLoad, so returning our wrapper here is deterministic and avoids
+-    // detouring the private slOnPluginLoad implementation directly.
++    // V10: no IParameters ABI calls or detours. Resolve sl.common's own ctx.compute
++    // storage by following the machine-code publish reference to the literal key.
+     auto commonFile = (dir / L"sl.common.dll").wstring();
+     commonDll = LoadLibraryExW(commonFile.c_str(), nullptr,
+                               LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+-    auto gateway = commonDll ? reinterpret_cast<SlGetPluginFunctionFn>(
+-                                  GetProcAddress(commonDll, "slGetPluginFunction")) : nullptr;
+-    bool gatewayHooked = false, mhOwned = false;
+-    gCapturedParameters.store(nullptr, std::memory_order_release);
+-    gGatewayCalls.store(0, std::memory_order_relaxed);
+-    gCommonLoadCalls.store(0, std::memory_order_relaxed);
+-    gOriginalCommonLoad = nullptr;
+-    gOriginalCommonGateway = nullptr;
+-    if (gateway) {
+-        auto mh = MH_Initialize();
+-        if (mh == MH_OK) mhOwned = true;
+-        if (mh == MH_OK || mh == MH_ERROR_ALREADY_INITIALIZED) {
+-            if (MH_CreateHook(reinterpret_cast<void*>(gateway), reinterpret_cast<void*>(&hookCommonGateway),
+-                              reinterpret_cast<void**>(&gOriginalCommonGateway)) == MH_OK &&
+-                MH_EnableHook(reinterpret_cast<void*>(gateway)) == MH_OK) {
+-                gatewayHooked = true;
+-            }
+-        }
++    if (!commonDll)
++        throw std::runtime_error("V10 could not load sl.common.dll");
++    auto discovery = discoverCommonComputeSlot(commonDll);
++    commonComputeSlot = discovery.slot;
++    {
++        std::ostringstream os;
++        os << "sl.common direct compute slot resolved: publishRVA=0x" << std::hex << discovery.publishRva
++           << ", slotRVA=0x" << discovery.slotRva;
++        bootstrapStatus = os.str();
+     }
+ 
+     auto dirString = dir.wstring();
