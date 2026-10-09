@@ -178,7 +178,7 @@ jobs:
             'CHI_BOUNDARY_FIRST',
             'CHI_PRESENT_FIRST',
             'sl.param.common.computeAPI',
-            'v8.chi-probe',
+            'v7.chi-probe',
             'chi_present=',
             'generated=',
             'real=',
