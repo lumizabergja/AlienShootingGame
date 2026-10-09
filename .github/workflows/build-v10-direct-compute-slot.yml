@@ -85,7 +85,7 @@ jobs:
           $p10 = "$env:GITHUB_WORKSPACE\v10.patch"
           [IO.File]::WriteAllText($p10, $text10, [Text.UTF8Encoding]::new($false))
           $sha10=(Get-FileHash $p10 -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($sha10 -ne 'b58e87e10100c312117d3684c3a38561143fc44094f410932d5ab3ff3ca7f295') { throw "V10 patch SHA mismatch: $sha10" }
+          if ($sha10 -ne '82a9d75100413a4b13ac9522af12b8ff9f5e25c1c13102a2788e74fe97f5f620') { throw "V10 staged patch SHA mismatch: $sha10" }
           git apply --check --directory=v10work/source $p10
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           git apply --directory=v10work/source $p10
