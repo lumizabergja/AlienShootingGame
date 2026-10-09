@@ -1,0 +1,117 @@
+diff --git a/src/engine.cpp b/src/engine.cpp
+index 25d1e14..9e98bc6 100644
+--- a/src/engine.cpp
++++ b/src/engine.cpp
+@@ -193,13 +193,13 @@ void Engine::init() {
+     if (postMode()) {
+         {
+             const auto& bs = fg.streamlineBootstrapStatus();
+-            capture.Diagnostic(std::wstring(L"V8 CHI BOOTSTRAP: ") + std::wstring(bs.begin(), bs.end()));
++            capture.Diagnostic(std::wstring(L"V9 CHI BOOTSTRAP: ") + std::wstring(bs.begin(), bs.end()));
+         }
+         post=std::make_unique<PostPresentWarp>();
+-        post->init(device.Get(),queue.Get(),fg.streamlineParameters(),output,width,height,options,control);
++        post->init(device.Get(),queue.Get(),fg.streamlineCompute(),output,width,height,options,control);
+         post->check();
+         post->attach(swap.Get());
+-        capture.Diagnostic(L"V8 CHI FINAL-PRESENT WARP ACTIVE: CHI hooks installed; DLSS-G generated/real subframes are late-warped on the exact Streamline CHI present queue. See PostPresent-Diagnostics.log.");
++        capture.Diagnostic(L"V9 CHI FINAL-PRESENT WARP ACTIVE: CHI hooks installed; DLSS-G generated/real subframes are late-warped on the exact Streamline CHI present queue. See PostPresent-Diagnostics.log.");
+     }
+     producer = std::thread([this] { captureLoop(); });
+ }
+@@ -474,7 +474,7 @@ void Engine::lateWarpLoop() {
+ void Engine::loop() {
+     if (options.lateWarp && options.multiplier == 1) { lateWarpLoop(); return; }
+     if (options.lateWarp && options.multiplier > 1) {
+-        capture.Diagnostic(std::wstring(L"V8 CHI FINAL-PRESENT WARP ACTIVE: fresh mouse at every CHI generated/real final present; selected FG=") +
++        capture.Diagnostic(std::wstring(L"V9 CHI FINAL-PRESENT WARP ACTIVE: fresh mouse at every CHI generated/real final present; selected FG=") +
+                            std::to_wstring(options.multiplier) + L"x.");
+     }
+     int previous = -1;
+diff --git a/src/main.cpp b/src/main.cpp
+index 0e3e5a8..2bd91d5 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -307,7 +307,7 @@ LRESULT CALLBACK proc(HWND w, UINT m, WPARAM a, LPARAM b) {
+                                      (unsigned long long)dropped, (unsigned long long)LateMouse::count(), ow, oh);
+                         } else if (sessionLateWarp) {
+                             swprintf(text,700,
+-                                L"V8 CHI FINAL-PRESENT LATE WARP | %.1f base FPS | %.1f SDK presents/s\nLate warp runs inside Streamline CHI on each DLSS-G generated/real present.\nFresh mouse is sampled on the exact pacer queue immediately before final presentation.\nDetails: PostPresent-Diagnostics.log",
++                                L"V9 CHI FINAL-PRESENT LATE WARP | %.1f base FPS | %.1f SDK presents/s\nLate warp runs inside Streamline CHI on each DLSS-G generated/real present.\nFresh mouse is sampled on the exact pacer queue immediately before final presentation.\nDetails: PostPresent-Diagnostics.log",
+                                 base/1000.0, presents/1000.0);
+                         } else {
+                             swprintf(text, 700,
+diff --git a/src/post_present.cpp b/src/post_present.cpp
+index 6a93274..aeeb1fb 100644
+--- a/src/post_present.cpp
++++ b/src/post_present.cpp
+@@ -11,10 +11,8 @@ namespace {
+ struct DECLSPEC_UUID("ADEC44E2-61F0-45C3-AD9F-1B37379284FF") StreamlineRetrieveBaseInterfaceCompat : IUnknown {};
+ 
+ // ABI slots pinned to NVIDIA Streamline v2.14.1 source/platforms/sl.chi/compute.h.
+-// IParameters: get(const char*, void**) = slot 13.
+ // ICompute: createCommandListContext = slot 30, destroyCommandListContext = slot 31.
+ // ICommandListContext: getCmdQueue = slot 20, present = slot 24, delimitFrame = slot 31.
+-constexpr size_t ParamsGetPointerSlot = 13;
+ constexpr size_t ComputeCreateContextSlot = 30;
+ constexpr size_t ComputeDestroyContextSlot = 31;
+ constexpr size_t ContextGetQueueSlot = 20;
+@@ -22,7 +20,6 @@ constexpr size_t ContextPresentSlot = 24;
+ constexpr size_t ContextDelimitFrameSlot = 31;
+ constexpr unsigned WarpContexts = 32;
+ 
+-using ParamsGetPointerFn = bool(__fastcall*)(void*, const char*, void**);
+ using CreateContextFn = int(__fastcall*)(void*, void*, uint32_t, void**, const char*);
+ using DestroyContextFn = int(__fastcall*)(void*, void*);
+ using GetQueueFn = void*(__fastcall*)(void*);
+@@ -104,7 +101,6 @@ struct PostPresentWarp::Impl {
+ 
+     ComPtr<ID3D12Device> device;
+     ComPtr<ID3D12CommandQueue> probeQueue;
+-    void* parameters{};
+     void* compute{};
+     HWND output{};
+     UINT width{}, height{};
+@@ -162,7 +158,7 @@ struct PostPresentWarp::Impl {
+     }
+ 
+     void* identityKey(IDXGISwapChain* swap, ComPtr<IUnknown>& identity) {
+-        ::check(swap->QueryInterface(IID_PPV_ARGS(&identity)), "V8 swapchain identity");
++        ::check(swap->QueryInterface(IID_PPV_ARGS(&identity)), "V9 swapchain identity");
+         return identity.Get();
+     }
+ 
+@@ -174,24 +170,24 @@ struct PostPresentWarp::Impl {
+ 
+         auto r = std::make_unique<SwapResources>();
+         r->identity = identity;
+-        ::check(native->QueryInterface(IID_PPV_ARGS(&r->swap)), "V8 CHI swapchain3");
++        ::check(native->QueryInterface(IID_PPV_ARGS(&r->swap)), "V9 CHI swapchain3");
+         DXGI_SWAP_CHAIN_DESC desc{};
+-        ::check(r->swap->GetDesc(&desc), "V8 CHI swapchain description");
++        ::check(r->swap->GetDesc(&desc), "V9 CHI swapchain description");
+         if (desc.BufferDesc.Width != width || desc.BufferDesc.Height != height)
+-            throw std::runtime_error("V8 CHI final swapchain size mismatch");
++            throw std::runtime_error("V9 CHI final swapchain size mismatch");
+         if (desc.BufferDesc.Format != DXGI_FORMAT_B8G8R8A8_UNORM)
+-            throw std::runtime_error("V8 requires BGRA8 final presentation buffers");
++            throw std::runtime_error("V9 requires BGRA8 final presentation buffers");
+         const UINT count = std::max<UINT>(2, desc.BufferCount);
+         r->back.resize(count);
+         r->scratch.resize(count);
+         D3D12_DESCRIPTOR_HEAP_DESC hd{};
+         hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+         hd.NumDescriptors = count;
+-        ::check(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&r->rtv)), "V8 RTV heap");
++        ::check(device->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&r->rtv)), "V9 RTV heap");
+         r->rtvStride = device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+         auto handle = r->rtv->GetCPUDescriptorHandleForHeapStart();
+         for (UINT i = 0; i < count; ++i) {
+-            ::check(r->swap->GetBuffer(i, IID_PPV_ARGS(&r->back[i])), "V8 final backbuffer");
++            ::check(r->swap->GetBuffer(i, IID_PPV_ARGS(&r->back[i])), "V9 final backbuffer");
+             device->CreateRenderTargetView(r->back[i].Get(), nullptr, handle);
+             handle.ptr += r->rtvStride;
+             auto td = r->back[i]->GetDesc();
+@@ -208,7 +204,7 @@ struct PostPresentWarp::Impl {
+             bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+             ::check(d
