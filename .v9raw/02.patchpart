@@ -1,0 +1,143 @@
+() };
+             q->ExecuteCommandLists(1, lists);
+             ++c.value;
+-            ::check(q->Signal(c.fence.Get(), c.value), "V8 same-queue warp signal");
++            ::check(q->Signal(c.fence.Get(), c.value), "V9 same-queue warp signal");
+             ++warped;
+             if (isGenerated) ++generated;
+             else if (isReal) ++real;
+@@ -504,11 +490,11 @@ struct PostPresentWarp::Impl {
+ PostPresentWarp::PostPresentWarp() : p(std::make_unique<Impl>()) {}
+ PostPresentWarp::~PostPresentWarp() = default;
+ 
+-void PostPresentWarp::init(ID3D12Device* d, ID3D12CommandQueue* q, void* params,
++void PostPresentWarp::init(ID3D12Device* d, ID3D12CommandQueue* q, void* computePtr,
+                            HWND output, UINT w, UINT h, const Options& options, SessionControl& control) {
+     p->device = unwrapDevice(d);
+     p->probeQueue = unwrapQueue(q);
+-    p->parameters = params;
++    p->compute = computePtr;
+     p->output = output;
+     p->width = w; p->height = h;
+     p->options = options;
+@@ -516,7 +502,7 @@ void PostPresentWarp::init(ID3D12Device* d, ID3D12CommandQueue* q, void* params,
+     p->warp.init(p->device.Get());
+     p->initWarpContexts();
+     p->log.open(besideExe(L"PostPresent-Diagnostics.log"), std::ios::trunc);
+-    p->writeLog("V8 CHI final-present late warp. No game-process hooks; no NGX export hook; no generic DXGI Present hook.");
++    p->writeLog("V9 CHI final-present late warp. No game-process hooks; no NGX export hook; no generic DXGI Present hook.");
+     p->writeLog("Hooks Streamline v2.14.1 ICommandListContext::present + delimitFrame from a live CHI D3D12 probe context.");
+     p->writeLog("Each generated/real DLSS-G subframe is warped on that CHI context's exact D3D12 present queue using a fresh raw-mouse sample.");
+     try { p->ensureHook(); }
+@@ -531,7 +517,7 @@ void PostPresentWarp::attach(IDXGISwapChain3* swap) {
+         if (SUCCEEDED(swap->QueryInterface(__uuidof(StreamlineRetrieveBaseInterfaceCompat), &raw)) && raw)
+             base.Attach(static_cast<IDXGISwapChain*>(raw));
+         else
+-            ::check(swap->QueryInterface(IID_PPV_ARGS(&base)), "V8 app swapchain fallback");
++            ::check(swap->QueryInterface(IID_PPV_ARGS(&base)), "V9 app swapchain fallback");
+         std::ostringstream os;
+         os << "APP_SWAP_ATTACHED proxy=" << swap << " native=" << base.Get() << " output=" << p->output;
+         p->writeLog(os.str());
+diff --git a/src/post_present.h b/src/post_present.h
+index 506c6b2..3c832cc 100644
+--- a/src/post_present.h
++++ b/src/post_present.h
+@@ -3,7 +3,7 @@
+ #include "mouse_input.h"
+ #include <memory>
+ 
+-// V8: late-warp the exact Streamline CHI D3D12 presentation path used by
++// V9: late-warp the exact Streamline CHI D3D12 presentation path used by
+ // DLSS-G's asynchronous pacer. No game-process hooks and no NGX export hooks.
+ class PostPresentWarp {
+     struct Impl;
+@@ -11,7 +11,7 @@ class PostPresentWarp {
+ public:
+     PostPresentWarp();
+     ~PostPresentWarp();
+-    void init(ID3D12Device*, ID3D12CommandQueue*, void* streamlineParameters,
++    void init(ID3D12Device*, ID3D12CommandQueue*, void* streamlineCompute,
+               HWND output, UINT w, UINT h, const Options&, SessionControl&);
+     void attach(IDXGISwapChain3* streamlineSwapchain);
+     void tryInstall();
+diff --git a/src/runtime.cpp b/src/runtime.cpp
+index 4177b75..4a48fd4 100644
+--- a/src/runtime.cpp
++++ b/src/runtime.cpp
+@@ -7,11 +7,15 @@
+ namespace {
+ using SlCommonLoadFn = bool(__cdecl*)(void*, const char*, const char**);
+ using SlGetPluginFunctionFn = void*(__cdecl*)(const char*);
++using ParamsSetPointerFn = void(__fastcall*)(void*, const char*, void*);
+ std::atomic<void*> gCapturedParameters{};
+ std::atomic<uint32_t> gGatewayCalls{};
+ std::atomic<uint32_t> gCommonLoadCalls{};
++std::atomic<void*> gPublishedCompute{};
++std::atomic<uint32_t> gParamSetCalls{};
+ SlCommonLoadFn gOriginalCommonLoad{};
+ SlGetPluginFunctionFn gOriginalCommonGateway{};
++ParamsSetPointerFn gOriginalParamSetPointer{};
+ 
+ bool __cdecl hookCommonLoad(void* params, const char* loaderJson, const char** pluginJson) {
+     gCommonLoadCalls.fetch_add(1, std::memory_order_relaxed);
+@@ -28,6 +32,14 @@ void* __cdecl hookCommonGateway(const char* functionName) {
+     }
+     return result;
+ }
++
++void __fastcall hookParamSetPointer(void* self, const char* key, void* value) {
++    gParamSetCalls.fetch_add(1, std::memory_order_relaxed);
++    if (gOriginalParamSetPointer)
++        gOriginalParamSetPointer(self, key, value);
++    if (key && value && strcmp(key, "sl.param.common.computeAPI") == 0)
++        gPublishedCompute.store(value, std::memory_order_release);
++}
+ }
+ void FrameGeneration::load(bool diagnostics) {
+     wchar_t path[32768];
+@@ -66,7 +78,7 @@ void FrameGeneration::load(bool diagnostics) {
+     load(createFactory, "CreateDXGIFactory1");
+     load(createDevice, "D3D12CreateDevice");
+ 
+-    // V8: capture Streamline's shared IParameters pointer through sl.common's exported
++    // V9: capture Streamline's shared IParameters pointer through sl.common's exported
+     // slGetPluginFunction gateway. The plugin manager itself must call this gateway to
+     // obtain slOnPluginLoad, so returning our wrapper here is deterministic and avoids
+     // detouring the private slOnPluginLoad implementation directly.
+@@ -124,6 +136,60 @@ void FrameGeneration::load(bool diagnostics) {
+     ck(initResult, "Streamline initialization");
+     initialized = true;
+ }
++void FrameGeneration::bind(ID3D12Device* d) {
++    if (!parameters)
++        throw std::runtime_error("V9 cannot observe Streamline compute publish: parameter interface was not captured");
++
++    // Streamline v2.14.1 IParameters declares seven set overloads; set(const char*, void*)
++    // is vtable slot 6. Hook it only while slSetD3DDevice initializes plugins. sl.common's
++    // createCompute() must publish the exact live ICompute* through this setter.
++    auto** vt = *reinterpret_cast<void***>(parameters);
++    void* setter = vt ? vt[6] : nullptr;
++    if (!setter)
++        throw std::runtime_error("V9 Streamline parameter setter ABI is unavailable");
++
++    bool mhOwned = false, hooked = false;
++    gPublishedCompute.store(nullptr, std::memory_order_release);
++    gParamSetCalls.store(0, std::memory_order_relaxed);
++    gOriginalParamSetPointer = nullptr;
++
++    auto mh = MH_Initialize();
++    if (mh == MH_OK) mhOwned = true;
++    if (mh != MH_OK && mh != MH_ERROR_ALREADY_INITIALIZED)
++        throw std::runtime_error("V9 MinHook initialize failed during compute publish capture");
++
++    if (MH_CreateHook(setter, reinterpret_cast<void*>(&hookParamSetPointer),
++                      reinterpret_cast<void**>(&gOriginalParamSetPointer)) != MH_OK ||
++        MH_EnableHook(setter) != MH_OK) {
++        if (mhOwned) MH_Uninitialize();
++        throw std::runtime_error("V9 could not hook Streamline IParameters::set(void*) publish path");
++    }
++    hooked = true;
++
++    sl::Result result{};
++    try {
++
