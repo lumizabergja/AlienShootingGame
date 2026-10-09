@@ -47,12 +47,10 @@ jobs:
             throw "V6 patch SHA256 mismatch: $sha"
           }
           $src = "$env:GITHUB_WORKSPACE\v6work\source"
-          Push-Location $src
-          git apply --check $patch
+          git apply --check --directory=v6work/source $patch
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          git apply $patch
+          git apply --directory=v6work/source $patch
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          Pop-Location
           if (-not (Test-Path "$src\src\post_present.cpp")) { throw 'V6 post-present source was not created' }
           if (-not (Select-String -Path "$src\CMakeLists.txt" -SimpleMatch 'src/post_present.cpp' -Quiet)) { throw 'V6 CMake source switch missing' }
           if (Select-String -Path "$src\CMakeLists.txt" -SimpleMatch 'src/post_fg.cpp' -Quiet) { throw 'Stale PostFG source still compiled' }
