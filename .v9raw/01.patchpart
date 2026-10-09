@@ -1,0 +1,112 @@
+evice->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &bd,
+                         D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&sc.buffer)),
+-                    "V8 warp scratch buffer");
++                    "V9 warp scratch buffer");
+         }
+         auto* result = r.get();
+         swaps.emplace(key, std::move(r));
+@@ -222,65 +218,55 @@ struct PostPresentWarp::Impl {
+         for (auto& c : contexts) {
+             if (!c.allocator)
+                 ::check(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT,
+-                            IID_PPV_ARGS(&c.allocator)), "V8 command allocator");
++                            IID_PPV_ARGS(&c.allocator)), "V9 command allocator");
+             if (!c.list) {
+                 ::check(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, c.allocator.Get(),
+-                            nullptr, IID_PPV_ARGS(&c.list)), "V8 command list");
+-                ::check(c.list->Close(), "V8 close initial command list");
++                            nullptr, IID_PPV_ARGS(&c.list)), "V9 command list");
++                ::check(c.list->Close(), "V9 close initial command list");
+             }
+             if (!c.fence)
+                 ::check(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&c.fence)),
+-                        "V8 per-context fence");
++                        "V9 per-context fence");
+         }
+     }
+ 
+-    void* queryCompute() {
+-        if (!parameters) throw std::runtime_error("V8 did not capture Streamline IParameters during sl.common load");
+-        auto** vt = *reinterpret_cast<void***>(parameters);
+-        auto getPointer = reinterpret_cast<ParamsGetPointerFn>(vt[ParamsGetPointerSlot]);
+-        void* out{};
+-        if (!getPointer || !getPointer(parameters, "sl.param.common.computeAPI", &out) || !out)
+-            throw std::runtime_error("V8 could not obtain sl.param.common.computeAPI after slSetD3DDevice");
+-        return out;
+-    }
+-
+     void ensureHook() {
+         if (hooked.load(std::memory_order_acquire)) return;
+-        if (!probeQueue) throw std::runtime_error("V8 probe queue is unavailable");
+-        compute = queryCompute();
++        if (!probeQueue) throw std::runtime_error("V9 probe queue is unavailable");
++        if (!compute) throw std::runtime_error("V9 live Streamline ICompute pointer is unavailable");
+         auto** cvt = *reinterpret_cast<void***>(compute);
+         auto create = reinterpret_cast<CreateContextFn>(cvt[ComputeCreateContextSlot]);
+         auto destroy = reinterpret_cast<DestroyContextFn>(cvt[ComputeDestroyContextSlot]);
+-        if (!create || !destroy) throw std::runtime_error("V8 CHI compute ABI validation failed");
++        if (!create || !destroy) throw std::runtime_error("V9 CHI compute ABI validation failed");
+         void* probe{};
+-        int status = create(compute, probeQueue.Get(), 2, &probe, "v8.chi-probe");
+-        if (status != 0 || !probe) throw std::runtime_error("V8 could not create CHI D3D12 probe context");
++        int status = create(compute, probeQueue.Get(), 2, &probe, "v9.chi-probe");
++        if (status != 0 || !probe) throw std::runtime_error("V9 could not create CHI D3D12 probe context");
+         auto** pvt = *reinterpret_cast<void***>(probe);
+         void* p = pvt[ContextPresentSlot];
+         void* b = pvt[ContextDelimitFrameSlot];
+         auto getQ = reinterpret_cast<GetQueueFn>(pvt[ContextGetQueueSlot]);
+         void* q = getQ ? getQ(probe) : nullptr;
+         destroy(compute, probe);
+-        if (!p || !b || !q) throw std::runtime_error("V8 CHI probe context exposed an invalid presentation ABI");
++        if (!p || !b || !q) throw std::runtime_error("V9 CHI probe context exposed an invalid presentation ABI");
+ 
+         auto mh = MH_Initialize();
+         if (mh == MH_OK) minhookOwned = true;
+         else if (mh != MH_ERROR_ALREADY_INITIALIZED)
+-            throw std::runtime_error("V8 MinHook initialize failed");
++            throw std::runtime_error("V9 MinHook initialize failed");
+         if (MH_CreateHook(b, reinterpret_cast<void*>(&hookBoundary),
+                           reinterpret_cast<void**>(&originalBoundary)) != MH_OK)
+-            throw std::runtime_error("V8 CHI delimitFrame hook creation failed");
++            throw std::runtime_error("V9 CHI delimitFrame hook creation failed");
+         if (MH_CreateHook(p, reinterpret_cast<void*>(&hookPresent),
+                           reinterpret_cast<void**>(&originalPresent)) != MH_OK) {
+             MH_RemoveHook(b);
+-            throw std::runtime_error("V8 CHI present hook creation failed");
++            throw std::runtime_error("V9 CHI present hook creation failed");
+         }
+         instance.store(this, std::memory_order_release);
+         if (MH_EnableHook(b) != MH_OK || MH_EnableHook(p) != MH_OK) {
+             MH_DisableHook(b); MH_DisableHook(p);
+             MH_RemoveHook(b); MH_RemoveHook(p);
+             instance.store(nullptr, std::memory_order_release);
+-            throw std::runtime_error("V8 CHI presentation hooks could not be enabled");
++            throw std::runtime_error("V9 CHI presentation hooks could not be enabled");
+         }
+         presentTarget = p;
+         boundaryTarget = b;
+@@ -402,14 +388,14 @@ struct PostPresentWarp::Impl {
+         try {
+             auto& sr = resourcesFor(swap);
+             UINT bi = sr.swap->GetCurrentBackBufferIndex();
+-            if (bi >= sr.back.size()) throw std::runtime_error("V8 CHI backbuffer index exceeded cached swapchain");
++            if (bi >= sr.back.size()) throw std::runtime_error("V9 CHI backbuffer index exceeded cached swapchain");
+             auto& c = contexts[serial % contexts.size()];
+             const UINT cbIndex = UINT(serial % contexts.size());
+             ++serial;
+             if (c.value && c.fence->GetCompletedValue() < c.value)
+                 waitFence(c.fence.Get(), c.value, fenceEvent.h, &control->stop);
+-            ::check(c.allocator->Reset(), "V8 allocator reset");
+-            ::check(c.list->Reset(c.allocator.Get(), nullptr), "V8 command list reset");
++            ::check(c.allocator->Reset(), "V9 allocator reset");
++            ::check(c.list->Reset(c.allocator.Get(), nullptr), "V9 command list reset");
+             auto* bb = sr.back[bi].Get();
+             auto& sc = sr.scratch[bi];
+             barrier(c.list.Get(), bb, D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_COPY_SOURCE);
+@@ -429,11 +415,11 @@ struct PostPresentWarp::Impl {
+             warp.record(c.list.Get(), sc.buffer.Get(), rh, cbIndex, width, height);
+             barrier(c.list.Get(), bb, D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PRESENT);
+             barrier(c.list.Get(), sc.buffer.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COMMON);
+-            ::check(c.list->Close(), "V8 close warp list");
++            ::check(c.list->Close(), "V9 close warp list");
+             ID3D12CommandList* lists[] = { c.list.Get
