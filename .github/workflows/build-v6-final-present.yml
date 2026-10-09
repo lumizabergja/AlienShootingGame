@@ -56,6 +56,24 @@ jobs:
           if (Select-String -Path "$src\CMakeLists.txt" -SimpleMatch 'src/post_fg.cpp' -Quiet) { throw 'Stale PostFG source still compiled' }
           Write-Host "V6 exact patch validated and applied: $sha"
 
+      - name: Apply V6 status UI cleanup
+        shell: pwsh
+        run: |
+          $encoded = Get-Content "$env:GITHUB_WORKSPACE\.v6patch2\ui-cleanup.txt" -Raw
+          $patch = "$env:GITHUB_WORKSPACE\v6-ui-cleanup.patch"
+          [IO.File]::WriteAllBytes($patch, [Convert]::FromBase64String($encoded))
+          $sha = (Get-FileHash $patch -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($sha -ne '7b01691db1b612944a5062327a489ec9dc4af45af4f89a9a487dee3d7bb1a713') {
+            throw "V6 UI cleanup SHA256 mismatch: $sha"
+          }
+          git apply --check --directory=v6work/source $patch
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          git apply --directory=v6work/source $patch
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $main = Get-Content "$env:GITHUB_WORKSPACE\v6work\source\src\main.cpp" -Raw
+          if ($main.Contains('PostFG-Diagnostics.log')) { throw 'Stale V5 PostFG UI text remains after cleanup' }
+          if (-not $main.Contains('V6 FINAL-PRESENT LATE WARP')) { throw 'V6 final-present UI marker missing' }
+
       - name: Install pinned build dependencies
         shell: pwsh
         run: |
@@ -105,6 +123,7 @@ jobs:
           $all = $ascii + "`n" + $unicode
           $required = @(
             'V6 FINAL-PRESENT WARP ACTIVE',
+            'V6 FINAL-PRESENT LATE WARP',
             'PostPresent-Diagnostics.log',
             'HOOK_INSTALLED: native DXGI Present=',
             'FINAL_PRESENT_FIRST',
