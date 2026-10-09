@@ -1,0 +1,173 @@
+name: Build V7 CHI Present Late Warp
+
+on:
+  push:
+    branches:
+      - chatgpt-v7-chi-present-latewarp-20261009
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reconstruct validated V5 base
+        shell: pwsh
+        run: |
+          $chunks = Get-ChildItem "$env:GITHUB_WORKSPACE\.v5payload" -Filter '*.txt' | Sort-Object Name
+          if ($chunks.Count -ne 8) { throw "Expected 8 V5 source payload chunks, found $($chunks.Count)" }
+          $b64 = ($chunks | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
+          $zip = "$env:GITHUB_WORKSPACE\v5base.zip"
+          [IO.File]::WriteAllBytes($zip, [Convert]::FromBase64String($b64))
+          Expand-Archive $zip "$env:GITHUB_WORKSPACE\v7work" -Force
+          $src = "$env:GITHUB_WORKSPACE\v7work\source"
+          if (-not (Test-Path "$src\src\post_fg.cpp")) { throw 'V5 source base was not reconstructed' }
+
+      - name: Reconstruct and apply exact V6 patch
+        shell: pwsh
+        run: |
+          $dir = "$env:GITHUB_WORKSPACE\.v6patch2"
+          $first = Get-Content "$dir\00.txt" -Raw
+          if ($first.Length -lt 6000) { throw "V6 patch part 00 is too short: $($first.Length)" }
+          $pieces = @($first.Substring(0, 6000))
+          foreach ($i in 1..6) {
+            $p = Join-Path $dir ("{0:D2}.txt" -f $i)
+            if (-not (Test-Path $p)) { throw "Missing V6 patch part $p" }
+            $pieces += (Get-Content $p -Raw)
+          }
+          $b64 = $pieces -join ''
+          $patch = "$env:GITHUB_WORKSPACE\v6-final.patch"
+          [IO.File]::WriteAllBytes($patch, [Convert]::FromBase64String($b64))
+          $sha = (Get-FileHash $patch -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($sha -ne '11d27d692845d72048314760b6e92e9f34094e1c5e019fca0e7079427a556cc1') { throw "V6 patch SHA256 mismatch: $sha" }
+          git apply --check --directory=v7work/source $patch
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          git apply --directory=v7work/source $patch
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Apply exact V6 UI cleanup
+        shell: pwsh
+        run: |
+          $encoded = Get-Content "$env:GITHUB_WORKSPACE\.v6patch2\ui-cleanup.txt" -Raw
+          $patch = "$env:GITHUB_WORKSPACE\v6-ui-cleanup.patch"
+          [IO.File]::WriteAllBytes($patch, [Convert]::FromBase64String($encoded))
+          $sha = (Get-FileHash $patch -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($sha -ne '7b01691db1b612944a5062327a489ec9dc4af45af4f89a9a487dee3d7bb1a713') { throw "V6 UI cleanup SHA256 mismatch: $sha" }
+          git apply --check --directory=v7work/source $patch
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          git apply --directory=v7work/source $patch
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+      - name: Reconstruct and apply exact V7 CHI patch
+        shell: pwsh
+        run: |
+          $dir = "$env:GITHUB_WORKSPACE\.v7gz"
+          $parts = @('00.txt','01.txt','02.txt') | ForEach-Object { Get-Content (Join-Path $dir $_) -Raw }
+          $b64 = $parts -join ''
+          $gzPath = "$env:GITHUB_WORKSPACE\v7-chi.patch.gz"
+          [IO.File]::WriteAllBytes($gzPath, [Convert]::FromBase64String($b64))
+          $patch = "$env:GITHUB_WORKSPACE\v7-chi.patch"
+          $input = [IO.File]::OpenRead($gzPath)
+          try {
+            $gzip = [IO.Compression.GzipStream]::new($input, [IO.Compression.CompressionMode]::Decompress)
+            try {
+              $output = [IO.File]::Create($patch)
+              try { $gzip.CopyTo($output) } finally { $output.Dispose() }
+            } finally { $gzip.Dispose() }
+          } finally { $input.Dispose() }
+          $sha = (Get-FileHash $patch -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($sha -ne '94a9009b12d6e702511574733c9ea9148cfbc733a37291d891d477766d22ed8a') { throw "V7 patch SHA256 mismatch: $sha" }
+          git apply --check --directory=v7work/source $patch
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          git apply --directory=v7work/source $patch
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $src = "$env:GITHUB_WORKSPACE\v7work\source"
+          $pp = Get-Content "$src\src\post_present.cpp" -Raw
+          $rt = Get-Content "$src\src\runtime.cpp" -Raw
+          if (-not $pp.Contains('CHI_HOOK_INSTALLED')) { throw 'V7 CHI hook marker missing from source' }
+          if (-not $pp.Contains('sl.param.common.computeAPI')) { throw 'V7 compute interface key missing from source' }
+          if (-not $rt.Contains('slOnPluginLoad')) { throw 'V7 Streamline parameter capture missing from runtime' }
+          Write-Host "V7 exact CHI patch validated and applied: $sha"
+
+      - name: Install pinned build dependencies
+        shell: pwsh
+        run: |
+          $src = "$env:GITHUB_WORKSPACE\v7work\source"
+          New-Item -ItemType Directory -Path "$src\vendor" -Force | Out-Null
+          git clone https://github.com/TsudaKageyu/minhook.git "$src\vendor\minhook"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          git -C "$src\vendor\minhook" checkout 8af6b4acae5a9388fd742b56fa79ece89d96f823
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          git clone --depth 1 --branch v2.14.1 https://github.com/NVIDIA-RTX/Streamline.git "$env:GITHUB_WORKSPACE\Streamline"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Path "$src\vendor\streamline" -Force | Out-Null
+          Copy-Item "$env:GITHUB_WORKSPACE\Streamline\include\*" "$src\vendor\streamline" -Recurse -Force
+          git clone --depth 1 https://github.com/mbucchia/Optical-Flow-SDK.git "$env:GITHUB_WORKSPACE\OpticalFlow"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Path "$src\vendor\opticalflow" -Force | Out-Null
+          Copy-Item "$env:GITHUB_WORKSPACE\OpticalFlow\NvOFInterface\nvOpticalFlowCommon.h" "$src\vendor\opticalflow\nvOpticalFlowCommon.h" -Force
+          Copy-Item "$env:GITHUB_WORKSPACE\OpticalFlow\NvOFInterface\nvOpticalFlowD3D12.h" "$src\vendor\opticalflow\nvOpticalFlowD3D12.h" -Force
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure x64 Release
+        shell: cmd
+        run: |
+          cmake -S "%GITHUB_WORKSPACE%\v7work\source" -B "%GITHUB_WORKSPACE%\v7work\source\build" -A x64
+          if errorlevel 1 exit /b 1
+
+      - name: Build x64 Release
+        shell: cmd
+        run: |
+          cmake --build "%GITHUB_WORKSPACE%\v7work\source\build" --config Release --parallel
+          if errorlevel 1 exit /b 1
+
+      - name: Validate V7 CHI binary
+        shell: pwsh
+        run: |
+          $exe = "$env:GITHUB_WORKSPACE\v7work\source\build\Release\FrameGeneration.exe"
+          if (-not (Test-Path $exe)) { throw 'FrameGeneration.exe was not produced' }
+          $bytes = [IO.File]::ReadAllBytes($exe)
+          $ascii = [Text.Encoding]::ASCII.GetString($bytes)
+          $unicode = [Text.Encoding]::Unicode.GetString($bytes)
+          $all = $ascii + "`n" + $unicode
+          $required = @(
+            'V7 CHI FINAL-PRESENT WARP ACTIVE',
+            'V7 CHI FINAL-PRESENT LATE WARP',
+            'CHI_HOOK_INSTALLED',
+            'CHI_BOUNDARY_FIRST',
+            'CHI_PRESENT_FIRST',
+            'sl.param.common.computeAPI',
+            'v7.chi-probe',
+            'chi_present=',
+            'generated=',
+            'real=',
+            'PostPresent-Diagnostics.log'
+          )
+          foreach ($needle in $required) { if (-not $all.Contains($needle)) { throw "Missing required V7 marker: $needle" } }
+          $forbidden = @(
+            'HOOK_INSTALLED: native DXGI Present=',
+            'FINAL_PRESENT_FIRST',
+            'HOOK_INSTALLED: nvngx_dlssg.dll!NVSDK_NGX_D3D12_EvaluateFeature',
+            'EVAL_FIRST',
+            'GENERATED_FIRST'
+          )
+          foreach ($needle in $forbidden) { if ($all.Contains($needle)) { throw "Stale pre-V7 hook marker survived: $needle" } }
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content "$env:GITHUB_WORKSPACE\v7-exe-sha256.txt" $hash
+          Write-Host "V7 CHI binary validation passed. SHA256=$hash"
+
+      - name: Upload V7 executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: FrameGeneration-V7-CHI-Present-LateWarp
+          path: |
+            v7work/source/build/Release/FrameGeneration.exe
+            v7-exe-sha256.txt
+          if-no-files-found: error
