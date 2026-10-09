@@ -46,25 +46,41 @@ jobs:
           $v7gz = "$env:GITHUB_WORKSPACE\v7.gz"
           [IO.File]::WriteAllBytes($v7gz, [Convert]::FromBase64String(($v7parts -join '')))
           $p7 = "$env:GITHUB_WORKSPACE\v7.patch"
-          $input=[IO.File]::OpenRead($v7gz); try { $gzip=[IO.Compression.GzipStream]::new($input,[IO.Compression.CompressionMode]::Decompress); try { $out=[IO.File]::Create($p7); try { $gzip.CopyTo($out) } finally { $out.Dispose() } } finally { $gzip.Dispose() } } finally { $input.Dispose() }
+          $input=[IO.File]::OpenRead($v7gz)
+          try {
+            $gzip=[IO.Compression.GzipStream]::new($input,[IO.Compression.CompressionMode]::Decompress)
+            try {
+              $out=[IO.File]::Create($p7)
+              try { $gzip.CopyTo($out) } finally { $out.Dispose() }
+            } finally { $gzip.Dispose() }
+          } finally { $input.Dispose() }
           if ((Get-FileHash $p7 -Algorithm SHA256).Hash.ToLowerInvariant() -ne '94a9009b12d6e702511574733c9ea9148cfbc733a37291d891d477766d22ed8a') { throw 'V7 SHA mismatch' }
           git apply --directory=v9work/source $p7
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
-          function Expand-Patch($encodedPath, $outPath) {
-            $gz = "$outPath.gz"
-            [IO.File]::WriteAllBytes($gz, [Convert]::FromBase64String((Get-Content $encodedPath -Raw)))
-            $input=[IO.File]::OpenRead($gz); try { $gzip=[IO.Compression.GzipStream]::new($input,[IO.Compression.CompressionMode]::Decompress); try { $out=[IO.File]::Create($outPath); try { $gzip.CopyTo($out) } finally { $out.Dispose() } } finally { $gzip.Dispose() } } finally { $input.Dispose() }
-          }
-
+          # Use the exact V8 decode path that already passed in the V8 workflow.
+          $encoded = Get-Content "$env:GITHUB_WORKSPACE\.v8patch\v8patch.gz.b64" -Raw
+          $v8gz = "$env:GITHUB_WORKSPACE\v8.patch.gz"
+          [IO.File]::WriteAllBytes($v8gz, [Convert]::FromBase64String($encoded))
           $p8 = "$env:GITHUB_WORKSPACE\v8.patch"
-          Expand-Patch "$env:GITHUB_WORKSPACE\.v8patch\v8patch.gz.b64" $p8
+          $input=[IO.File]::OpenRead($v8gz)
+          try {
+            $gzip=[IO.Compression.GzipStream]::new($input,[IO.Compression.CompressionMode]::Decompress)
+            try {
+              $out=[IO.File]::Create($p8)
+              try { $gzip.CopyTo($out) } finally { $out.Dispose() }
+            } finally { $gzip.Dispose() }
+          } finally { $input.Dispose() }
           if ((Get-FileHash $p8 -Algorithm SHA256).Hash.ToLowerInvariant() -ne '4a127cde81c1485051db5392813701887a3c794b6269aa6019e3a83991dbd6ff') { throw 'V8 SHA mismatch' }
           git apply --directory=v9work/source $p8
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
+          # V9 is stored as raw UTF-8 patch parts. No base64 layer.
+          $rawParts = @('00.patchpart','01.patchpart','02.patchpart','03.patchpart') | ForEach-Object {
+            Get-Content (Join-Path "$env:GITHUB_WORKSPACE\.v9raw" $_) -Raw
+          }
           $p9 = "$env:GITHUB_WORKSPACE\v9.patch"
-          Expand-Patch "$env:GITHUB_WORKSPACE\.v9patch\v9patch.gz.b64" $p9
+          [IO.File]::WriteAllText($p9, ($rawParts -join ''), [Text.UTF8Encoding]::new($false))
           $sha9=(Get-FileHash $p9 -Algorithm SHA256).Hash.ToLowerInvariant()
           if ($sha9 -ne '58115b8949823ff6d6bc305a86a258521e67467d7fa9ee3ffb0efba8dfbe3625') { throw "V9 SHA mismatch: $sha9" }
           git apply --check --directory=v9work/source $p9
