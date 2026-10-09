@@ -1,0 +1,1 @@
+V10 removes all IParameters ABI hooks. It resolves sl.common's ctx.compute storage by scanning the pinned NVIDIA sl.common.dll publish instruction that references the literal key sl.param.common.computeAPI, then reads the pointer after slSetD3DDevice returns.
