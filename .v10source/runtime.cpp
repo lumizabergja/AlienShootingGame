@@ -199,6 +199,8 @@ void FrameGeneration::configure(IDXGIAdapter1 *a, UINT w, UINT h, UINT multiplie
     opt.mode = sl::DLSSGMode::eOn;
     activeOptions = opt;
 
+    // Cache every invariant per-frame constant once. The hot path only changes
+    // the reset bit before passing the structure to Streamline.
     sl::float4x4 identity{};
     identity[0] = {1, 0, 0, 0};
     identity[1] = {0, 1, 0, 0};
