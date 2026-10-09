@@ -80,7 +80,7 @@ jobs:
           $p9 = "$env:GITHUB_WORKSPACE\v9.patch"
           [IO.File]::WriteAllText($p9, ($rawParts -join ''), [Text.UTF8Encoding]::new($false))
           $sha9=(Get-FileHash $p9 -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($sha9 -ne '611fab7e51fd0cf0025a808b7d314e12550368c3c1a3c7fd484ed55a7a03a068') { throw "V9 Windows patch SHA mismatch: $sha9" }
+          if ($sha9 -ne '1fbebdc7819ab4a18e7cd97b76fdec08a5c6e4f9775df27f1e345c747dbeb8e7') { throw "V9 Windows patch SHA mismatch: $sha9" }
           git apply --check --directory=v9work/source $p9
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           git apply --directory=v9work/source $p9
