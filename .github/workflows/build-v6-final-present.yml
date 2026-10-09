@@ -30,9 +30,16 @@ jobs:
       - name: Reconstruct and apply exact V6 patch
         shell: pwsh
         run: |
-          $parts = Get-ChildItem "$env:GITHUB_WORKSPACE\.v6patch2" -Filter '*.txt' | Sort-Object Name
-          if ($parts.Count -ne 7) { throw "Expected 7 V6 patch chunks, found $($parts.Count)" }
-          $b64 = ($parts | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
+          $dir = "$env:GITHUB_WORKSPACE\.v6patch2"
+          $first = Get-Content "$dir\00.txt" -Raw
+          if ($first.Length -lt 6000) { throw "V6 patch part 00 is too short: $($first.Length)" }
+          $pieces = @($first.Substring(0, 6000))
+          foreach ($i in 1..6) {
+            $p = Join-Path $dir ("{0:D2}.txt" -f $i)
+            if (-not (Test-Path $p)) { throw "Missing V6 patch part $p" }
+            $pieces += (Get-Content $p -Raw)
+          }
+          $b64 = $pieces -join ''
           $patch = "$env:GITHUB_WORKSPACE\v6-final.patch"
           [IO.File]::WriteAllBytes($patch, [Convert]::FromBase64String($b64))
           $sha = (Get-FileHash $patch -Algorithm SHA256).Hash.ToLowerInvariant()
