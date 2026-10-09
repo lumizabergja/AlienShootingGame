@@ -19,6 +19,10 @@ jobs:
         shell: pwsh
         run: .\.v10source\reconstruct.ps1
 
+      - name: Apply exact V10 compiler include fix
+        shell: pwsh
+        run: .\.v10source\add-sstream.ps1
+
       - name: Install pinned build dependencies
         shell: pwsh
         run: |
