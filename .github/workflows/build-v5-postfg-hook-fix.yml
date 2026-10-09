@@ -1,0 +1,95 @@
+name: Build V5 PostFG Hook Fix
+
+on:
+  push:
+    branches:
+      - chatgpt-v5-postfg-hook-build-20261009
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Reconstruct corrected V5 source
+        shell: pwsh
+        run: |
+          $chunks = Get-ChildItem "$env:GITHUB_WORKSPACE\.v5payload" -Filter '*.txt' | Sort-Object Name
+          if ($chunks.Count -ne 8) { throw "Expected 8 source payload chunks, found $($chunks.Count)" }
+          $b64 = ($chunks | ForEach-Object { Get-Content $_.FullName -Raw }) -join ''
+          $zip = "$env:GITHUB_WORKSPACE\v5src.zip"
+          [IO.File]::WriteAllBytes($zip, [Convert]::FromBase64String($b64))
+          Expand-Archive $zip "$env:GITHUB_WORKSPACE\v5src" -Force
+          if (-not (Test-Path "$env:GITHUB_WORKSPACE\v5src\source\src\post_fg.cpp")) { throw 'Corrected V5 source was not reconstructed' }
+
+      - name: Install pinned build dependencies
+        shell: pwsh
+        run: |
+          $src = "$env:GITHUB_WORKSPACE\v5src\source"
+          New-Item -ItemType Directory -Path "$src\vendor" -Force | Out-Null
+
+          git clone https://github.com/TsudaKageyu/minhook.git "$src\vendor\minhook"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          git -C "$src\vendor\minhook" checkout 8af6b4acae5a9388fd742b56fa79ece89d96f823
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+
+          git clone --depth 1 --branch v2.14.1 https://github.com/NVIDIA-RTX/Streamline.git "$env:GITHUB_WORKSPACE\Streamline"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Path "$src\vendor\streamline" -Force | Out-Null
+          Copy-Item "$env:GITHUB_WORKSPACE\Streamline\include\*" "$src\vendor\streamline" -Recurse -Force
+
+          git clone --depth 1 https://github.com/mbucchia/Optical-Flow-SDK.git "$env:GITHUB_WORKSPACE\OpticalFlow"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Path "$src\vendor\opticalflow" -Force | Out-Null
+          Copy-Item "$env:GITHUB_WORKSPACE\OpticalFlow\NvOFInterface\nvOpticalFlowCommon.h" "$src\vendor\opticalflow\nvOpticalFlowCommon.h" -Force
+          Copy-Item "$env:GITHUB_WORKSPACE\OpticalFlow\NvOFInterface\nvOpticalFlowD3D12.h" "$src\vendor\opticalflow\nvOpticalFlowD3D12.h" -Force
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure x64 Release
+        shell: cmd
+        run: |
+          cmake -S "%GITHUB_WORKSPACE%\v5src\source" -B "%GITHUB_WORKSPACE%\v5src\source\build" -A x64
+          if errorlevel 1 exit /b 1
+
+      - name: Build x64 Release
+        shell: cmd
+        run: |
+          cmake --build "%GITHUB_WORKSPACE%\v5src\source\build" --config Release --parallel
+          if errorlevel 1 exit /b 1
+
+      - name: Validate corrected PostFG binary
+        shell: pwsh
+        run: |
+          $exe = "$env:GITHUB_WORKSPACE\v5src\source\build\Release\FrameGeneration.exe"
+          if (-not (Test-Path $exe)) { throw 'FrameGeneration.exe was not produced' }
+          $bytes = [IO.File]::ReadAllBytes($exe)
+          $ascii = [Text.Encoding]::ASCII.GetString($bytes)
+          $unicode = [Text.Encoding]::Unicode.GetString($bytes)
+          $all = $ascii + "`n" + $unicode
+          $required = @(
+            'nvngx_dlssg.dll',
+            'DLSSG.OutputDisableInterpolation',
+            'EVAL_FIRST',
+            'GENERATED_FIRST',
+            'HOOK_INSTALLED: nvngx_dlssg.dll!NVSDK_NGX_D3D12_EvaluateFeature'
+          )
+          foreach ($needle in $required) {
+            if (-not $all.Contains($needle)) { throw "Missing required V5 hook marker: $needle" }
+          }
+          if ($all.Contains('DLSSG.EnableInterp')) { throw 'Stale DLSSG.EnableInterp marker survived in binary' }
+          if ($all.Contains('HOOK_INSTALLED: _nvngx.dll!NVSDK_NGX_D3D12_EvaluateFeature')) { throw 'Stale _nvngx.dll hook marker survived in binary' }
+          Write-Host 'V5 PostFG binary validation passed.'
+
+      - name: Upload fixed executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: FrameGeneration-V5-PostFG-HookFix
+          path: v5src/source/build/Release/FrameGeneration.exe
+          if-no-files-found: error
