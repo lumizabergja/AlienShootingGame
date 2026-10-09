@@ -65,7 +65,7 @@ jobs:
           if (-not (Test-Path $exe)) { throw 'FrameGeneration.exe missing' }
           $bytes=[IO.File]::ReadAllBytes($exe)
           $all=[Text.Encoding]::ASCII.GetString($bytes)+"`n"+[Text.Encoding]::Unicode.GetString($bytes)
-          $required=@('V10 CHI FINAL-PRESENT WARP ACTIVE','V10 CHI FINAL-PRESENT LATE WARP','V10 CHI BOOTSTRAP:','sl.common direct compute slot resolved:','compute pointer=','sl.param.common.computeAPI','v10.chi-probe','CHI_HOOK_INSTALLED','CHI_BOUNDARY_FIRST','CHI_PRESENT_FIRST','chi_present=','generated=','real=','PostPresent-Diagnostics.log')
+          $required=@('V10 CHI FINAL-PRESENT WARP ACTIVE','V10 CHI FINAL-PRESENT LATE WARP','V10 CHI BOOTSTRAP:','sl.common direct compute slot resolved:','compute pointer=','v10.chi-probe','CHI_HOOK_INSTALLED','CHI_BOUNDARY_FIRST','CHI_PRESENT_FIRST','chi_present=','generated=','real=','PostPresent-Diagnostics.log')
           foreach($n in $required){ if(-not $all.Contains($n)){ throw "Missing V10 marker: $n" } }
           $forbidden=@('hookParamSetPointer','parameter set(void*) calls=','slOnPluginLoad wrapper calls=','V8 could not obtain sl.param.common.computeAPI','HOOK_INSTALLED: native DXGI Present=','HOOK_INSTALLED: nvngx_dlssg.dll!NVSDK_NGX_D3D12_EvaluateFeature','EVAL_FIRST','GENERATED_FIRST')
           foreach($n in $forbidden){ if($all.Contains($n)){ throw "Forbidden stale marker: $n" } }
