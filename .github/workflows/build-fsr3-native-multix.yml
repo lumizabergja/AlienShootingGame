@@ -17,8 +17,8 @@ jobs:
       - name: Restore native multi source bundle
         shell: pwsh
         run: |
-          certutil -decode native-multix/native_full_bundle.b64 bundle.tar.gz | Out-Null
-          if($LASTEXITCODE){throw 'bundle decode failed'}
+          $b64=(Get-Content native-multix/native_full_bundle.b64 -Raw).Trim()
+          [IO.File]::WriteAllBytes('bundle.tar.gz',[Convert]::FromBase64String($b64))
           tar -xzf bundle.tar.gz
           if($LASTEXITCODE){throw 'bundle extract failed'}
 
