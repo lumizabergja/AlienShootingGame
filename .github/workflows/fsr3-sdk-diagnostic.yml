@@ -1,0 +1,30 @@
+name: FSR3 SDK Diagnostic
+
+on:
+  push:
+    branches: [chatgpt-fsr3-native-multi-build-20261010]
+    paths: ['.github/workflows/fsr3-sdk-diagnostic.yml']
+  workflow_dispatch:
+
+jobs:
+  diag:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Clone FidelityFX SDK 2.3.0
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch v2.3.0 https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK.git C:\ffx
+          if($LASTEXITCODE){throw 'clone failed'}
+      - name: Inventory build files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force out | Out-Null
+          Get-ChildItem C:\ffx -Recurse -File | Where-Object { $_.Name -match 'CMakeLists|\.bat$|\.sln$|\.vcxproj$|premake|Generate|Build' } | ForEach-Object { $_.FullName } | Set-Content out/build-files.txt
+          Get-ChildItem C:\ffx\Kits\FidelityFX\framegeneration -Recurse -File | ForEach-Object { $_.FullName } | Set-Content out/framegeneration-files.txt
+          Compress-Archive -Path C:\ffx\Kits\FidelityFX\framegeneration,C:\ffx\Kits\FidelityFX\api,C:\ffx\Kits\FidelityFX\backend -DestinationPath out/FidelityFX-FG-source.zip -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fsr3-sdk-diagnostic
+          path: out/*
+          if-no-files-found: error
