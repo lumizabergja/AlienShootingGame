@@ -1,0 +1,133 @@
+name: Build FSR3 Native 2x 3x 4x
+
+on:
+  push:
+    branches: [chatgpt-fsr3-native-multi-build-20261010]
+    paths:
+      - '.github/workflows/build-fsr3-native-multix.yml'
+      - 'native-multix/**'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore native multi source bundle
+        shell: pwsh
+        run: |
+          certutil -decode native-multix/native_full_bundle.b64 bundle.tar.gz | Out-Null
+          if($LASTEXITCODE){throw 'bundle decode failed'}
+          tar -xzf bundle.tar.gz
+          if($LASTEXITCODE){throw 'bundle extract failed'}
+
+      - name: Clone FidelityFX SDK 2.3.0
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch v2.3.0 https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK.git C:\ffx
+          if($LASTEXITCODE){throw 'FidelityFX clone failed'}
+
+      - name: Apply native 2x-4x FSR3 provider patch
+        shell: pwsh
+        run: |
+          Push-Location C:\ffx\Kits\FidelityFX
+          git apply "$env:GITHUB_WORKSPACE\fsr3-native-min.patch"
+          if($LASTEXITCODE){throw 'native patch failed'}
+          Pop-Location
+          New-Item -ItemType Directory -Force C:\ffx\custom_native | Out-Null
+          Copy-Item fsr3native_custom\CMakeLists.txt C:\ffx\custom_native\CMakeLists.txt
+          Copy-Item fsr3native_custom\provider_registry.cpp C:\ffx\custom_native\provider_registry.cpp
+
+      - name: Build patched frame interpolation shaders
+        shell: cmd
+        run: |
+          set D=C:\ffx\Kits\FidelityFX\framegeneration\fsr3\dx12\
+          call "%D%BuildFrameInterpolationShaders.bat" "%D%" "" ffx_frameinterpolation_reconstruct_and_dilate_pass
+          if errorlevel 1 exit /b 1
+          call "%D%BuildFrameInterpolationShaders.bat" "%D%" "" ffx_frameinterpolation_disocclusion_mask_pass
+          if errorlevel 1 exit /b 1
+          call "%D%BuildFrameInterpolationShaders.bat" "%D%" "" ffx_frameinterpolation_reconstruct_previous_depth_pass
+          if errorlevel 1 exit /b 1
+          call "%D%BuildFrameInterpolationShaders.bat" "%D%" "" ffx_frameinterpolation_setup_pass
+          if errorlevel 1 exit /b 1
+          call "%D%BuildFrameInterpolationShaders.bat" "%D%" "" ffx_frameinterpolation_game_motion_vector_field_pass
+          if errorlevel 1 exit /b 1
+          call "%D%BuildFrameInterpolationShaders.bat" "%D%" "" ffx_frameinterpolation_optical_flow_vector_field_pass
+          if errorlevel 1 exit /b 1
+          call "%D%BuildFrameInterpolationShaders.bat" "%D%" "" ffx_frameinterpolation_pass
+          if errorlevel 1 exit /b 1
+          call "%D%BuildFrameInterpolationShaders.bat" "%D%" "" ffx_frameinterpolation_compute_game_vector_field_inpainting_pyramid_pass
+          if errorlevel 1 exit /b 1
+          call "%D%BuildFrameInterpolationShaders.bat" "%D%" "" ffx_frameinterpolation_compute_inpainting_pyramid_pass
+          if errorlevel 1 exit /b 1
+          call "%D%BuildFrameInterpolationShaders.bat" "%D%" "" ffx_frameinterpolation_inpainting_pass
+          if errorlevel 1 exit /b 1
+          call "%D%BuildFrameInterpolationShaders.bat" "%D%" "" ffx_frameinterpolation_debug_view_pass
+          if errorlevel 1 exit /b 1
+
+      - name: Build stock optical flow shaders
+        shell: cmd
+        run: |
+          set D=C:\ffx\Kits\FidelityFX\framegeneration\fsr3\dx12\
+          for %%S in (ffx_opticalflow_compute_luminance_pyramid_pass ffx_opticalflow_compute_optical_flow_advanced_pass_v5 ffx_opticalflow_compute_scd_divergence_pass ffx_opticalflow_filter_optical_flow_pass_v5 ffx_opticalflow_generate_scd_histogram_pass ffx_opticalflow_prepare_luma_pass ffx_opticalflow_scale_optical_flow_advanced_pass_v5) do (
+            call "%D%BuildOpticalFlowShaders.bat" "%D%" "" %%S
+            if errorlevel 1 exit /b 1
+          )
+
+      - name: Configure custom FidelityFX provider
+        shell: pwsh
+        run: cmake -S C:\ffx\custom_native -B C:\ffx\custom_native\build -A x64
+
+      - name: Build custom FidelityFX provider
+        shell: pwsh
+        run: cmake --build C:\ffx\custom_native\build --config Release --parallel
+
+      - name: Build FrameGeneration app
+        shell: pwsh
+        run: |
+          cmake -S fsr2060_native_multix -B appbuild -A x64
+          if($LASTEXITCODE){throw 'app configure failed'}
+          cmake --build appbuild --config Release --parallel
+          if($LASTEXITCODE){throw 'app build failed'}
+
+      - name: Package ready-to-run build
+        shell: pwsh
+        run: |
+          $out='out\FrameGeneration-RTX2060-FSR3-NATIVE-2X-3X-4X'
+          New-Item -ItemType Directory -Force $out | Out-Null
+          Copy-Item appbuild\Release\FrameGeneration.exe "$out\FrameGeneration.exe"
+          $custom=Get-ChildItem C:\ffx\custom_native\build -Recurse -Filter amd_fidelityfx_framegeneration_dx12.dll | Select-Object -First 1
+          if(!$custom){throw 'custom framegeneration DLL missing'}
+          Copy-Item $custom.FullName "$out\amd_fidelityfx_framegeneration_dx12.dll"
+          Copy-Item C:\ffx\Kits\FidelityFX\signedbin\amd_fidelityfx_loader_dx12.dll "$out\amd_fidelityfx_loader_dx12.dll"
+          @"
+          RTX 2060 FSR3 Native Multi-Frame Build
+
+          FG modes: Off / 2x / 3x Native / 4x Native.
+          2x: one FSR3 interpolation at t=1/2.
+          3x: two FSR3 interpolation passes at t=1/3 and t=2/3.
+          4x: three FSR3 interpolation passes at t=1/4, t=1/2 and t=3/4.
+
+          Extra frames are generated inside the patched FSR3 provider from the same two real-frame endpoints and optical-flow data. This is not the old post-FG phase-blend experiment.
+          No NVOFA. NvFBC/CUDA components come from the installed NVIDIA driver.
+          "@ | Set-Content "$out\README.txt"
+          Get-FileHash "$out\FrameGeneration.exe","$out\amd_fidelityfx_framegeneration_dx12.dll","$out\amd_fidelityfx_loader_dx12.dll" -Algorithm SHA256 | Format-Table -AutoSize | Out-String | Set-Content "$out\SHA256SUMS.txt"
+          Compress-Archive -Path "$out\*" -DestinationPath out\FrameGeneration-RTX2060-FSR3-NATIVE-2X-3X-4X.zip -Force
+
+      - name: Verify package
+        shell: pwsh
+        run: |
+          if((Get-Item out\FrameGeneration-RTX2060-FSR3-NATIVE-2X-3X-4X.zip).Length -lt 1000000){throw 'package unexpectedly small'}
+          if((Get-Item out\FrameGeneration-RTX2060-FSR3-NATIVE-2X-3X-4X\amd_fidelityfx_framegeneration_dx12.dll).Length -lt 1000000){throw 'provider DLL unexpectedly small'}
+          dumpbin /exports out\FrameGeneration-RTX2060-FSR3-NATIVE-2X-3X-4X\amd_fidelityfx_framegeneration_dx12.dll | Out-File out\provider-exports.txt
+          $e=Get-Content out\provider-exports.txt -Raw
+          foreach($x in 'ffxCreateContext','ffxDestroyContext','ffxConfigure','ffxQuery','ffxDispatch'){ if($e -notmatch $x){throw "missing export $x"} }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FrameGeneration-RTX2060-FSR3-NATIVE-2X-3X-4X
+          path: |
+            out/FrameGeneration-RTX2060-FSR3-NATIVE-2X-3X-4X.zip
+            out/provider-exports.txt
+          if-no-files-found: error
