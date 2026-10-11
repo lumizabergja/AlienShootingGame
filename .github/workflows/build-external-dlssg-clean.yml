@@ -1,0 +1,140 @@
+name: Build External DLSSG Clean
+
+on:
+  push:
+    branches:
+      - chatgpt-external-dlssg-ci-20261011
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - name: Checkout isolated build branch
+        uses: actions/checkout@v4
+
+      - name: Reconstruct and verify clean source archive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $names = @('part00','rest00','rest01','rest02','rest03','rest04')
+          $b64 = ($names | ForEach-Object { Get-Content (Join-Path 'build/externaldlssg' $_) -Raw }) -join ''
+          [IO.File]::WriteAllBytes('clean-source.zip', [Convert]::FromBase64String($b64))
+          $expected = 'a272bb088b3092a74eebdacbe7ba2790eb377eabe82c3da422443f5be91765e4'
+          $actual = (Get-FileHash clean-source.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "Clean source SHA-256 mismatch: $actual" }
+          New-Item -ItemType Directory -Force -Path workspace | Out-Null
+          Expand-Archive -Path clean-source.zip -DestinationPath workspace -Force
+          $src = (Resolve-Path 'workspace/ExternalDLSSG_LowLatency').Path
+          "SRC=$src" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Verified clean source SHA-256: $actual"
+
+      - name: Download and verify official Streamline 2.14.1
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & "$env:SRC/tools/setup_streamline.ps1"
+
+      - name: Configure Release x64 static CRT
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmake -S "$env:SRC" -B "$env:SRC/build" -A x64 -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+
+      - name: Build Release x64
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmake --build "$env:SRC/build" --config Release --parallel
+
+      - name: Validate compiled runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Join-Path $env:SRC 'build/bin/ExternalDLSSG.exe'
+          if (-not (Test-Path $exe)) { throw "Compiled executable missing: $exe" }
+          Get-ChildItem (Join-Path $env:SRC 'build/bin') | Format-Table Name,Length
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "ExternalDLSSG.exe SHA-256: $hash"
+
+      - name: Create complete ready-to-run and rebuildable package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $PWD 'package/ExternalDLSSG-LowLatency-Windows-x64-FULL'
+          $run = Join-Path $root 'ready_to_run'
+          $source = Join-Path $root 'source'
+          New-Item -ItemType Directory -Force -Path $run,$source | Out-Null
+
+          Copy-Item -Path (Join-Path $env:SRC 'build/bin/*') -Destination $run -Recurse -Force
+
+          foreach ($item in @('src','shaders','tools','CMakeLists.txt','build.bat','README.md','VALIDATION.md','SOURCE_MANIFEST.sha256','.gitignore')) {
+            $p = Join-Path $env:SRC $item
+            if (Test-Path $p) { Copy-Item -Path $p -Destination $source -Recurse -Force }
+          }
+
+          $slSrc = Join-Path $env:SRC 'third_party/streamline'
+          $slDst = Join-Path $source 'third_party/streamline'
+          New-Item -ItemType Directory -Force -Path (Join-Path $slDst 'include'),(Join-Path $slDst 'bin/x64') | Out-Null
+          Copy-Item -Path (Join-Path $slSrc 'include/*') -Destination (Join-Path $slDst 'include') -Recurse -Force
+          foreach ($dll in @('sl.interposer.dll','sl.common.dll','sl.pcl.dll','sl.reflex.dll','sl.dlss_g.dll','nvngx_dlssg.dll')) {
+            Copy-Item -Path (Join-Path $slSrc "bin/x64/$dll") -Destination (Join-Path $slDst 'bin/x64') -Force
+          }
+          foreach ($legal in @('LICENSE','LICENSE.md','LICENSE.txt','NOTICE','NOTICE.md','README.md')) {
+            $p = Join-Path $slSrc $legal
+            if (Test-Path $p) { Copy-Item -Path $p -Destination $slDst -Force }
+          }
+
+          Copy-Item clean-source.zip (Join-Path $root 'original-clean-source.zip') -Force
+
+          $exeHash = (Get-FileHash (Join-Path $run 'ExternalDLSSG.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+          @"
+          ExternalDLSSG Low-Latency Windows x64
+
+          READY TO RUN:
+            Open ready_to_run and run ExternalDLSSG.exe.
+            Keep the shaders folder and NVIDIA Streamline DLLs beside the executable.
+
+          REBUILD:
+            The source folder contains the complete project, Streamline 2.14.1 headers,
+            and the exact signed runtime DLLs needed by this integration.
+            Visual Studio 2022 + Windows 10/11 SDK + CMake 3.24+ are required.
+            Configure x64 Release and build the ExternalDLSSG target.
+
+          Clean source archive SHA-256:
+            a272bb088b3092a74eebdacbe7ba2790eb377eabe82c3da422443f5be91765e4
+
+          Official Streamline 2.14.1 archive SHA-256:
+            92c4d954631a1710da86ca3fa8d5034f2b9503838c95fc4ae977ae149319781b
+
+          ExternalDLSSG.exe SHA-256:
+            $exeHash
+          "@ | Set-Content (Join-Path $root 'README-RUN.txt') -Encoding UTF8
+
+          Get-ChildItem $run -File -Recurse | ForEach-Object {
+            $h = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+            $rel = $_.FullName.Substring($root.Length + 1)
+            "$h  $rel"
+          } | Set-Content (Join-Path $root 'READY_TO_RUN_SHA256SUMS.txt') -Encoding ASCII
+
+          $zip = Join-Path $PWD 'ExternalDLSSG-LowLatency-Windows-x64-FULL.zip'
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Compress-Archive -Path "$root/*" -DestinationPath $zip -CompressionLevel Optimal
+          $zipHash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$zipHash  ExternalDLSSG-LowLatency-Windows-x64-FULL.zip" | Set-Content (Join-Path $PWD 'ExternalDLSSG-LowLatency-Windows-x64-FULL.zip.sha256') -Encoding ASCII
+          Get-Item $zip | Format-List FullName,Length
+          Write-Host "Package SHA-256: $zipHash"
+
+      - name: Upload complete Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ExternalDLSSG-LowLatency-Windows-x64-FULL
+          path: |
+            ExternalDLSSG-LowLatency-Windows-x64-FULL.zip
+            ExternalDLSSG-LowLatency-Windows-x64-FULL.zip.sha256
+          if-no-files-found: error
+          compression-level: 0
