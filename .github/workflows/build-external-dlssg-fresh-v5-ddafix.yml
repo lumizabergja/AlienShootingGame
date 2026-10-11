@@ -1,0 +1,144 @@
+name: Build External DLSSG Fresh V5 DDA Fix
+
+on:
+  push:
+    branches:
+      - chatgpt-external-dlssg-ci-20261011
+    paths:
+      - '.github/workflows/build-external-dlssg-fresh-v5-ddafix.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 35
+    steps:
+      - name: Checkout isolated CI branch
+        uses: actions/checkout@v4
+
+      - name: Reconstruct and verify clean source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $parts=@('part00','part01','part02','part03')
+          $b64=($parts|ForEach-Object{Get-Content (Join-Path 'build/fresh3' $_) -Raw}) -join ''
+          [IO.File]::WriteAllBytes('ExternalDLSSG-Fresh-Source.zip',[Convert]::FromBase64String($b64))
+          $expected='a94b02d16c48c5d07f4fcc391ef12fb1063a9b235968eef5c536bfbc2f95b3b2'
+          $actual=(Get-FileHash 'ExternalDLSSG-Fresh-Source.zip' -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($actual -ne $expected){throw "Source SHA mismatch: $actual"}
+          New-Item -ItemType Directory -Force workspace|Out-Null
+          Expand-Archive 'ExternalDLSSG-Fresh-Source.zip' workspace -Force
+          $src=(Resolve-Path 'workspace/ExternalDLSSG_Fresh').Path
+          "SRC=$src"|Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Apply audited fixes including DDA compatibility fallback
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          & '.ci/apply-external-dlssg-fresh-fixes.ps1' -Src "$env:SRC"
+          $dda=Join-Path $env:SRC 'src/DdaPipeline.cpp'
+          foreach($needle in @('DuplicateOutput1 failed; trying IDXGIOutput1::DuplicateOutput','output1->DuplicateOutput(device11_.Get(),&duplication_)','Desktop Duplication active via %s')){
+            if(-not (Select-String -Path $dda -SimpleMatch $needle -Quiet)){throw "Missing DDA fix: $needle"}
+          }
+
+      - name: Download and verify official Streamline 2.14.1
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          & "$env:SRC/tools/setup_streamline.ps1"
+
+      - name: Configure VS2022 x64 Release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          cmake -S "$env:SRC" -B "$env:SRC/build" -A x64 -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+
+      - name: Build warning-free x64 Release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          cmake --build "$env:SRC/build" --config Release --parallel
+
+      - name: Verify official production runtime and EXE
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $bin=Join-Path $env:SRC 'build/bin'; $official=Join-Path $env:SRC 'third_party/streamline/bin/x64'
+          foreach($dll in @('sl.interposer.dll','sl.common.dll','sl.pcl.dll','sl.reflex.dll','sl.dlss_g.dll','nvngx_dlssg.dll')){
+            $a=(Get-FileHash (Join-Path $bin $dll) -Algorithm SHA256).Hash.ToLowerInvariant()
+            $b=(Get-FileHash (Join-Path $official $dll) -Algorithm SHA256).Hash.ToLowerInvariant()
+            if($a -ne $b){throw "$dll differs from official production runtime"}
+          }
+          if(-not (Test-Path (Join-Path $bin 'ExternalDLSSG.exe'))){throw 'EXE missing'}
+
+      - name: Streamline startup self-test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $bin=Join-Path $env:SRC 'build/bin'; $exe=Join-Path $bin 'ExternalDLSSG.exe'
+          $p=Start-Process -FilePath $exe -ArgumentList '--ci-selftest' -WorkingDirectory $bin -Wait -PassThru
+          $code=$p.ExitCode; $log=Join-Path $bin 'logs/ExternalDLSSG.log'
+          $text=if(Test-Path $log){Get-Content $log -Raw}else{''}
+          $video=(Get-CimInstance Win32_VideoController|ForEach-Object{$_.Name}) -join '; '
+          if($code -eq 0){if($text -notmatch 'SELFTEST: shutdown OK'){throw 'No clean self-test shutdown marker'}}
+          elseif($code -eq 20 -and $video -notmatch '(?i)nvidia'){
+            foreach($required in @("Loaded plugin 'sl.common'","Loaded plugin 'sl.dlss_g'","Loaded plugin 'sl.pcl'","Loaded plugin 'sl.reflex'")){
+              if($text -notlike "*$required*"){throw "Missing plugin proof: $required"}
+            }
+          } else { if(Test-Path $log){Get-Content $log -Tail 300}; throw "Unexpected self-test exit $code ($video)" }
+
+      - name: GUI survival and control geometry test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          Add-Type @'
+          using System; using System.Runtime.InteropServices;
+          public static class P { [StructLayout(LayoutKind.Sequential)] public struct R { public int L,T,Ri,B; }
+          [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr h,int id);
+          [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h,out R r);
+          [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h); }
+          '@
+          $bin=Join-Path $env:SRC 'build/bin'; $p=Start-Process (Join-Path $bin 'ExternalDLSSG.exe') -WorkingDirectory $bin -PassThru
+          try{
+            $main=[IntPtr]::Zero
+            for($i=0;$i -lt 20;$i++){Start-Sleep -Milliseconds 250;$p.Refresh();if($p.HasExited){throw "GUI exited $($p.ExitCode)"};$main=$p.MainWindowHandle;if($main -ne [IntPtr]::Zero){break}}
+            if($main -eq [IntPtr]::Zero){throw 'No main window'}
+            foreach($id in 1001,1002,1003,1004,1005,1006){$c=[P]::GetDlgItem($main,$id);if($c -eq [IntPtr]::Zero){throw "Missing control $id"};$r=New-Object P+R;[void][P]::GetWindowRect($c,[ref]$r);if(-not [P]::IsWindowVisible($c) -or ($r.Ri-$r.L)-le 1 -or ($r.B-$r.T)-le 1){throw "Bad control geometry $id"}}
+            Start-Sleep -Seconds 2;$p.Refresh();if($p.HasExited){throw 'GUI did not survive'}
+          } finally {if($p -and -not $p.HasExited){Stop-Process -Id $p.Id -Force}}
+
+      - name: Package full DDA-fixed project
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $name='ExternalDLSSG-Fresh-LowLatency-Windows-x64-FULL-DDAFIX'
+          $root=Join-Path $PWD "package/$name"; $run=Join-Path $root 'ready_to_run'; $source=Join-Path $root 'source'
+          New-Item -ItemType Directory -Force $run,$source|Out-Null
+          Copy-Item (Join-Path $env:SRC 'build/bin/*') $run -Recurse -Force
+          foreach($item in @('src','shaders','tools','CMakeLists.txt','build.bat','README.md','.gitignore')){$q=Join-Path $env:SRC $item;if(Test-Path $q){Copy-Item $q $source -Recurse -Force}}
+          $slSrc=Join-Path $env:SRC 'third_party/streamline';$slDst=Join-Path $source 'third_party/streamline'
+          New-Item -ItemType Directory -Force (Join-Path $slDst 'include'),(Join-Path $slDst 'lib/x64'),(Join-Path $slDst 'bin/x64')|Out-Null
+          Copy-Item (Join-Path $slSrc 'include/*') (Join-Path $slDst 'include') -Recurse -Force
+          Copy-Item (Join-Path $slSrc 'lib/x64/sl.interposer.lib') (Join-Path $slDst 'lib/x64') -Force
+          foreach($dll in @('sl.interposer.dll','sl.common.dll','sl.pcl.dll','sl.reflex.dll','sl.dlss_g.dll','nvngx_dlssg.dll')){Copy-Item (Join-Path $slSrc "bin/x64/$dll") (Join-Path $slDst 'bin/x64') -Force}
+          foreach($legal in @('LICENSE','LICENSE.md','LICENSE.txt','NOTICE','NOTICE.md','README.md')){$q=Join-Path $slSrc $legal;if(Test-Path $q){Copy-Item $q $slDst -Force}}
+          Remove-Item (Join-Path $run 'logs') -Recurse -Force -ErrorAction SilentlyContinue
+          $exeHash=(Get-FileHash (Join-Path $run 'ExternalDLSSG.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+          "DDAFIX: DuplicateOutput1 preferred; automatic GPU-side DuplicateOutput fallback. EXE SHA256: $exeHash"|Set-Content (Join-Path $root 'README-RUN.txt') -Encoding UTF8
+          Get-ChildItem $run -File -Recurse|ForEach-Object{$h=(Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant();$rel=$_.FullName.Substring($root.Length+1);"$h  $rel"}|Set-Content (Join-Path $root 'READY_TO_RUN_SHA256SUMS.txt') -Encoding ASCII
+          $zip=Join-Path $PWD "$name.zip";Compress-Archive "$root/*" $zip -CompressionLevel Optimal -Force
+          $hash=(Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant();"$hash  $name.zip"|Set-Content "$name.zip.sha256" -Encoding ASCII
+          Write-Host "PACKAGE_SHA=$hash";Write-Host "EXE_SHA=$exeHash"
+
+      - name: Upload DDA-fixed package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ExternalDLSSG-Fresh-LowLatency-Windows-x64-FULL-DDAFIX
+          path: |
+            ExternalDLSSG-Fresh-LowLatency-Windows-x64-FULL-DDAFIX.zip
+            ExternalDLSSG-Fresh-LowLatency-Windows-x64-FULL-DDAFIX.zip.sha256
+          if-no-files-found: error
+          compression-level: 0
