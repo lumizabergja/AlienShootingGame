@@ -27,21 +27,15 @@ foreach ($id in @('IDC_LIST','IDC_REFRESH','IDC_MULT','IDC_RADIUS','IDC_START','
     $appText = $appText.Replace($old, $new)
 }
 
-# CreateWindow sends WM_SIZE before the child controls exist. The original fresh build
-# therefore ran Layout() against null HWNDs and then left every child at 0x0 forever.
-$oldCreateTail = 'for(HWND h:{list_,refresh_,mult_,radius_,start_,status_}) setFont(h,font_);`r`n    RefreshWindows(); SetTimer(hwnd_,1,500,nullptr); ShowWindow(hwnd_,show); UpdateWindow(hwnd_); return true;'
-if (-not $appText.Contains($oldCreateTail)) {
-    $oldCreateTail = 'for(HWND h:{list_,refresh_,mult_,radius_,start_,status_}) setFont(h,font_);`n    RefreshWindows(); SetTimer(hwnd_,1,500,nullptr); ShowWindow(hwnd_,show); UpdateWindow(hwnd_); return true;'
+# CreateWindow sends WM_SIZE before these child HWNDs are created. Force one real
+# layout pass immediately after child creation so none remain at the initial 0x0 size.
+if (-not $appText.Contains('GetClientRect(hwnd_,&rc); Layout(rc.right-rc.left,rc.bottom-rc.top);')) {
+    $pattern = 'for\(HWND h:\{list_,refresh_,mult_,radius_,start_,status_\}\) setFont\(h,font_\);\s*RefreshWindows\(\); SetTimer\(hwnd_,1,500,nullptr\); ShowWindow\(hwnd_,show\); UpdateWindow\(hwnd_\); return true;'
+    $replacement = "for(HWND h:{list_,refresh_,mult_,radius_,start_,status_}) setFont(h,font_);`r`n    RECT rc{}; GetClientRect(hwnd_,&rc); Layout(rc.right-rc.left,rc.bottom-rc.top);`r`n    RefreshWindows(); UpdateStatus(); SetTimer(hwnd_,1,500,nullptr); ShowWindow(hwnd_,show); UpdateWindow(hwnd_); return true;"
+    $newAppText = [regex]::Replace($appText,$pattern,$replacement,1)
+    if ($newAppText -eq $appText) { throw 'Expected App::Create child-control tail not found.' }
+    $appText = $newAppText
 }
-$newCreateTail = @'
-for(HWND h:{list_,refresh_,mult_,radius_,start_,status_}) setFont(h,font_);
-    RECT rc{}; GetClientRect(hwnd_,&rc); Layout(rc.right-rc.left,rc.bottom-rc.top);
-    RefreshWindows(); UpdateStatus(); SetTimer(hwnd_,1,500,nullptr); ShowWindow(hwnd_,show); UpdateWindow(hwnd_); return true;
-'@.TrimEnd()
-if (-not $appText.Contains($oldCreateTail) -and -not $appText.Contains('GetClientRect(hwnd_,&rc); Layout(rc.right-rc.left,rc.bottom-rc.top);')) {
-    throw 'Expected App::Create layout tail not found.'
-}
-$appText = $appText.Replace($oldCreateTail, $newCreateTail)
 Set-Content -Path $app -Value $appText -Encoding UTF8 -NoNewline
 
 $cmakeText = Get-Content $cmake -Raw
