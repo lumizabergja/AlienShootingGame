@@ -67,19 +67,14 @@ jobs:
           if(-not $vs){ throw 'Unable to locate Visual Studio C++ toolchain' }
           $dumpbin=Get-ChildItem (Join-Path $vs 'VC/Tools/MSVC') -Recurse -Filter dumpbin.exe | Where-Object { $_.FullName -match 'bin\\Hostx64\\x64\\dumpbin\.exe$' } | Sort-Object FullName -Descending | Select-Object -First 1
           if(-not $dumpbin){ throw 'Unable to locate x64 dumpbin.exe' }
-          Write-Host "Using dumpbin: $($dumpbin.FullName)"
           $deps=& $dumpbin.FullName /nologo /dependents $exe | Out-String
           $imports=& $dumpbin.FullName /nologo /imports $exe | Out-String
           $deps | Set-Content (Join-Path $env:SRC 'build/bin/DEPENDENTS.txt') -Encoding UTF8
           $imports | Set-Content (Join-Path $env:SRC 'build/bin/IMPORTS.txt') -Encoding UTF8
           Write-Host $deps
           if($deps -notmatch '(?i)sl\.interposer\.dll'){ throw 'EXE does not depend on sl.interposer.dll' }
-          foreach($forbidden in @('dxgi.dll','d3d11.dll','d3d12.dll')){
-            if($deps -match [regex]::Escape($forbidden)){ throw "EXE incorrectly links directly to $forbidden" }
-          }
-          foreach($symbol in @('CreateDXGIFactory2','D3D12CreateDevice')){
-            if($imports -notmatch [regex]::Escape($symbol)){ throw "Expected interposed import missing: $symbol" }
-          }
+          foreach($forbidden in @('dxgi.dll','d3d11.dll','d3d12.dll')){ if($deps -match [regex]::Escape($forbidden)){ throw "EXE incorrectly links directly to $forbidden" } }
+          foreach($symbol in @('CreateDXGIFactory2','D3D12CreateDevice')){ if($imports -notmatch [regex]::Escape($symbol)){ throw "Expected interposed import missing: $symbol" } }
           Write-Host 'IMPORT_GATE_PASS: sl.interposer.dll owns the host graphics imports.'
 
       - name: Verify exact official production runtime files
@@ -104,6 +99,8 @@ jobs:
           $ErrorActionPreference='Stop'
           $bin=Join-Path $env:SRC 'build/bin'
           $exe=Join-Path $bin 'ExternalDLSSG.exe'
+          $video=(Get-CimInstance Win32_VideoController | ForEach-Object { $_.Name }) -join '; '
+          Write-Host "Video controllers: $video"
           $p=Start-Process -FilePath $exe -WorkingDirectory $bin -PassThru
           Start-Sleep -Seconds 5
           $p.Refresh()
@@ -111,13 +108,17 @@ jobs:
           if(Test-Path $log){ Get-Content $log -Tail 300 }
           if(-not(Test-Path $log)){ throw 'Persistent Stage1 log was not created' }
           $text=Get-Content $log -Raw
-          if($text -notmatch 'ORDER_PROOF: slInit completed before CreateDXGIFactory2 or D3D12CreateDevice'){ throw 'Runtime init-order proof missing' }
-          if(-not $p.HasExited){
-            Write-Host 'Stage1 process remained alive for five seconds.'
-            Stop-Process -Id $p.Id -Force
+          if($text -match 'ORDER_PROOF: slInit completed before CreateDXGIFactory2 or D3D12CreateDevice'){
+            Write-Host 'FULL_STAGE1_STARTUP_PASS: slInit completed and graphics initialization began in the correct order.'
+          } elseif($video -notmatch '(?i)nvidia' -and $text -match 'slInit -> Result::eErrorNoPlugins') {
+            foreach($required in @("Loaded plugin 'sl.common'","Loaded plugin 'sl.dlss_g'","Loaded plugin 'sl.pcl'","Loaded plugin 'sl.reflex'",'Disabling DLSS-G since it is not supported on current hardware')){
+              if($text -notlike "*$required*"){ throw "GPU-less CI result missing required plugin proof: $required" }
+            }
+            Write-Host 'EXPECTED_GPULESS_CI_PASS: official plugins loaded, then Streamline correctly rejected the runner because it has no NVIDIA GPU.'
           } else {
-            Write-Host "Stage1 exited with code $($p.ExitCode) on hosted hardware; log above is authoritative."
+            throw "Unexpected Stage1 startup failure on controllers: $video"
           }
+          if(-not $p.HasExited){ Stop-Process -Id $p.Id -Force }
 
       - name: Package Stage 1 evidence
         if: always()
