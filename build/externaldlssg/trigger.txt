@@ -1,0 +1,1 @@
+trigger clean ExternalDLSSG Windows CI after workflow is present
