@@ -43,7 +43,7 @@ jobs:
             'GetCurrentBackBufferIndex()',
             'slSetTagForFrame',
             'kBufferTypeDepth',
-            'kBufferTypeMvec',
+            'kBufferTypeMotionVectors',
             'kBufferTypeHUDLessColor',
             'kBufferTypeUIAlpha',
             'eValidUntilPresent',
@@ -54,10 +54,10 @@ jobs:
           )){
             if(-not(Select-String -Path $main -SimpleMatch $needle -Quiet)){ throw "Missing required Stage2 integration element: $needle" }
           }
-          foreach($forbidden in @('GetFrameLatencyWaitableObject','SetMaximumFrameLatency','D3D11CreateDevice','DuplicateOutput','DuplicateOutput1')){
-            if(Select-String -Path $main -SimpleMatch $forbidden -Quiet){ throw "Stage2 contains forbidden/not-yet-allowed API: $forbidden" }
+          foreach($forbidden in @('GetFrameLatencyWaitableObject','SetMaximumFrameLatency','D3D11CreateDevice','DuplicateOutput','DuplicateOutput1','kBufferTypeMvec')){
+            if(Select-String -Path $main -SimpleMatch $forbidden -Quiet){ throw "Stage2 contains forbidden/outdated/not-yet-allowed API: $forbidden" }
           }
-          Write-Host 'Stage2 source audit passed: DLSS-G/Reflex/resource tagging present; capture is still absent.'
+          Write-Host 'Stage2 source audit passed: current 2.14.1 tags, DLSS-G/Reflex/resource tagging present; capture is still absent.'
 
       - name: Download and checksum-verify official Streamline 2.14.1
         shell: pwsh
