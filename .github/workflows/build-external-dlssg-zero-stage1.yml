@@ -5,7 +5,7 @@ on:
     branches:
       - chatgpt-external-dlssg-from-zero-20261011
     paths:
-      - '.ci/ExternalDLSSG_Zero_Stage1.zip'
+      - '.ci/from_zero_stage1/**'
       - '.github/workflows/build-external-dlssg-zero-stage1.yml'
   workflow_dispatch:
 
@@ -20,24 +20,26 @@ jobs:
       - name: Checkout isolated from-zero branch
         uses: actions/checkout@v4
 
-      - name: Verify and unpack clean Stage 1 source
+      - name: Validate direct clean Stage 1 source
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          $archive='.ci/ExternalDLSSG_Zero_Stage1.zip'
-          $expected='6b4de6ade3ecf8f3758d9fb9adfa51478cb6e8971ac83ba88237e8226a439aff'
-          $actual=(Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-          if($actual -ne $expected){ throw "Stage1 source SHA mismatch: $actual" }
-          New-Item -ItemType Directory -Force workspace | Out-Null
-          Expand-Archive $archive workspace -Force
-          $src=(Resolve-Path 'workspace/ExternalDLSSG_Zero').Path
-          $main=Join-Path $src 'src/main.cpp'
-          if(-not (Test-Path $main)){ throw 'Fresh Stage1 main.cpp missing after extraction' }
-          if(-not (Select-String -Path $main -SimpleMatch '#include <sl_helpers.h>' -Quiet)){ throw 'Corrected official Streamline helper include is missing from stored source' }
+          $src=(Resolve-Path '.ci/from_zero_stage1').Path
           "SRC=$src" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host "Verified exact stored Stage1 source: $actual"
+          $head=(git rev-parse HEAD).Trim()
+          Write-Host "Building exact source commit: $head"
+          $main=Join-Path $src 'src/main.cpp'
+          $cmake=Join-Path $src 'CMakeLists.txt'
+          $setup=Join-Path $src 'tools/setup_streamline.ps1'
+          foreach($p in @($main,$cmake,$setup)){ if(-not(Test-Path $p)){ throw "Required clean source missing: $p" } }
+          foreach($needle in @('#include <sl_helpers.h>','slInit(prefs, sl::kSDKVersion)','ORDER_PROOF: slInit completed before CreateDXGIFactory2 or D3D12CreateDevice','slSetD3DDevice(device_.Get())','CreateSwapChainForHwnd')){
+            if(-not(Select-String -Path $main -SimpleMatch $needle -Quiet)){ throw "Stage1 source assertion missing: $needle" }
+          }
+          $cmakeText=Get-Content $cmake -Raw
+          foreach($forbidden in @('dxgi.lib','d3d11.lib','d3d12.lib')){ if($cmakeText -match [regex]::Escape($forbidden) -and $cmakeText -notmatch ('do NOT link '+[regex]::Escape($forbidden))){ throw "Forbidden direct graphics library referenced: $forbidden" } }
+          Write-Host 'Direct source assertions passed.'
 
-      - name: Verify official Streamline 2.14.1 SDK
+      - name: Download and checksum-verify official Streamline 2.14.1
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
@@ -60,7 +62,7 @@ jobs:
         run: |
           $ErrorActionPreference='Stop'
           $exe=Join-Path $env:SRC 'build/bin/ExternalDLSSG.exe'
-          if(-not (Test-Path $exe)){ throw 'Compiled EXE missing' }
+          if(-not(Test-Path $exe)){ throw 'Compiled EXE missing' }
           $deps=& dumpbin /nologo /dependents $exe | Out-String
           $imports=& dumpbin /nologo /imports $exe | Out-String
           $deps | Set-Content (Join-Path $env:SRC 'build/bin/DEPENDENTS.txt') -Encoding UTF8
@@ -73,40 +75,46 @@ jobs:
           foreach($symbol in @('CreateDXGIFactory2','D3D12CreateDevice')){
             if($imports -notmatch [regex]::Escape($symbol)){ throw "Expected interposed import missing: $symbol" }
           }
-          Write-Host 'PASS: no direct DXGI/D3D11/D3D12 DLL dependency; Streamline interposer is the graphics import owner.'
+          Write-Host 'IMPORT_GATE_PASS: sl.interposer.dll owns the host graphics imports.'
 
-      - name: Verify exact production runtime files
+      - name: Verify exact official production runtime files
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
           $bin=Join-Path $env:SRC 'build/bin'
           $official=Join-Path $env:SRC 'third_party/streamline/bin/x64'
           foreach($dll in @('sl.interposer.dll','sl.common.dll','sl.pcl.dll','sl.reflex.dll','sl.dlss_g.dll','nvngx_dlssg.dll')){
-            $a=Join-Path $bin $dll; $b=Join-Path $official $dll
-            if(-not (Test-Path $a)){ throw "Runtime missing from build: $dll" }
-            if(-not (Test-Path $b)){ throw "Runtime missing from official SDK: $dll" }
-            $ha=(Get-FileHash $a -Algorithm SHA256).Hash.ToLowerInvariant()
-            $hb=(Get-FileHash $b -Algorithm SHA256).Hash.ToLowerInvariant()
-            if($ha -ne $hb){ throw "$dll differs from verified official production SDK" }
-            Write-Host "$dll $ha"
+            $built=Join-Path $bin $dll; $sdk=Join-Path $official $dll
+            if(-not(Test-Path $built)){ throw "Runtime missing from build: $dll" }
+            if(-not(Test-Path $sdk)){ throw "Runtime missing from official SDK: $dll" }
+            $a=(Get-FileHash $built -Algorithm SHA256).Hash.ToLowerInvariant()
+            $b=(Get-FileHash $sdk -Algorithm SHA256).Hash.ToLowerInvariant()
+            if($a -ne $b){ throw "$dll differs from checksum-verified official SDK" }
+            Write-Host "$dll $a"
           }
 
-      - name: Startup behavior smoke test on hosted hardware
+      - name: Stage 1 startup smoke test
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          $bin=Join-Path $env:SRC 'build/bin'; $exe=Join-Path $bin 'ExternalDLSSG.exe'
+          $bin=Join-Path $env:SRC 'build/bin'
+          $exe=Join-Path $bin 'ExternalDLSSG.exe'
           $p=Start-Process -FilePath $exe -WorkingDirectory $bin -PassThru
           Start-Sleep -Seconds 5
           $p.Refresh()
-          $log=Join-Path $bin 'logs/ExternalDLSSG-Zero.log'
+          $log=Join-Path $bin 'logs/ExternalDLSSG-Zero-Stage1.log'
           if(Test-Path $log){ Get-Content $log -Tail 300 }
-          if(-not $p.HasExited){ Stop-Process -Id $p.Id -Force }
-          if(-not (Test-Path $log)){ throw 'Stage1 did not create its persistent startup log' }
+          if(-not(Test-Path $log)){ throw 'Persistent Stage1 log was not created' }
           $text=Get-Content $log -Raw
-          if($text -notmatch 'Streamline initialized before any DXGI/D3D calls'){ throw 'slInit ordering proof missing from log' }
+          if($text -notmatch 'ORDER_PROOF: slInit completed before CreateDXGIFactory2 or D3D12CreateDevice'){ throw 'Runtime init-order proof missing' }
+          if(-not $p.HasExited){
+            Write-Host 'Stage1 process remained alive for five seconds.'
+            Stop-Process -Id $p.Id -Force
+          } else {
+            Write-Host "Stage1 exited with code $($p.ExitCode) on hosted hardware; log above is authoritative."
+          }
 
-      - name: Package Stage1 evidence
+      - name: Package Stage 1 evidence
         if: always()
         shell: pwsh
         run: |
@@ -116,12 +124,13 @@ jobs:
           if($env:SRC){
             $bin=Join-Path $env:SRC 'build/bin'
             if(Test-Path $bin){ Copy-Item "$bin/*" $out -Recurse -Force -ErrorAction SilentlyContinue }
-            if(Test-Path $env:SRC){ Copy-Item "$env:SRC/src" $out -Recurse -Force -ErrorAction SilentlyContinue; Copy-Item "$env:SRC/CMakeLists.txt" $out -Force -ErrorAction SilentlyContinue }
+            Copy-Item "$env:SRC/src" $out -Recurse -Force -ErrorAction SilentlyContinue
+            Copy-Item "$env:SRC/CMakeLists.txt" $out -Force -ErrorAction SilentlyContinue
           }
-          'Stage1 evidence bundle' | Set-Content (Join-Path $out 'README.txt')
+          git rev-parse HEAD | Set-Content (Join-Path $out 'SOURCE_COMMIT.txt')
           Compress-Archive "$out/*" 'ExternalDLSSG-Zero-Stage1-Evidence.zip' -CompressionLevel Optimal -Force
 
-      - name: Upload Stage1 evidence
+      - name: Upload Stage 1 evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
