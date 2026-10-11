@@ -78,7 +78,7 @@ public:
         Log("=== Stage 1: clean Streamline/D3D12 foundation ===");
 
         if (!InitStreamline()) return false;
-        if (!CreateWindow()) return false;
+        if (!CreateAppWindow()) return false;
         if (!CreateDevice()) return false;
         if (!CreateSwapchain()) return false;
 
@@ -160,7 +160,7 @@ private:
         return true;
     }
 
-    bool CreateWindow() {
+    bool CreateAppWindow() {
         WNDCLASSEXW wc{ sizeof(wc) };
         wc.lpfnWndProc = &WndProc;
         wc.hInstance = instance_;
