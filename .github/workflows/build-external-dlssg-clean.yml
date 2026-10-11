@@ -21,7 +21,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $names = @('part00','rest00','rest01','rest02','rest03','rest04')
+          $names = @('part00','rest00','rest01','rest02','rest03','rest040','rest041','rest042')
           $b64 = ($names | ForEach-Object { Get-Content (Join-Path 'build/externaldlssg' $_) -Raw }) -join ''
           [IO.File]::WriteAllBytes('clean-source.zip', [Convert]::FromBase64String($b64))
           $expected = 'a272bb088b3092a74eebdacbe7ba2790eb377eabe82c3da422443f5be91765e4'
@@ -69,14 +69,11 @@ jobs:
           $run = Join-Path $root 'ready_to_run'
           $source = Join-Path $root 'source'
           New-Item -ItemType Directory -Force -Path $run,$source | Out-Null
-
           Copy-Item -Path (Join-Path $env:SRC 'build/bin/*') -Destination $run -Recurse -Force
-
           foreach ($item in @('src','shaders','tools','CMakeLists.txt','build.bat','README.md','VALIDATION.md','SOURCE_MANIFEST.sha256','.gitignore')) {
             $p = Join-Path $env:SRC $item
             if (Test-Path $p) { Copy-Item -Path $p -Destination $source -Recurse -Force }
           }
-
           $slSrc = Join-Path $env:SRC 'third_party/streamline'
           $slDst = Join-Path $source 'third_party/streamline'
           New-Item -ItemType Directory -Force -Path (Join-Path $slDst 'include'),(Join-Path $slDst 'bin/x64') | Out-Null
@@ -88,9 +85,7 @@ jobs:
             $p = Join-Path $slSrc $legal
             if (Test-Path $p) { Copy-Item -Path $p -Destination $slDst -Force }
           }
-
           Copy-Item clean-source.zip (Join-Path $root 'original-clean-source.zip') -Force
-
           $exeHash = (Get-FileHash (Join-Path $run 'ExternalDLSSG.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
           @"
           ExternalDLSSG Low-Latency Windows x64
@@ -114,13 +109,11 @@ jobs:
           ExternalDLSSG.exe SHA-256:
             $exeHash
           "@ | Set-Content (Join-Path $root 'README-RUN.txt') -Encoding UTF8
-
           Get-ChildItem $run -File -Recurse | ForEach-Object {
             $h = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
             $rel = $_.FullName.Substring($root.Length + 1)
             "$h  $rel"
           } | Set-Content (Join-Path $root 'READY_TO_RUN_SHA256SUMS.txt') -Encoding ASCII
-
           $zip = Join-Path $PWD 'ExternalDLSSG-LowLatency-Windows-x64-FULL.zip'
           if (Test-Path $zip) { Remove-Item $zip -Force }
           Compress-Archive -Path "$root/*" -DestinationPath $zip -CompressionLevel Optimal
