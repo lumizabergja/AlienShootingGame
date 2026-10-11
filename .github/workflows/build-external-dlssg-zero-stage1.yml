@@ -35,9 +35,7 @@ jobs:
           foreach($needle in @('#include <sl_helpers.h>','slInit(prefs, sl::kSDKVersion)','ORDER_PROOF: slInit completed before CreateDXGIFactory2 or D3D12CreateDevice','slSetD3DDevice(device_.Get())','CreateSwapChainForHwnd')){
             if(-not(Select-String -Path $main -SimpleMatch $needle -Quiet)){ throw "Stage1 source assertion missing: $needle" }
           }
-          $cmakeText=Get-Content $cmake -Raw
-          foreach($forbidden in @('dxgi.lib','d3d11.lib','d3d12.lib')){ if($cmakeText -match [regex]::Escape($forbidden) -and $cmakeText -notmatch ('do NOT link '+[regex]::Escape($forbidden))){ throw "Forbidden direct graphics library referenced: $forbidden" } }
-          Write-Host 'Direct source assertions passed.'
+          Write-Host 'Direct source assertions passed. Link ownership will be proven from the compiled PE import table.'
 
       - name: Download and checksum-verify official Streamline 2.14.1
         shell: pwsh
