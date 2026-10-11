@@ -1,0 +1,209 @@
+name: Build External DLSSG Fresh V4 UI Fix
+
+on:
+  push:
+    branches:
+      - chatgpt-external-dlssg-ci-20261011
+    paths:
+      - '.github/workflows/build-external-dlssg-fresh-v4.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 35
+    steps:
+      - name: Checkout isolated CI branch
+        uses: actions/checkout@v4
+
+      - name: Reconstruct and verify fresh source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $parts = @('part00','part01','part02','part03')
+          $b64 = ($parts | ForEach-Object { Get-Content (Join-Path 'build/fresh3' $_) -Raw }) -join ''
+          [IO.File]::WriteAllBytes('ExternalDLSSG-Fresh-Source.zip', [Convert]::FromBase64String($b64))
+          $expected = 'a94b02d16c48c5d07f4fcc391ef12fb1063a9b235968eef5c536bfbc2f95b3b2'
+          $actual = (Get-FileHash 'ExternalDLSSG-Fresh-Source.zip' -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "Fresh source SHA-256 mismatch: $actual" }
+          New-Item -ItemType Directory -Force -Path workspace | Out-Null
+          Expand-Archive -Path 'ExternalDLSSG-Fresh-Source.zip' -DestinationPath workspace -Force
+          $src = (Resolve-Path 'workspace/ExternalDLSSG_Fresh').Path
+          "SRC=$src" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Verified fresh source: $actual"
+
+      - name: Apply audited source and UI lifecycle corrections
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & '.ci/apply-external-dlssg-fresh-fixes.ps1' -Src "$env:SRC"
+
+      - name: Download and verify latest official Streamline 2.14.1
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & "$env:SRC/tools/setup_streamline.ps1"
+
+      - name: Configure VS2022 x64 Release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmake -S "$env:SRC" -B "$env:SRC/build" -A x64 -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+
+      - name: Build warning-free Release x64 with MSVC
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmake --build "$env:SRC/build" --config Release --parallel
+
+      - name: Verify exact official production runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bin = Join-Path $env:SRC 'build/bin'
+          $official = Join-Path $env:SRC 'third_party/streamline/bin/x64'
+          $files = @('sl.interposer.dll','sl.common.dll','sl.pcl.dll','sl.reflex.dll','sl.dlss_g.dll','nvngx_dlssg.dll')
+          foreach ($dll in $files) {
+            $built = Join-Path $bin $dll; $srcDll = Join-Path $official $dll
+            if (-not (Test-Path $built)) { throw "Packaged runtime missing: $built" }
+            $a = (Get-FileHash $built -Algorithm SHA256).Hash.ToLowerInvariant()
+            $b = (Get-FileHash $srcDll -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($a -ne $b) { throw "$dll differs from official production runtime" }
+            Write-Host "$dll  $a"
+          }
+          $exe = Join-Path $bin 'ExternalDLSSG.exe'
+          if (-not (Test-Path $exe)) { throw "Compiled executable missing: $exe" }
+          Write-Host "EXE SHA-256: $((Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant())"
+
+      - name: Run Streamline startup self-test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bin = Join-Path $env:SRC 'build/bin'
+          $exe = Join-Path $bin 'ExternalDLSSG.exe'
+          $p = Start-Process -FilePath $exe -ArgumentList '--ci-selftest' -WorkingDirectory $bin -Wait -PassThru
+          $code = $p.ExitCode
+          $appLog = Join-Path $bin 'logs/ExternalDLSSG.log'
+          $slLog = Join-Path $bin 'logs/sl.log'
+          $video = (Get-CimInstance Win32_VideoController | ForEach-Object { $_.Name }) -join '; '
+          Write-Host "Video controllers: $video"
+          Write-Host "Self-test exit code: $code"
+          $text = if(Test-Path $appLog){ Get-Content $appLog -Raw } else { '' }
+          if ($code -eq 0) {
+            if ($text -notmatch 'SELFTEST: shutdown OK') { throw 'Self-test returned 0 without clean shutdown marker.' }
+          } elseif ($code -eq 20 -and $video -notmatch '(?i)nvidia') {
+            foreach($required in @("Loaded plugin 'sl.common'","Loaded plugin 'sl.dlss_g'","Loaded plugin 'sl.pcl'","Loaded plugin 'sl.reflex'",'Disabling DLSS-G since it is not supported on current hardware','Result::eErrorNoPlugins')) {
+              if ($text -notlike "*$required*") { throw "No-GPU CI self-test missing required proof: $required" }
+            }
+          } else {
+            if(Test-Path $appLog){ Get-Content $appLog -Tail 400 }
+            if(Test-Path $slLog){ Get-Content $slLog -Tail 400 }
+            throw "Unexpected Streamline self-test result $code on controllers: $video"
+          }
+
+      - name: GUI survival and visible-controls smoke test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type @'
+          using System;
+          using System.Runtime.InteropServices;
+          public static class UiProbe {
+              [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+              [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr hDlg, int nIDDlgItem);
+              [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool GetWindowRect(IntPtr hWnd, out RECT rect);
+              [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] public static extern bool IsWindowVisible(IntPtr hWnd);
+          }
+          '@
+          $bin = Join-Path $env:SRC 'build/bin'
+          $exe = Join-Path $bin 'ExternalDLSSG.exe'
+          $p = Start-Process -FilePath $exe -WorkingDirectory $bin -PassThru
+          try {
+            $main = [IntPtr]::Zero
+            for($i=0; $i -lt 20; $i++) {
+              Start-Sleep -Milliseconds 250
+              $p.Refresh()
+              if($p.HasExited) { throw "GUI exited early with code $($p.ExitCode)" }
+              $main = $p.MainWindowHandle
+              if($main -ne [IntPtr]::Zero) { break }
+            }
+            if($main -eq [IntPtr]::Zero) { throw 'Launcher never exposed a main window handle.' }
+
+            $names = @{1001='game/window list';1002='refresh button';1003='FG multiplier dropdown';1004='center-radius edit';1005='start button';1006='status box'}
+            foreach($id in @(1001,1002,1003,1004,1005,1006)) {
+              $child = [UiProbe]::GetDlgItem($main,$id)
+              if($child -eq [IntPtr]::Zero) { throw "Missing UI control $id ($($names[$id]))" }
+              $r = New-Object UiProbe+RECT
+              if(-not [UiProbe]::GetWindowRect($child,[ref]$r)) { throw "GetWindowRect failed for $id ($($names[$id]))" }
+              $w = $r.Right - $r.Left; $h = $r.Bottom - $r.Top
+              $visible = [UiProbe]::IsWindowVisible($child)
+              Write-Host "UI $id $($names[$id]): visible=$visible rect=${w}x${h}"
+              if(-not $visible -or $w -le 1 -or $h -le 1) { throw "Invisible/zero-size UI control $id ($($names[$id])): ${w}x${h}" }
+            }
+            Start-Sleep -Seconds 3
+            $p.Refresh()
+            if($p.HasExited) { throw "GUI exited during survival window with code $($p.ExitCode)" }
+            Write-Host 'Launcher survived and all six required controls are visible with non-zero geometry.'
+          } finally {
+            if(-not $p.HasExited) { Stop-Process -Id $p.Id -Force }
+          }
+
+      - name: Package complete UI-fixed project
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $name = 'ExternalDLSSG-Fresh-LowLatency-Windows-x64-FULL-UIFIX'
+          $root = Join-Path $PWD "package/$name"; $run = Join-Path $root 'ready_to_run'; $source = Join-Path $root 'source'
+          New-Item -ItemType Directory -Force -Path $run,$source | Out-Null
+          Copy-Item -Path (Join-Path $env:SRC 'build/bin/*') -Destination $run -Recurse -Force
+          foreach ($item in @('src','shaders','tools','CMakeLists.txt','build.bat','README.md','.gitignore')) {
+            $q=Join-Path $env:SRC $item; if(Test-Path $q){ Copy-Item $q -Destination $source -Recurse -Force }
+          }
+          $slSrc=Join-Path $env:SRC 'third_party/streamline'; $slDst=Join-Path $source 'third_party/streamline'
+          New-Item -ItemType Directory -Force -Path (Join-Path $slDst 'include'),(Join-Path $slDst 'lib/x64'),(Join-Path $slDst 'bin/x64') | Out-Null
+          Copy-Item (Join-Path $slSrc 'include/*') (Join-Path $slDst 'include') -Recurse -Force
+          Copy-Item (Join-Path $slSrc 'lib/x64/sl.interposer.lib') (Join-Path $slDst 'lib/x64') -Force
+          foreach($dll in @('sl.interposer.dll','sl.common.dll','sl.pcl.dll','sl.reflex.dll','sl.dlss_g.dll','nvngx_dlssg.dll')){ Copy-Item (Join-Path $slSrc "bin/x64/$dll") (Join-Path $slDst 'bin/x64') -Force }
+          foreach($legal in @('LICENSE','LICENSE.md','LICENSE.txt','NOTICE','NOTICE.md','README.md')){ $q=Join-Path $slSrc $legal; if(Test-Path $q){Copy-Item $q $slDst -Force} }
+          Remove-Item (Join-Path $run 'logs') -Recurse -Force -ErrorAction SilentlyContinue
+          $exeHash=(Get-FileHash (Join-Path $run 'ExternalDLSSG.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+          @"
+          ExternalDLSSG Fresh Low-Latency Windows x64 — UI FIX
+          Official NVIDIA Streamline v2.14.1 production runtime.
+          Fresh external DXGI/D3D12/DLSS-G project.
+
+          Validation before packaging:
+            - clean source SHA-256 gate
+            - warning-free MSVC /W4 /WX x64 Release build
+            - exact official production Streamline/DLSS-G DLL byte-match
+            - Streamline plugin-load self-test
+            - normal GUI survived startup
+            - game list, refresh, FG dropdown, radius, Start, and status controls each verified visible with non-zero window geometry
+
+          ExternalDLSSG.exe SHA-256: $exeHash
+          "@ | Set-Content (Join-Path $root 'README-RUN.txt') -Encoding UTF8
+          Get-ChildItem $run -File -Recurse | ForEach-Object { $h=(Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(); $rel=$_.FullName.Substring($root.Length+1); "$h  $rel" } | Set-Content (Join-Path $root 'READY_TO_RUN_SHA256SUMS.txt') -Encoding ASCII
+          $zip=Join-Path $PWD "$name.zip"; Compress-Archive -Path "$root/*" -DestinationPath $zip -CompressionLevel Optimal -Force
+          $zipHash=(Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant(); "$zipHash  $name.zip" | Set-Content (Join-Path $PWD "$name.zip.sha256") -Encoding ASCII
+          Write-Host "Package SHA-256: $zipHash"
+
+      - name: Upload complete UI-fixed package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ExternalDLSSG-Fresh-LowLatency-Windows-x64-FULL-UIFIX
+          path: |
+            ExternalDLSSG-Fresh-LowLatency-Windows-x64-FULL-UIFIX.zip
+            ExternalDLSSG-Fresh-LowLatency-Windows-x64-FULL-UIFIX.zip.sha256
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ExternalDLSSG-Fresh-V4-UIFIX-Diagnostics
+          path: workspace/ExternalDLSSG_Fresh/build/bin/logs/**
+          if-no-files-found: ignore
