@@ -1,0 +1,158 @@
+name: Build ExternalDLSSG Zero Stage2
+
+on:
+  push:
+    branches:
+      - chatgpt-external-dlssg-from-zero-20261011
+    paths:
+      - '.ci/from_zero_stage2/**'
+      - '.github/workflows/build-external-dlssg-zero-stage2.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 35
+    steps:
+      - name: Checkout isolated from-zero branch
+        uses: actions/checkout@v4
+
+      - name: Audit Stage 2 source before build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $src=(Resolve-Path '.ci/from_zero_stage2').Path
+          "SRC=$src" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          $main=Join-Path $src 'src/main.cpp'
+          foreach($needle in @(
+            'slInit(prefs, sl::kSDKVersion)',
+            'slSetD3DDevice(device_.Get())',
+            'slReflexSetOptions(reflex)',
+            'slReflexSleep(*token)',
+            'eSimulationStart',
+            'eSimulationEnd',
+            'eRenderSubmitStart',
+            'eRenderSubmitEnd',
+            'ePresentStart',
+            'ePresentEnd',
+            'slGetNewFrameToken',
+            'slSetConstants(constants, *token, viewport_)',
+            'GetCurrentBackBufferIndex()',
+            'slSetTagForFrame',
+            'kBufferTypeDepth',
+            'kBufferTypeMvec',
+            'kBufferTypeHUDLessColor',
+            'kBufferTypeUIAlpha',
+            'eValidUntilPresent',
+            'enableUserInterfaceRecomposition = sl::Boolean::eTrue',
+            'slDLSSGGetState',
+            'numFramesToGenerateMax',
+            'slDLSSGSetOptions'
+          )){
+            if(-not(Select-String -Path $main -SimpleMatch $needle -Quiet)){ throw "Missing required Stage2 integration element: $needle" }
+          }
+          foreach($forbidden in @('GetFrameLatencyWaitableObject','SetMaximumFrameLatency','D3D11CreateDevice','DuplicateOutput','DuplicateOutput1')){
+            if(Select-String -Path $main -SimpleMatch $forbidden -Quiet){ throw "Stage2 contains forbidden/not-yet-allowed API: $forbidden" }
+          }
+          Write-Host 'Stage2 source audit passed: DLSS-G/Reflex/resource tagging present; capture is still absent.'
+
+      - name: Download and checksum-verify official Streamline 2.14.1
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          & "$env:SRC/tools/setup_streamline.ps1"
+
+      - name: Configure VS2022 x64 Release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          cmake -S "$env:SRC" -B "$env:SRC/build" -A x64 -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+
+      - name: Build Stage 2 warning-free with MSVC
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          cmake --build "$env:SRC/build" --config Release --parallel
+
+      - name: Validate Streamline-only graphics import ownership
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $exe=Join-Path $env:SRC 'build/bin/ExternalDLSSGStage2.exe'
+          if(-not(Test-Path $exe)){ throw 'Stage2 EXE missing' }
+          $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          $vs=(& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath).Trim()
+          $dumpbin=Get-ChildItem (Join-Path $vs 'VC/Tools/MSVC') -Recurse -Filter dumpbin.exe | Where-Object { $_.FullName -match 'bin\\Hostx64\\x64\\dumpbin\.exe$' } | Sort-Object FullName -Descending | Select-Object -First 1
+          if(-not $dumpbin){ throw 'x64 dumpbin not found' }
+          $deps=& $dumpbin.FullName /nologo /dependents $exe | Out-String
+          $imports=& $dumpbin.FullName /nologo /imports $exe | Out-String
+          $deps | Set-Content (Join-Path $env:SRC 'build/bin/DEPENDENTS.txt') -Encoding UTF8
+          $imports | Set-Content (Join-Path $env:SRC 'build/bin/IMPORTS.txt') -Encoding UTF8
+          Write-Host $deps
+          if($deps -notmatch '(?i)sl\.interposer\.dll'){ throw 'sl.interposer.dll dependency missing' }
+          foreach($forbidden in @('dxgi.dll','d3d11.dll','d3d12.dll')){ if($deps -match [regex]::Escape($forbidden)){ throw "Direct dependency forbidden: $forbidden" } }
+          foreach($symbol in @('CreateDXGIFactory2','D3D12CreateDevice')){ if($imports -notmatch [regex]::Escape($symbol)){ throw "Interposed import missing: $symbol" } }
+
+      - name: Verify exact production Streamline runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $bin=Join-Path $env:SRC 'build/bin'
+          $official=Join-Path $env:SRC 'third_party/streamline/bin/x64'
+          foreach($dll in @('sl.interposer.dll','sl.common.dll','sl.pcl.dll','sl.reflex.dll','sl.dlss_g.dll','nvngx_dlssg.dll')){
+            $a=(Get-FileHash (Join-Path $bin $dll) -Algorithm SHA256).Hash.ToLowerInvariant()
+            $b=(Get-FileHash (Join-Path $official $dll) -Algorithm SHA256).Hash.ToLowerInvariant()
+            if($a -ne $b){ throw "$dll differs from official verified production SDK" }
+          }
+
+      - name: Stage 2 startup smoke test on hosted hardware
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $bin=Join-Path $env:SRC 'build/bin'; $exe=Join-Path $bin 'ExternalDLSSGStage2.exe'
+          $video=(Get-CimInstance Win32_VideoController | ForEach-Object { $_.Name }) -join '; '
+          Write-Host "Video controllers: $video"
+          $p=Start-Process -FilePath $exe -WorkingDirectory $bin -PassThru
+          Start-Sleep -Seconds 4
+          $p.Refresh()
+          $log=Join-Path $bin 'logs/ExternalDLSSG-Zero-Stage2.log'
+          if(Test-Path $log){ Get-Content $log -Tail 400 }
+          if(-not(Test-Path $log)){ throw 'Stage2 persistent log missing' }
+          $text=Get-Content $log -Raw
+          if($video -notmatch '(?i)nvidia'){
+            foreach($required in @("Loaded plugin 'sl.common'","Loaded plugin 'sl.dlss_g'","Loaded plugin 'sl.pcl'","Loaded plugin 'sl.reflex'",'Disabling DLSS-G since it is not supported on current hardware','slInit -> Result::eErrorNoPlugins')){
+              if($text -notlike "*$required*"){ throw "GPU-less CI evidence missing: $required" }
+            }
+            Write-Host 'EXPECTED_GPULESS_CI_PASS: Stage2 production plugins loaded and correctly rejected non-NVIDIA hosted hardware.'
+          } elseif($text -notmatch 'STAGE2_READY'){
+            throw 'NVIDIA-hosted Stage2 run did not reach STAGE2_READY'
+          }
+          if(-not $p.HasExited){ Stop-Process -Id $p.Id -Force }
+
+      - name: Package Stage 2 evidence
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Continue'
+          $out='ExternalDLSSG-Zero-Stage2-Evidence'
+          New-Item -ItemType Directory -Force $out | Out-Null
+          if($env:SRC){
+            $bin=Join-Path $env:SRC 'build/bin'
+            if(Test-Path $bin){ Copy-Item "$bin/*" $out -Recurse -Force -ErrorAction SilentlyContinue }
+            Copy-Item "$env:SRC/src" $out -Recurse -Force -ErrorAction SilentlyContinue
+            Copy-Item "$env:SRC/CMakeLists.txt" $out -Force -ErrorAction SilentlyContinue
+          }
+          git rev-parse HEAD | Set-Content (Join-Path $out 'SOURCE_COMMIT.txt')
+          Compress-Archive "$out/*" 'ExternalDLSSG-Zero-Stage2-Evidence.zip' -CompressionLevel Optimal -Force
+
+      - name: Upload Stage 2 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ExternalDLSSG-Zero-Stage2-Evidence
+          path: ExternalDLSSG-Zero-Stage2-Evidence.zip
+          if-no-files-found: error
+          compression-level: 0
