@@ -3,6 +3,7 @@ $ErrorActionPreference = 'Stop'
 
 $logger = Join-Path $Src 'src/Logger.cpp'
 $sl = Join-Path $Src 'src/StreamlineRuntime.cpp'
+$app = Join-Path $Src 'src/App.cpp'
 
 $loggerText = Get-Content $logger -Raw
 $oldDump = 'MiniDumpWithThreadInfo | MiniDumpWithIndirectlyReferencedMemory, &mei, nullptr, nullptr);'
@@ -18,6 +19,15 @@ if (-not $slText.Contains($oldVersion) -and -not $slText.Contains($newVersion)) 
 $slText = $slText.Replace($oldVersion, $newVersion)
 Set-Content -Path $sl -Value $slText -Encoding UTF8 -NoNewline
 
+$appText = Get-Content $app -Raw
+foreach ($id in @('IDC_LIST','IDC_REFRESH','IDC_MULT','IDC_RADIUS','IDC_START','IDC_STATUS')) {
+    $old = "(HMENU)$id"
+    $new = "reinterpret_cast<HMENU>(static_cast<INT_PTR>($id))"
+    $appText = $appText.Replace($old, $new)
+}
+Set-Content -Path $app -Value $appText -Encoding UTF8 -NoNewline
+
 if (-not (Select-String -Path $logger -Pattern 'static_cast<MINIDUMP_TYPE>' -Quiet)) { throw 'MiniDump fix validation failed.' }
 if (-not (Select-String -Path $sl -Pattern 'slInit\(pref, sl::kSDKVersion\)' -Quiet)) { throw 'Streamline SDK version fix validation failed.' }
-Write-Host 'Fresh compile fixes applied and validated.'
+if (Select-String -Path $app -Pattern '\(HMENU\)IDC_' -Quiet) { throw 'HMENU warning cleanup failed.' }
+Write-Host 'Fresh compile/API corrections applied and validated.'
