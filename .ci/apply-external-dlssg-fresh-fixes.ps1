@@ -27,9 +27,6 @@ foreach ($id in @('IDC_LIST','IDC_REFRESH','IDC_MULT','IDC_RADIUS','IDC_START','
     $new = "reinterpret_cast<HMENU>(static_cast<INT_PTR>($id))"
     $appText = $appText.Replace($old, $new)
 }
-
-# CreateWindow sends WM_SIZE before these child HWNDs are created. Force one real
-# layout pass immediately after child creation so none remain at the initial 0x0 size.
 if (-not $appText.Contains('GetClientRect(hwnd_,&rc); Layout(rc.right-rc.left,rc.bottom-rc.top);')) {
     $pattern = 'for\(HWND h:\{list_,refresh_,mult_,radius_,start_,status_\}\) setFont\(h,font_\);\s*RefreshWindows\(\); SetTimer\(hwnd_,1,500,nullptr\); ShowWindow\(hwnd_,show\); UpdateWindow\(hwnd_\); return true;'
     $replacement = "for(HWND h:{list_,refresh_,mult_,radius_,start_,status_}) setFont(h,font_);`r`n    RECT rc{}; GetClientRect(hwnd_,&rc); Layout(rc.right-rc.left,rc.bottom-rc.top);`r`n    RefreshWindows(); UpdateStatus(); SetTimer(hwnd_,1,500,nullptr); ShowWindow(hwnd_,show); UpdateWindow(hwnd_); return true;"
@@ -39,27 +36,8 @@ if (-not $appText.Contains('GetClientRect(hwnd_,&rc); Layout(rc.right-rc.left,rc
 }
 Set-Content -Path $app -Value $appText -Encoding UTF8 -NoNewline
 
-# Prefer DuplicateOutput1 (newest/lowest-overhead form), but some current Windows/driver
-# combinations expose IDXGIOutput5 yet reject DuplicateOutput1 with DXGI_ERROR_UNSUPPORTED.
-# Fall back to standard IDXGIOutput1::DuplicateOutput on the same adapter/device. This is
-# still native GPU-side Desktop Duplication and keeps the exact same D3D11->shared-D3D12 path.
 $ddaText = Get-Content $dda -Raw
 if (-not $ddaText.Contains('DuplicateOutput1 failed; trying IDXGIOutput1::DuplicateOutput')) {
-    $oldFunc = @'
-bool DdaPipeline::CreateDuplication(std::wstring& error) {
-    duplication_.Reset();
-    DXGI_FORMAT formats[]={kCaptureFormat};
-    HRESULT hr=output_->DuplicateOutput1(device11_.Get(),0,1,formats,&duplication_);
-    if(!ok(hr,L"IDXGIOutput5::DuplicateOutput1",error)) return false;
-    DXGI_OUTDUPL_DESC dd{}; duplication_->GetDesc(&dd);
-    if(dd.ModeDesc.Format!=kCaptureFormat) {
-        error=L"Desktop Duplication did not provide BGRA8. Disable Windows HDR for this low-latency build.";
-        duplication_.Reset(); return false;
-    }
-    logx::Info("Desktop Duplication active: %ux%u format=%d",dd.ModeDesc.Width,dd.ModeDesc.Height,(int)dd.ModeDesc.Format);
-    return true;
-}
-'@
     $newFunc = @'
 bool DdaPipeline::CreateDuplication(std::wstring& error) {
     duplication_.Reset();
@@ -77,7 +55,6 @@ bool DdaPipeline::CreateDuplication(std::wstring& error) {
             logx::Error("Desktop Duplication fallback unavailable: DuplicateOutput1=0x%08X QI(Output1)=0x%08X", static_cast<unsigned>(hr), static_cast<unsigned>(qhr));
             return false;
         }
-
         HRESULT legacyHr=output1->DuplicateOutput(device11_.Get(),&duplication_);
         if(FAILED(legacyHr)) {
             error=L"DXGI Desktop Duplication is unavailable. DuplicateOutput1: "+HrText(hr)+L"; DuplicateOutput: "+HrText(legacyHr);
@@ -95,8 +72,11 @@ bool DdaPipeline::CreateDuplication(std::wstring& error) {
     return true;
 }
 '@
-    if (-not $ddaText.Contains($oldFunc)) { throw 'Expected original CreateDuplication implementation not found.' }
-    $ddaText = $ddaText.Replace($oldFunc,$newFunc)
+    $pattern = '(?s)bool DdaPipeline::CreateDuplication\(std::wstring& error\) \{.*?\r?\n\}\r?\n\r?\nbool DdaPipeline::RecreateDuplication\(\)'
+    $replacement = $newFunc + "`r`n`r`nbool DdaPipeline::RecreateDuplication()"
+    $patched = [regex]::Replace($ddaText,$pattern,$replacement,1)
+    if($patched -eq $ddaText){ throw 'Could not locate bounded CreateDuplication function for DDA fallback patch.' }
+    $ddaText = $patched
 }
 Set-Content -Path $dda -Value $ddaText -Encoding UTF8 -NoNewline
 
