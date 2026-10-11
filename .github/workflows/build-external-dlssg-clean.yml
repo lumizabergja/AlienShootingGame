@@ -1,4 +1,4 @@
-name: Build External DLSSG Clean
+name: Build External DLSSG FIX2 Dev
 
 on:
   push:
@@ -17,7 +17,7 @@ jobs:
       - name: Checkout isolated build branch
         uses: actions/checkout@v4
 
-      - name: Reconstruct and verify clean source archive
+      - name: Reconstruct verified clean base
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -26,20 +26,20 @@ jobs:
           [IO.File]::WriteAllBytes('clean-source.zip', [Convert]::FromBase64String($b64))
           $expected = 'a272bb088b3092a74eebdacbe7ba2790eb377eabe82c3da422443f5be91765e4'
           $actual = (Get-FileHash clean-source.zip -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actual -ne $expected) { throw "Clean source SHA-256 mismatch: $actual" }
+          if ($actual -ne $expected) { throw "Base source SHA-256 mismatch: $actual" }
           New-Item -ItemType Directory -Force -Path workspace | Out-Null
           Expand-Archive -Path clean-source.zip -DestinationPath workspace -Force
           $src = (Resolve-Path 'workspace/ExternalDLSSG_LowLatency').Path
           "SRC=$src" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          Write-Host "Verified clean source SHA-256: $actual"
 
-      - name: Apply Streamline trust validation fix
+      - name: Apply FIX2 source exactly
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          python build/externaldlssg/fix_trust.py "$env:SRC"
-          if (-not (Select-String -Path "$env:SRC/src/Common.cpp" -Pattern 'kPinnedInterposerSha256' -Quiet)) { throw 'Trust fix was not applied to Common.cpp' }
-          if (-not (Select-String -Path "$env:SRC/CMakeLists.txt" -Pattern 'crypt32 bcrypt' -Quiet)) { throw 'bcrypt link fix was not applied' }
+          python build/externaldlssg/fix2_apply.py "$env:SRC"
+          if (-not (Select-String -Path "$env:SRC/CMakeLists.txt" -Pattern 'bin/x64/development' -Quiet)) { throw 'Development runtime patch missing' }
+          if (-not (Select-String -Path "$env:SRC/src/StreamlineRuntime.cpp" -Pattern 'AddDllDirectory' -Quiet)) { throw 'DLL search patch missing' }
+          if (-not (Select-String -Path "$env:SRC/src/StreamlineRuntime.cpp" -Pattern 'slGetFeatureRequirements' -Quiet)) { throw 'Feature validation patch missing' }
 
       - name: Download and verify official Streamline 2.14.1
         shell: pwsh
@@ -59,39 +59,47 @@ jobs:
           $ErrorActionPreference = 'Stop'
           cmake --build "$env:SRC/build" --config Release --parallel
 
-      - name: Validate compiled runtime
+      - name: Validate development runtime and executable
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $exe = Join-Path $env:SRC 'build/bin/ExternalDLSSG.exe'
+          $bin = Join-Path $env:SRC 'build/bin'
+          $dev = Join-Path $env:SRC 'third_party/streamline/bin/x64/development'
+          $exe = Join-Path $bin 'ExternalDLSSG.exe'
           if (-not (Test-Path $exe)) { throw "Compiled executable missing: $exe" }
-          $interposer = Join-Path $env:SRC 'build/bin/sl.interposer.dll'
-          $interposerHash = (Get-FileHash $interposer -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($interposerHash -ne '8c87c9499461da561edd529aa9bf7831d67d7b94ebb1c1a5ed54ef4934e1ea4c') { throw "Unexpected sl.interposer.dll SHA-256: $interposerHash" }
-          Get-ChildItem (Join-Path $env:SRC 'build/bin') | Format-Table Name,Length
-          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
-          Write-Host "ExternalDLSSG.exe SHA-256: $hash"
-          Write-Host "Pinned sl.interposer.dll SHA-256 verified: $interposerHash"
+          foreach ($dll in @('sl.interposer.dll','sl.common.dll','sl.pcl.dll','sl.reflex.dll','sl.dlss_g.dll','nvngx_dlssg.dll')) {
+            $built = Join-Path $bin $dll
+            $official = Join-Path $dev $dll
+            if (-not (Test-Path $built)) { throw "Runtime DLL missing: $built" }
+            if (-not (Test-Path $official)) { throw "Official development DLL missing: $official" }
+            $a = (Get-FileHash $built -Algorithm SHA256).Hash.ToLowerInvariant()
+            $b = (Get-FileHash $official -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($a -ne $b) { throw "$dll does not match official development runtime" }
+            Write-Host "$dll $a"
+          }
+          $exeHash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          Write-Host "ExternalDLSSG.exe SHA-256: $exeHash"
 
-      - name: Create complete ready-to-run and rebuildable package
+      - name: Create full FIX2 package
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $root = Join-Path $PWD 'package/ExternalDLSSG-LowLatency-Windows-x64-FULL-FIX1'
+          $name = 'ExternalDLSSG-LowLatency-Windows-x64-FULL-FIX2-DEV'
+          $root = Join-Path $PWD "package/$name"
           $run = Join-Path $root 'ready_to_run'
           $source = Join-Path $root 'source'
           New-Item -ItemType Directory -Force -Path $run,$source | Out-Null
           Copy-Item -Path (Join-Path $env:SRC 'build/bin/*') -Destination $run -Recurse -Force
-          foreach ($item in @('src','shaders','tools','CMakeLists.txt','build.bat','README.md','VALIDATION.md','SOURCE_MANIFEST.sha256','FIX-NOTES.txt','.gitignore')) {
+          foreach ($item in @('src','shaders','tools','CMakeLists.txt','build.bat','README.md','VALIDATION.md','SOURCE_MANIFEST.sha256','FIX-NOTES.txt','FIX2-NOTES.txt','.gitignore')) {
             $p = Join-Path $env:SRC $item
             if (Test-Path $p) { Copy-Item -Path $p -Destination $source -Recurse -Force }
           }
           $slSrc = Join-Path $env:SRC 'third_party/streamline'
           $slDst = Join-Path $source 'third_party/streamline'
-          New-Item -ItemType Directory -Force -Path (Join-Path $slDst 'include'),(Join-Path $slDst 'bin/x64') | Out-Null
+          New-Item -ItemType Directory -Force -Path (Join-Path $slDst 'include'),(Join-Path $slDst 'bin/x64/development') | Out-Null
           Copy-Item -Path (Join-Path $slSrc 'include/*') -Destination (Join-Path $slDst 'include') -Recurse -Force
           foreach ($dll in @('sl.interposer.dll','sl.common.dll','sl.pcl.dll','sl.reflex.dll','sl.dlss_g.dll','nvngx_dlssg.dll')) {
-            Copy-Item -Path (Join-Path $slSrc "bin/x64/$dll") -Destination (Join-Path $slDst 'bin/x64') -Force
+            Copy-Item -Path (Join-Path $slSrc "bin/x64/development/$dll") -Destination (Join-Path $slDst 'bin/x64/development') -Force
           }
           foreach ($legal in @('LICENSE','LICENSE.md','LICENSE.txt','NOTICE','NOTICE.md','README.md')) {
             $p = Join-Path $slSrc $legal
@@ -99,28 +107,20 @@ jobs:
           }
           $exeHash = (Get-FileHash (Join-Path $run 'ExternalDLSSG.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
           @"
-          ExternalDLSSG Low-Latency Windows x64 - FIX1
+          ExternalDLSSG Low-Latency Windows x64 - FIX2 DEVELOPMENT RUNTIME
 
-          FIX1:
-            Corrects WinVerifyTrust 0x800B0109 on systems where the NVIDIA certificate chain
-            is not already cached. Normal Authenticode validation is attempted first.
-            If the local chain cannot be built, the app only accepts the exact official
-            Streamline 2.14.1 sl.interposer.dll by pinned SHA-256.
+          This build uses NVIDIA's official Streamline 2.14.1 DEVELOPMENT runtime.
+          The standalone project has no NVIDIA-issued production application/project ID;
+          production NGX builds disable NGX-based features when the temporary development ID is used.
 
-          READY TO RUN:
-            Open ready_to_run and run ExternalDLSSG.exe.
-            Keep the shaders folder and NVIDIA Streamline DLLs beside the executable.
+          FIX2 also registers the executable directory with AddDllDirectory so Streamline/NGX
+          dependencies remain discoverable after DLL search hardening.
 
-          REBUILD:
-            The source folder contains the corrected complete project, Streamline 2.14.1 headers,
-            and the exact runtime DLLs needed by this integration.
-            Visual Studio 2022 + Windows 10/11 SDK + CMake 3.24+ are required.
+          Keep every file in ready_to_run together. Run ExternalDLSSG.exe from that folder.
+          Development DLSS-G may display NVIDIA development/debug indicators and is not a production shipping runtime.
 
           Official Streamline 2.14.1 archive SHA-256:
             92c4d954631a1710da86ca3fa8d5034f2b9503838c95fc4ae977ae149319781b
-
-          Pinned official sl.interposer.dll SHA-256:
-            8c87c9499461da561edd529aa9bf7831d67d7b94ebb1c1a5ed54ef4934e1ea4c
 
           ExternalDLSSG.exe SHA-256:
             $exeHash
@@ -130,20 +130,19 @@ jobs:
             $rel = $_.FullName.Substring($root.Length + 1)
             "$h  $rel"
           } | Set-Content (Join-Path $root 'READY_TO_RUN_SHA256SUMS.txt') -Encoding ASCII
-          $zip = Join-Path $PWD 'ExternalDLSSG-LowLatency-Windows-x64-FULL-FIX1.zip'
+          $zip = Join-Path $PWD "$name.zip"
           if (Test-Path $zip) { Remove-Item $zip -Force }
           Compress-Archive -Path "$root/*" -DestinationPath $zip -CompressionLevel Optimal
           $zipHash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$zipHash  ExternalDLSSG-LowLatency-Windows-x64-FULL-FIX1.zip" | Set-Content (Join-Path $PWD 'ExternalDLSSG-LowLatency-Windows-x64-FULL-FIX1.zip.sha256') -Encoding ASCII
-          Get-Item $zip | Format-List FullName,Length
+          "$zipHash  $name.zip" | Set-Content (Join-Path $PWD "$name.zip.sha256") -Encoding ASCII
           Write-Host "Package SHA-256: $zipHash"
 
-      - name: Upload complete Windows package
+      - name: Upload FIX2 Windows package
         uses: actions/upload-artifact@v4
         with:
-          name: ExternalDLSSG-LowLatency-Windows-x64-FULL-FIX1
+          name: ExternalDLSSG-LowLatency-Windows-x64-FULL-FIX2-DEV
           path: |
-            ExternalDLSSG-LowLatency-Windows-x64-FULL-FIX1.zip
-            ExternalDLSSG-LowLatency-Windows-x64-FULL-FIX1.zip.sha256
+            ExternalDLSSG-LowLatency-Windows-x64-FULL-FIX2-DEV.zip
+            ExternalDLSSG-LowLatency-Windows-x64-FULL-FIX2-DEV.zip.sha256
           if-no-files-found: error
           compression-level: 0
