@@ -61,8 +61,15 @@ jobs:
           $ErrorActionPreference='Stop'
           $exe=Join-Path $env:SRC 'build/bin/ExternalDLSSG.exe'
           if(-not(Test-Path $exe)){ throw 'Compiled EXE missing' }
-          $deps=& dumpbin /nologo /dependents $exe | Out-String
-          $imports=& dumpbin /nologo /imports $exe | Out-String
+          $vswhere=Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio/Installer/vswhere.exe'
+          if(-not(Test-Path $vswhere)){ throw 'vswhere.exe missing from Windows runner' }
+          $vs=(& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath).Trim()
+          if(-not $vs){ throw 'Unable to locate Visual Studio C++ toolchain' }
+          $dumpbin=Get-ChildItem (Join-Path $vs 'VC/Tools/MSVC') -Recurse -Filter dumpbin.exe | Where-Object { $_.FullName -match 'bin\\Hostx64\\x64\\dumpbin\.exe$' } | Sort-Object FullName -Descending | Select-Object -First 1
+          if(-not $dumpbin){ throw 'Unable to locate x64 dumpbin.exe' }
+          Write-Host "Using dumpbin: $($dumpbin.FullName)"
+          $deps=& $dumpbin.FullName /nologo /dependents $exe | Out-String
+          $imports=& $dumpbin.FullName /nologo /imports $exe | Out-String
           $deps | Set-Content (Join-Path $env:SRC 'build/bin/DEPENDENTS.txt') -Encoding UTF8
           $imports | Set-Content (Join-Path $env:SRC 'build/bin/IMPORTS.txt') -Encoding UTF8
           Write-Host $deps
