@@ -18,6 +18,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -121,7 +122,7 @@ public:
         if (!CreateAppWindow()) return false;
         if (!CreateDeviceAndQueue()) return false;
         if (!ConfigureReflex()) return false;
-        if (!LoadAndQueryDLSSG()) return false;
+        if (!QueryDLSSG()) return false;
         if (!CreateSwapchain()) return false;
         if (!CreateDescriptorsAndBackbuffers()) return false;
         if (!CreateSyntheticInputs()) return false;
@@ -246,7 +247,6 @@ private:
             Log("Adapter " + std::to_string(index) + ": " + Narrow(desc.Description) + " DLSS-G=" + sl::getResultAsStr(support));
             if (support == sl::Result::eOk) {
                 adapter_ = candidate;
-                adapterInfo_ = info;
                 break;
             }
         }
@@ -291,9 +291,7 @@ private:
         return true;
     }
 
-    bool LoadAndQueryDLSSG() {
-        if (!SlOk(slSetFeatureLoaded(sl::kFeatureDLSS_G, true), "slSetFeatureLoaded(DLSS-G,true)")) return false;
-
+    bool QueryDLSSG() {
         sl::DLSSGState state{};
         const sl::Result stateResult = slDLSSGGetState(viewport_, state, nullptr);
         if (!SlOk(stateResult, "slDLSSGGetState(initial)")) return false;
@@ -331,7 +329,7 @@ private:
             return false;
         }
         factory_->MakeWindowAssociation(hwnd_, DXGI_MWA_NO_ALT_ENTER);
-        Log("Flip-discard swapchain created after DLSS-G plugin was loaded");
+        Log("Flip-discard swapchain created with DLSS-G already loaded by slInit");
         return true;
     }
 
@@ -489,6 +487,7 @@ private:
         options_.onErrorCallback = &OnPresentApiError;
         options_.enableUserInterfaceRecomposition = sl::Boolean::eTrue;
         if (!SlOk(slDLSSGSetOptions(viewport_, options_), "slDLSSGSetOptions")) return false;
+        dlssgConfigured_ = true;
         Log("DLSS-G enabled with UI recomposition and multiplier " + std::to_string(generatedFrames_ + 1));
         return true;
     }
@@ -513,7 +512,7 @@ private:
         return barrier;
     }
 
-    bool BuildConstants(sl::Constants& constants) {
+    void BuildConstants(sl::Constants& constants) const {
         const float nearZ = 0.1f;
         const float farZ = 1000.0f;
         const float fov = XMConvertToRadians(60.0f);
@@ -545,7 +544,6 @@ private:
         constants.orthographicProjection = sl::Boolean::eFalse;
         constants.motionVectorsDilated = sl::Boolean::eFalse;
         constants.motionVectorsJittered = sl::Boolean::eFalse;
-        return true;
     }
 
     bool TagInputs(const sl::FrameToken& token) {
@@ -568,7 +566,7 @@ private:
         const sl::Extent extent{0, 0, kWidth, kHeight};
         sl::ResourceTag tags[] = {
             {&depthRes, sl::kBufferTypeDepth, sl::ResourceLifecycle::eValidUntilPresent, &extent},
-            {&mvecRes, sl::kBufferTypeMvec, sl::ResourceLifecycle::eValidUntilPresent, &extent},
+            {&mvecRes, sl::kBufferTypeMotionVectors, sl::ResourceLifecycle::eValidUntilPresent, &extent},
             {&hudlessRes, sl::kBufferTypeHUDLessColor, sl::ResourceLifecycle::eValidUntilPresent, &extent},
             {&uiAlphaRes, sl::kBufferTypeUIAlpha, sl::ResourceLifecycle::eValidUntilPresent, &extent}
         };
@@ -695,7 +693,7 @@ private:
 
     void Shutdown() {
         WaitForGpuIdle();
-        if (dlssgConfigured_) {
+        if (dlssgConfigured_ && slInitialized_) {
             options_.mode = sl::DLSSGMode::eOff;
             slDLSSGSetOptions(viewport_, options_);
             dlssgConfigured_ = false;
@@ -735,12 +733,11 @@ private:
     HWND hwnd_{};
     bool running_{true};
     bool slInitialized_{};
-    bool dlssgConfigured_{true};
+    bool dlssgConfigured_{};
     std::wstring exeDir_;
     std::wstring logDir_;
 
     sl::ViewportHandle viewport_{0};
-    sl::AdapterInfo adapterInfo_{};
     sl::DLSSGOptions options_{};
     uint32_t generatedFrames_{1};
     uint32_t frameIndex_{};
