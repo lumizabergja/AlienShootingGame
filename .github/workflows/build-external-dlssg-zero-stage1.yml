@@ -1,0 +1,126 @@
+name: Build ExternalDLSSG Zero Stage1
+
+on:
+  push:
+    branches:
+      - chatgpt-external-dlssg-from-zero-20261011
+    paths:
+      - '.ci/ExternalDLSSG_Zero_Stage1.zip'
+      - '.github/workflows/build-external-dlssg-zero-stage1.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 35
+    steps:
+      - name: Checkout isolated from-zero branch
+        uses: actions/checkout@v4
+
+      - name: Verify and unpack clean Stage 1 source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $archive='.ci/ExternalDLSSG_Zero_Stage1.zip'
+          $expected='782a8050d980839545df41f14268e143d14f2e51ad7214fb72876e1c8a2c0d54'
+          $actual=(Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($actual -ne $expected){ throw "Stage1 source SHA mismatch: $actual" }
+          New-Item -ItemType Directory -Force workspace | Out-Null
+          Expand-Archive $archive workspace -Force
+          $src=(Resolve-Path 'workspace/ExternalDLSSG_Zero').Path
+          "SRC=$src" | Out-File $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Verified Stage1 source: $actual"
+
+      - name: Verify official Streamline 2.14.1 SDK
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          & "$env:SRC/tools/setup_streamline.ps1"
+
+      - name: Configure Visual Studio 2022 x64 Release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          cmake -S "$env:SRC" -B "$env:SRC/build" -A x64 -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+
+      - name: Build warning-free with MSVC
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          cmake --build "$env:SRC/build" --config Release --parallel
+
+      - name: Prove Streamline owns D3D12 and DXGI imports
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $exe=Join-Path $env:SRC 'build/bin/ExternalDLSSG.exe'
+          if(-not (Test-Path $exe)){ throw 'Compiled EXE missing' }
+          $deps=& dumpbin /nologo /dependents $exe | Out-String
+          $imports=& dumpbin /nologo /imports $exe | Out-String
+          $deps | Set-Content (Join-Path $env:SRC 'build/bin/DEPENDENTS.txt') -Encoding UTF8
+          $imports | Set-Content (Join-Path $env:SRC 'build/bin/IMPORTS.txt') -Encoding UTF8
+          Write-Host $deps
+          if($deps -notmatch '(?i)sl\.interposer\.dll'){ throw 'EXE does not depend on sl.interposer.dll' }
+          foreach($forbidden in @('dxgi.dll','d3d11.dll','d3d12.dll')){
+            if($deps -match [regex]::Escape($forbidden)){ throw "EXE incorrectly links directly to $forbidden" }
+          }
+          foreach($symbol in @('CreateDXGIFactory2','D3D12CreateDevice')){
+            if($imports -notmatch [regex]::Escape($symbol)){ throw "Expected interposed import missing: $symbol" }
+          }
+          Write-Host 'PASS: no direct DXGI/D3D11/D3D12 DLL dependency; Streamline interposer is the graphics import owner.'
+
+      - name: Verify exact production runtime files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $bin=Join-Path $env:SRC 'build/bin'
+          $official=Join-Path $env:SRC 'third_party/streamline/bin/x64'
+          foreach($dll in @('sl.interposer.dll','sl.common.dll','sl.pcl.dll','sl.reflex.dll','sl.dlss_g.dll','nvngx_dlssg.dll')){
+            $a=Join-Path $bin $dll; $b=Join-Path $official $dll
+            if(-not (Test-Path $a)){ throw "Runtime missing from build: $dll" }
+            if(-not (Test-Path $b)){ throw "Runtime missing from official SDK: $dll" }
+            $ha=(Get-FileHash $a -Algorithm SHA256).Hash.ToLowerInvariant()
+            $hb=(Get-FileHash $b -Algorithm SHA256).Hash.ToLowerInvariant()
+            if($ha -ne $hb){ throw "$dll differs from verified official production SDK" }
+            Write-Host "$dll $ha"
+          }
+
+      - name: Startup behavior smoke test on hosted hardware
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $bin=Join-Path $env:SRC 'build/bin'; $exe=Join-Path $bin 'ExternalDLSSG.exe'
+          $p=Start-Process -FilePath $exe -WorkingDirectory $bin -PassThru
+          Start-Sleep -Seconds 5
+          $p.Refresh()
+          $log=Join-Path $bin 'logs/ExternalDLSSG-Zero.log'
+          if(Test-Path $log){ Get-Content $log -Tail 300 }
+          # Hosted runners have no RTX gaming GPU. Either the app remains open with its
+          # diagnostic dialog/window, or exits cleanly after an explicit unsupported-hardware path.
+          if(-not $p.HasExited){ Stop-Process -Id $p.Id -Force }
+          if(-not (Test-Path $log)){ throw 'Stage1 did not create its persistent startup log' }
+          $text=Get-Content $log -Raw
+          if($text -notmatch 'Streamline initialized before any DXGI/D3D calls'){ throw 'slInit ordering proof missing from log' }
+
+      - name: Package Stage1 evidence
+        if: always()
+        shell: pwsh
+        run: |
+          $out='ExternalDLSSG-Zero-Stage1-Evidence'
+          New-Item -ItemType Directory -Force $out | Out-Null
+          $bin=Join-Path $env:SRC 'build/bin'
+          if(Test-Path $bin){ Copy-Item "$bin/*" $out -Recurse -Force -ErrorAction SilentlyContinue }
+          if(Test-Path $env:SRC){ Copy-Item "$env:SRC/src" $out -Recurse -Force; Copy-Item "$env:SRC/CMakeLists.txt" $out -Force }
+          Compress-Archive "$out/*" 'ExternalDLSSG-Zero-Stage1-Evidence.zip' -CompressionLevel Optimal -Force
+
+      - name: Upload Stage1 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ExternalDLSSG-Zero-Stage1-Evidence
+          path: ExternalDLSSG-Zero-Stage1-Evidence.zip
+          if-no-files-found: error
+          compression-level: 0
