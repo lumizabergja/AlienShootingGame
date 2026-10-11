@@ -33,6 +33,14 @@ jobs:
           "SRC=$src" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           Write-Host "Verified clean source SHA-256: $actual"
 
+      - name: Apply Streamline trust validation fix
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python build/externaldlssg/fix_trust.py "$env:SRC"
+          if (-not (Select-String -Path "$env:SRC/src/Common.cpp" -Pattern 'kPinnedInterposerSha256' -Quiet)) { throw 'Trust fix was not applied to Common.cpp' }
+          if (-not (Select-String -Path "$env:SRC/CMakeLists.txt" -Pattern 'crypt32 bcrypt' -Quiet)) { throw 'bcrypt link fix was not applied' }
+
       - name: Download and verify official Streamline 2.14.1
         shell: pwsh
         run: |
@@ -57,20 +65,24 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $exe = Join-Path $env:SRC 'build/bin/ExternalDLSSG.exe'
           if (-not (Test-Path $exe)) { throw "Compiled executable missing: $exe" }
+          $interposer = Join-Path $env:SRC 'build/bin/sl.interposer.dll'
+          $interposerHash = (Get-FileHash $interposer -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($interposerHash -ne '8c87c9499461da561edd529aa9bf7831d67d7b94ebb1c1a5ed54ef4934e1ea4c') { throw "Unexpected sl.interposer.dll SHA-256: $interposerHash" }
           Get-ChildItem (Join-Path $env:SRC 'build/bin') | Format-Table Name,Length
           $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
           Write-Host "ExternalDLSSG.exe SHA-256: $hash"
+          Write-Host "Pinned sl.interposer.dll SHA-256 verified: $interposerHash"
 
       - name: Create complete ready-to-run and rebuildable package
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $root = Join-Path $PWD 'package/ExternalDLSSG-LowLatency-Windows-x64-FULL'
+          $root = Join-Path $PWD 'package/ExternalDLSSG-LowLatency-Windows-x64-FULL-FIX1'
           $run = Join-Path $root 'ready_to_run'
           $source = Join-Path $root 'source'
           New-Item -ItemType Directory -Force -Path $run,$source | Out-Null
           Copy-Item -Path (Join-Path $env:SRC 'build/bin/*') -Destination $run -Recurse -Force
-          foreach ($item in @('src','shaders','tools','CMakeLists.txt','build.bat','README.md','VALIDATION.md','SOURCE_MANIFEST.sha256','.gitignore')) {
+          foreach ($item in @('src','shaders','tools','CMakeLists.txt','build.bat','README.md','VALIDATION.md','SOURCE_MANIFEST.sha256','FIX-NOTES.txt','.gitignore')) {
             $p = Join-Path $env:SRC $item
             if (Test-Path $p) { Copy-Item -Path $p -Destination $source -Recurse -Force }
           }
@@ -85,26 +97,30 @@ jobs:
             $p = Join-Path $slSrc $legal
             if (Test-Path $p) { Copy-Item -Path $p -Destination $slDst -Force }
           }
-          Copy-Item clean-source.zip (Join-Path $root 'original-clean-source.zip') -Force
           $exeHash = (Get-FileHash (Join-Path $run 'ExternalDLSSG.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
           @"
-          ExternalDLSSG Low-Latency Windows x64
+          ExternalDLSSG Low-Latency Windows x64 - FIX1
+
+          FIX1:
+            Corrects WinVerifyTrust 0x800B0109 on systems where the NVIDIA certificate chain
+            is not already cached. Normal Authenticode validation is attempted first.
+            If the local chain cannot be built, the app only accepts the exact official
+            Streamline 2.14.1 sl.interposer.dll by pinned SHA-256.
 
           READY TO RUN:
             Open ready_to_run and run ExternalDLSSG.exe.
             Keep the shaders folder and NVIDIA Streamline DLLs beside the executable.
 
           REBUILD:
-            The source folder contains the complete project, Streamline 2.14.1 headers,
-            and the exact signed runtime DLLs needed by this integration.
+            The source folder contains the corrected complete project, Streamline 2.14.1 headers,
+            and the exact runtime DLLs needed by this integration.
             Visual Studio 2022 + Windows 10/11 SDK + CMake 3.24+ are required.
-            Configure x64 Release and build the ExternalDLSSG target.
-
-          Clean source archive SHA-256:
-            a272bb088b3092a74eebdacbe7ba2790eb377eabe82c3da422443f5be91765e4
 
           Official Streamline 2.14.1 archive SHA-256:
             92c4d954631a1710da86ca3fa8d5034f2b9503838c95fc4ae977ae149319781b
+
+          Pinned official sl.interposer.dll SHA-256:
+            8c87c9499461da561edd529aa9bf7831d67d7b94ebb1c1a5ed54ef4934e1ea4c
 
           ExternalDLSSG.exe SHA-256:
             $exeHash
@@ -114,20 +130,20 @@ jobs:
             $rel = $_.FullName.Substring($root.Length + 1)
             "$h  $rel"
           } | Set-Content (Join-Path $root 'READY_TO_RUN_SHA256SUMS.txt') -Encoding ASCII
-          $zip = Join-Path $PWD 'ExternalDLSSG-LowLatency-Windows-x64-FULL.zip'
+          $zip = Join-Path $PWD 'ExternalDLSSG-LowLatency-Windows-x64-FULL-FIX1.zip'
           if (Test-Path $zip) { Remove-Item $zip -Force }
           Compress-Archive -Path "$root/*" -DestinationPath $zip -CompressionLevel Optimal
           $zipHash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$zipHash  ExternalDLSSG-LowLatency-Windows-x64-FULL.zip" | Set-Content (Join-Path $PWD 'ExternalDLSSG-LowLatency-Windows-x64-FULL.zip.sha256') -Encoding ASCII
+          "$zipHash  ExternalDLSSG-LowLatency-Windows-x64-FULL-FIX1.zip" | Set-Content (Join-Path $PWD 'ExternalDLSSG-LowLatency-Windows-x64-FULL-FIX1.zip.sha256') -Encoding ASCII
           Get-Item $zip | Format-List FullName,Length
           Write-Host "Package SHA-256: $zipHash"
 
       - name: Upload complete Windows package
         uses: actions/upload-artifact@v4
         with:
-          name: ExternalDLSSG-LowLatency-Windows-x64-FULL
+          name: ExternalDLSSG-LowLatency-Windows-x64-FULL-FIX1
           path: |
-            ExternalDLSSG-LowLatency-Windows-x64-FULL.zip
-            ExternalDLSSG-LowLatency-Windows-x64-FULL.zip.sha256
+            ExternalDLSSG-LowLatency-Windows-x64-FULL-FIX1.zip
+            ExternalDLSSG-LowLatency-Windows-x64-FULL-FIX1.zip.sha256
           if-no-files-found: error
           compression-level: 0
