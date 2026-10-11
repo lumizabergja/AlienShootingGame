@@ -1,0 +1,165 @@
+name: Build External DLSSG Fresh V2
+
+on:
+  push:
+    branches:
+      - chatgpt-external-dlssg-ci-20261011
+    paths:
+      - '.github/workflows/build-external-dlssg-fresh-v2.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 35
+    steps:
+      - name: Checkout isolated CI branch
+        uses: actions/checkout@v4
+
+      - name: Reconstruct and verify fresh source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $parts = @('part00','part01','part02','part03')
+          $b64 = ($parts | ForEach-Object { Get-Content (Join-Path 'build/fresh3' $_) -Raw }) -join ''
+          [IO.File]::WriteAllBytes('ExternalDLSSG-Fresh-Source.zip', [Convert]::FromBase64String($b64))
+          $expected = 'a94b02d16c48c5d07f4fcc391ef12fb1063a9b235968eef5c536bfbc2f95b3b2'
+          $actual = (Get-FileHash 'ExternalDLSSG-Fresh-Source.zip' -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "Fresh source SHA-256 mismatch: $actual" }
+          New-Item -ItemType Directory -Force -Path workspace | Out-Null
+          Expand-Archive -Path 'ExternalDLSSG-Fresh-Source.zip' -DestinationPath workspace -Force
+          $src = (Resolve-Path 'workspace/ExternalDLSSG_Fresh').Path
+          "SRC=$src" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Verified fresh source: $actual"
+
+      - name: Apply audited source corrections
+        shell: pwsh
+        run: |
+          & '.ci/apply-external-dlssg-fresh-fixes.ps1' -Src "$env:SRC"
+
+      - name: Download and verify latest official Streamline 2.14.1
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & "$env:SRC/tools/setup_streamline.ps1"
+
+      - name: Configure VS2022 x64 Release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmake -S "$env:SRC" -B "$env:SRC/build" -A x64 -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+
+      - name: Build Release x64 with MSVC
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmake --build "$env:SRC/build" --config Release --parallel
+
+      - name: Verify exact official production runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bin = Join-Path $env:SRC 'build/bin'
+          $official = Join-Path $env:SRC 'third_party/streamline/bin/x64'
+          $files = @('sl.interposer.dll','sl.common.dll','sl.pcl.dll','sl.reflex.dll','sl.dlss_g.dll','nvngx_dlssg.dll')
+          foreach ($dll in $files) {
+            $built = Join-Path $bin $dll; $srcDll = Join-Path $official $dll
+            if (-not (Test-Path $built)) { throw "Packaged runtime missing: $built" }
+            $a = (Get-FileHash $built -Algorithm SHA256).Hash.ToLowerInvariant()
+            $b = (Get-FileHash $srcDll -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($a -ne $b) { throw "$dll differs from official production runtime" }
+            Write-Host "$dll  $a"
+          }
+          $exe = Join-Path $bin 'ExternalDLSSG.exe'
+          if (-not (Test-Path $exe)) { throw "Compiled executable missing: $exe" }
+          Write-Host "EXE SHA-256: $((Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant())"
+
+      - name: Run Streamline startup self-test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bin = Join-Path $env:SRC 'build/bin'
+          Push-Location $bin
+          try {
+            & '.\ExternalDLSSG.exe' --ci-selftest
+            $code = $LASTEXITCODE
+            Write-Host "Self-test exit code: $code"
+            if ($code -ne 0) {
+              if (Test-Path '.\logs\ExternalDLSSG.log') { Get-Content '.\logs\ExternalDLSSG.log' -Tail 400 }
+              if (Test-Path '.\logs\sl.log') { Get-Content '.\logs\sl.log' -Tail 400 }
+              throw "Streamline self-test failed with exit code $code"
+            }
+          } finally { Pop-Location }
+
+      - name: GUI survival smoke test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bin = Join-Path $env:SRC 'build/bin'
+          $exe = Join-Path $bin 'ExternalDLSSG.exe'
+          $p = Start-Process -FilePath $exe -WorkingDirectory $bin -PassThru
+          Start-Sleep -Seconds 5
+          $p.Refresh()
+          if ($p.HasExited) {
+            Write-Host "GUI exited early with code $($p.ExitCode)"
+            $log = Join-Path $bin 'logs/ExternalDLSSG.log'
+            if (Test-Path $log) { Get-Content $log -Tail 400 }
+            $crash = Join-Path $bin 'logs/ExternalDLSSG-crash.txt'
+            if (Test-Path $crash) { Get-Content $crash -Tail 400 }
+            throw 'GUI survival smoke test failed.'
+          }
+          Write-Host 'GUI survived startup for 5 seconds.'
+          Stop-Process -Id $p.Id -Force
+
+      - name: Package complete project
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $name = 'ExternalDLSSG-Fresh-LowLatency-Windows-x64-FULL'
+          $root = Join-Path $PWD "package/$name"; $run = Join-Path $root 'ready_to_run'; $source = Join-Path $root 'source'
+          New-Item -ItemType Directory -Force -Path $run,$source | Out-Null
+          Copy-Item -Path (Join-Path $env:SRC 'build/bin/*') -Destination $run -Recurse -Force
+          foreach ($item in @('src','shaders','tools','CMakeLists.txt','build.bat','README.md','.gitignore')) {
+            $p=Join-Path $env:SRC $item; if(Test-Path $p){ Copy-Item $p -Destination $source -Recurse -Force }
+          }
+          $slSrc=Join-Path $env:SRC 'third_party/streamline'; $slDst=Join-Path $source 'third_party/streamline'
+          New-Item -ItemType Directory -Force -Path (Join-Path $slDst 'include'),(Join-Path $slDst 'lib/x64'),(Join-Path $slDst 'bin/x64') | Out-Null
+          Copy-Item (Join-Path $slSrc 'include/*') (Join-Path $slDst 'include') -Recurse -Force
+          Copy-Item (Join-Path $slSrc 'lib/x64/sl.interposer.lib') (Join-Path $slDst 'lib/x64') -Force
+          foreach($dll in @('sl.interposer.dll','sl.common.dll','sl.pcl.dll','sl.reflex.dll','sl.dlss_g.dll','nvngx_dlssg.dll')){ Copy-Item (Join-Path $slSrc "bin/x64/$dll") (Join-Path $slDst 'bin/x64') -Force }
+          foreach($legal in @('LICENSE','LICENSE.md','LICENSE.txt','NOTICE','NOTICE.md','README.md')){ $p=Join-Path $slSrc $legal; if(Test-Path $p){Copy-Item $p $slDst -Force} }
+          $exeHash=(Get-FileHash (Join-Path $run 'ExternalDLSSG.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
+          @"
+          ExternalDLSSG Fresh Low-Latency Windows x64
+          Clean rebuild from scratch using official NVIDIA Streamline v2.14.1 production runtime.
+          Custom-engine Project ID; no borrowed/spoofed NVIDIA application ID.
+          Fully external DXGI Desktop Duplication path; no game injection/hooks/process-memory access.
+          CI passed: source SHA gate, MSVC x64 Release build, production DLL byte-match, Streamline self-test, GUI survival test.
+          Actual DLSS-G generation still requires testing on an RTX-capable PC because hosted CI has no RTX gaming GPU.
+          ExternalDLSSG.exe SHA-256: $exeHash
+          "@ | Set-Content (Join-Path $root 'README-RUN.txt') -Encoding UTF8
+          Get-ChildItem $run -File -Recurse | ForEach-Object { $h=(Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(); $rel=$_.FullName.Substring($root.Length+1); "$h  $rel" } | Set-Content (Join-Path $root 'READY_TO_RUN_SHA256SUMS.txt') -Encoding ASCII
+          $zip=Join-Path $PWD "$name.zip"; Compress-Archive -Path "$root/*" -DestinationPath $zip -CompressionLevel Optimal -Force
+          $zipHash=(Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant(); "$zipHash  $name.zip" | Set-Content (Join-Path $PWD "$name.zip.sha256") -Encoding ASCII
+          Write-Host "Package SHA-256: $zipHash"
+
+      - name: Upload complete package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ExternalDLSSG-Fresh-LowLatency-Windows-x64-FULL
+          path: |
+            ExternalDLSSG-Fresh-LowLatency-Windows-x64-FULL.zip
+            ExternalDLSSG-Fresh-LowLatency-Windows-x64-FULL.zip.sha256
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Upload diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ExternalDLSSG-Fresh-V2-Diagnostics
+          path: workspace/ExternalDLSSG_Fresh/build/bin/logs/**
+          if-no-files-found: ignore
