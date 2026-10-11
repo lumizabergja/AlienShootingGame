@@ -25,7 +25,7 @@ jobs:
         run: |
           $ErrorActionPreference='Stop'
           $archive='.ci/ExternalDLSSG_Zero_Stage1.zip'
-          $expected='782a8050d980839545df41f14268e143d14f2e51ad7214fb72876e1c8a2c0d54'
+          $expected='4ece74cc39c4f47e3b22f044844a00a8efc7070a275f8a1528d8178f2c785ca2'
           $actual=(Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
           if($actual -ne $expected){ throw "Stage1 source SHA mismatch: $actual" }
           New-Item -ItemType Directory -Force workspace | Out-Null
@@ -98,8 +98,6 @@ jobs:
           $p.Refresh()
           $log=Join-Path $bin 'logs/ExternalDLSSG-Zero.log'
           if(Test-Path $log){ Get-Content $log -Tail 300 }
-          # Hosted runners have no RTX gaming GPU. Either the app remains open with its
-          # diagnostic dialog/window, or exits cleanly after an explicit unsupported-hardware path.
           if(-not $p.HasExited){ Stop-Process -Id $p.Id -Force }
           if(-not (Test-Path $log)){ throw 'Stage1 did not create its persistent startup log' }
           $text=Get-Content $log -Raw
