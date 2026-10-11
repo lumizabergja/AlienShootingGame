@@ -1,4 +1,4 @@
-name: Build External DLSSG Fresh V2
+name: Build External DLSSG Fresh V3
 
 on:
   push:
@@ -52,7 +52,7 @@ jobs:
           $ErrorActionPreference = 'Stop'
           cmake -S "$env:SRC" -B "$env:SRC/build" -A x64 -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
 
-      - name: Build Release x64 with MSVC
+      - name: Build warning-free Release x64 with MSVC
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -82,17 +82,31 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $bin = Join-Path $env:SRC 'build/bin'
-          Push-Location $bin
-          try {
-            & '.\ExternalDLSSG.exe' --ci-selftest
-            $code = $LASTEXITCODE
-            Write-Host "Self-test exit code: $code"
-            if ($code -ne 0) {
-              if (Test-Path '.\logs\ExternalDLSSG.log') { Get-Content '.\logs\ExternalDLSSG.log' -Tail 400 }
-              if (Test-Path '.\logs\sl.log') { Get-Content '.\logs\sl.log' -Tail 400 }
-              throw "Streamline self-test failed with exit code $code"
+          $exe = Join-Path $bin 'ExternalDLSSG.exe'
+          $p = Start-Process -FilePath $exe -ArgumentList '--ci-selftest' -WorkingDirectory $bin -Wait -PassThru
+          $code = $p.ExitCode
+          $appLog = Join-Path $bin 'logs/ExternalDLSSG.log'
+          $slLog = Join-Path $bin 'logs/sl.log'
+          $video = (Get-CimInstance Win32_VideoController | ForEach-Object { $_.Name }) -join '; '
+          Write-Host "Video controllers: $video"
+          Write-Host "Self-test exit code: $code"
+          $text = if(Test-Path $appLog){ Get-Content $appLog -Raw } else { '' }
+          if ($code -eq 0) {
+            if ($text -notmatch 'SELFTEST: shutdown OK') { throw 'Self-test returned 0 without clean shutdown marker.' }
+            Write-Host 'Full Streamline startup/shutdown self-test passed.'
+          } elseif ($code -eq 20 -and $video -notmatch '(?i)nvidia') {
+            foreach($required in @("Loaded plugin 'sl.common'","Loaded plugin 'sl.dlss_g'","Loaded plugin 'sl.pcl'","Loaded plugin 'sl.reflex'",'Disabling DLSS-G since it is not supported on current hardware','Result::eErrorNoPlugins')) {
+              if ($text -notlike "*$required*") {
+                Write-Host $text
+                throw "No-GPU CI self-test missing required proof: $required"
+              }
             }
-          } finally { Pop-Location }
+            Write-Host 'Expected no-NVIDIA-GPU CI result accepted only after all production plugins loaded and hardware rejection was proven.'
+          } else {
+            if(Test-Path $appLog){ Get-Content $appLog -Tail 400 }
+            if(Test-Path $slLog){ Get-Content $slLog -Tail 400 }
+            throw "Unexpected Streamline self-test result $code on controllers: $video"
+          }
 
       - name: GUI survival smoke test
         shell: pwsh
@@ -111,8 +125,9 @@ jobs:
             if (Test-Path $crash) { Get-Content $crash -Tail 400 }
             throw 'GUI survival smoke test failed.'
           }
-          Write-Host 'GUI survived startup for 5 seconds.'
+          Write-Host 'Normal launcher survived startup for 5 seconds even on unsupported CI hardware.'
           Stop-Process -Id $p.Id -Force
+          Start-Sleep -Milliseconds 300
 
       - name: Package complete project
         shell: pwsh
@@ -131,14 +146,23 @@ jobs:
           Copy-Item (Join-Path $slSrc 'lib/x64/sl.interposer.lib') (Join-Path $slDst 'lib/x64') -Force
           foreach($dll in @('sl.interposer.dll','sl.common.dll','sl.pcl.dll','sl.reflex.dll','sl.dlss_g.dll','nvngx_dlssg.dll')){ Copy-Item (Join-Path $slSrc "bin/x64/$dll") (Join-Path $slDst 'bin/x64') -Force }
           foreach($legal in @('LICENSE','LICENSE.md','LICENSE.txt','NOTICE','NOTICE.md','README.md')){ $p=Join-Path $slSrc $legal; if(Test-Path $p){Copy-Item $p $slDst -Force} }
+          Remove-Item (Join-Path $run 'logs') -Recurse -Force -ErrorAction SilentlyContinue
           $exeHash=(Get-FileHash (Join-Path $run 'ExternalDLSSG.exe') -Algorithm SHA256).Hash.ToLowerInvariant()
           @"
           ExternalDLSSG Fresh Low-Latency Windows x64
           Clean rebuild from scratch using official NVIDIA Streamline v2.14.1 production runtime.
           Custom-engine Project ID; no borrowed/spoofed NVIDIA application ID.
           Fully external DXGI Desktop Duplication path; no game injection/hooks/process-memory access.
-          CI passed: source SHA gate, MSVC x64 Release build, production DLL byte-match, Streamline self-test, GUI survival test.
-          Actual DLSS-G generation still requires testing on an RTX-capable PC because hosted CI has no RTX gaming GPU.
+
+          Validation before packaging:
+            - exact clean-source SHA-256 gate
+            - audited API/compiler corrections
+            - warning-free MSVC /W4 /WX x64 Release build
+            - all six Streamline/DLSS-G runtime DLLs byte-matched to official production SDK
+            - Streamline plugin-load self-test; hosted CI has no NVIDIA GPU, so the expected hardware rejection was verified after all plugins loaded
+            - normal launcher stayed alive for 5 seconds on unsupported CI hardware instead of silently closing
+
+          Actual DLSS-G frame generation still requires testing on an RTX-capable PC because hosted CI has no RTX gaming GPU.
           ExternalDLSSG.exe SHA-256: $exeHash
           "@ | Set-Content (Join-Path $root 'README-RUN.txt') -Encoding UTF8
           Get-ChildItem $run -File -Recurse | ForEach-Object { $h=(Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(); $rel=$_.FullName.Substring($root.Length+1); "$h  $rel" } | Set-Content (Join-Path $root 'READY_TO_RUN_SHA256SUMS.txt') -Encoding ASCII
@@ -160,6 +184,6 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: ExternalDLSSG-Fresh-V2-Diagnostics
+          name: ExternalDLSSG-Fresh-V3-Diagnostics
           path: workspace/ExternalDLSSG_Fresh/build/bin/logs/**
           if-no-files-found: ignore
