@@ -44,18 +44,21 @@ jobs:
           Write-Host "Using Windows SDK $($sdk.Name)"
           "SDK_VERSION=$($sdk.Name)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Build JustFlow Release
-        shell: pwsh
+      - name: Build JustFlow Release with Ninja
+        shell: cmd
         run: |
-          cmake -S JustFlow -B JustFlow\build -G 'Visual Studio 17 2022' -A x64 -DWINSDK_VER=$env:SDK_VERSION
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cmake --build JustFlow\build --config Release --target justflow --parallel
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          where ninja
+          ninja --version
+          cmake -S JustFlow -B JustFlow\build -G Ninja -DCMAKE_BUILD_TYPE=Release -DWINSDK_VER=%SDK_VERSION%
+          if errorlevel 1 exit /b %errorlevel%
+          cmake --build JustFlow\build --target justflow --verbose
+          if errorlevel 1 exit /b %errorlevel%
 
       - name: Verify binaries
         shell: pwsh
         run: |
-          $base = 'JustFlow\build\Release'
+          $base = 'JustFlow\build'
           $required = @(
             "$base\justflow.exe",
             "$base\nvngx.dll_justflow.dll",
@@ -66,11 +69,14 @@ jobs:
           foreach ($p in $required) {
             if (-not (Test-Path $p)) { throw "Missing build output: $p" }
           }
+          $sig = Get-AuthenticodeSignature "$base\nvngx_dlssg.dll"
+          if ($sig.Status -ne 'Valid') { throw 'Packaged DLSS-G signature is not valid.' }
+          Get-Item "$base\justflow.exe", "$base\nvngx.dll_justflow.dll", "$base\nvngx_dlssg.dll" | Select-Object Name,Length
 
       - name: Make portable ZIP
         shell: pwsh
         run: |
-          $base = 'JustFlow\build\Release'
+          $base = 'JustFlow\build'
           $dist = 'JustFlow-Ready-FG'
           New-Item -ItemType Directory -Force -Path $dist | Out-Null
           Copy-Item "$base\justflow.exe" $dist
@@ -100,8 +106,8 @@ jobs:
           $readme = @(
             'JustFlow FG-only portable build',
             '',
-            'Built from the current wealdly/JustFlow main branch.',
-            'Includes NVIDIA official public nvngx_dlssg.dll.',
+            'Built from wealdly/JustFlow main commit 99bf6484484345096ba5f044db057f3a8a86d6dc.',
+            'Includes NVIDIA official public, Authenticode-valid nvngx_dlssg.dll.',
             'The separate DLSS neural-rendering runtime is intentionally not bundled.',
             '',
             'Run: justflow.exe',
