@@ -1,0 +1,124 @@
+name: Build JustFlow Ready
+
+on:
+  push:
+    branches:
+      - chatgpt-justflow-ready-build-20261015
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - name: Clone JustFlow
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/wealdly/JustFlow.git JustFlow
+          git -C JustFlow rev-parse HEAD
+
+      - name: Download official NVIDIA DLSS-G runtime
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path JustFlow\runtime | Out-Null
+          $url = 'https://raw.githubusercontent.com/NVIDIA/DLSS/main/lib/Windows_x86_64/rel/nvngx_dlssg.dll'
+          $out = 'JustFlow\runtime\nvngx_dlssg.dll'
+          Invoke-WebRequest -Uri $url -OutFile $out
+          if ((Get-Item $out).Length -lt 1000000) { throw 'DLSS-G runtime download is unexpectedly small.' }
+          $sig = Get-AuthenticodeSignature $out
+          Write-Host "DLSS-G signature: $($sig.Status) / $($sig.SignerCertificate.Subject)"
+          if ($sig.Status -ne 'Valid') { throw 'NVIDIA DLSS-G runtime signature is not valid.' }
+
+      - name: Configure FG-only package
+        shell: pwsh
+        run: |
+          $cmake = 'JustFlow\CMakeLists.txt'
+          $text = Get-Content $cmake -Raw
+          $text = $text.Replace('${CMAKE_SOURCE_DIR}/runtime/nvngx_dlssnr.dll ', '')
+          Set-Content -Path $cmake -Value $text -Encoding UTF8
+
+          $sdk = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\Include' -Directory |
+            Where-Object { $_.Name -match '^10\.0\.' } |
+            Sort-Object { [version]$_.Name } -Descending |
+            Select-Object -First 1
+          if (-not $sdk) { throw 'No Windows SDK installation found.' }
+          Write-Host "Using Windows SDK $($sdk.Name)"
+          "SDK_VERSION=$($sdk.Name)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build JustFlow Release
+        shell: pwsh
+        run: |
+          cmake -S JustFlow -B JustFlow\build -G 'Visual Studio 17 2022' -A x64 -DWINSDK_VER=$env:SDK_VERSION
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build JustFlow\build --config Release --target justflow --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify binaries
+        shell: pwsh
+        run: |
+          $base = 'JustFlow\build\Release'
+          $required = @(
+            "$base\justflow.exe",
+            "$base\nvngx.dll_justflow.dll",
+            "$base\nvngx_dlssg.dll",
+            "$base\justflow.ini",
+            "$base\profiles"
+          )
+          foreach ($p in $required) {
+            if (-not (Test-Path $p)) { throw "Missing build output: $p" }
+          }
+
+      - name: Make portable ZIP
+        shell: pwsh
+        run: |
+          $base = 'JustFlow\build\Release'
+          $dist = 'JustFlow-Ready-FG'
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item "$base\justflow.exe" $dist
+          Copy-Item "$base\nvngx.dll_justflow.dll" $dist
+          Copy-Item "$base\nvngx_dlssg.dll" $dist
+          Copy-Item "$base\justflow.ini" $dist
+          Copy-Item "$base\profiles" $dist -Recurse
+          Copy-Item 'JustFlow\LICENSE' $dist
+          Copy-Item 'JustFlow\NOTICE' $dist
+          Copy-Item 'JustFlow\README.md' $dist
+
+          $redistRoots = @(
+            'C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC',
+            'C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Redist\MSVC'
+          )
+          foreach ($root in $redistRoots) {
+            if (Test-Path $root) {
+              $crt = Get-ChildItem $root -Directory | Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1
+              if ($crt) {
+                $crtDir = Join-Path $crt.FullName 'x64\Microsoft.VC143.CRT'
+                if (Test-Path $crtDir) { Copy-Item (Join-Path $crtDir '*.dll') $dist -ErrorAction SilentlyContinue }
+              }
+              break
+            }
+          }
+
+          $readme = @(
+            'JustFlow FG-only portable build',
+            '',
+            'Built from the current wealdly/JustFlow main branch.',
+            'Includes NVIDIA official public nvngx_dlssg.dll.',
+            'The separate DLSS neural-rendering runtime is intentionally not bundled.',
+            '',
+            'Run: justflow.exe',
+            'Frame generation toggle: F8',
+            'Quit: Ctrl+F12',
+            '',
+            'Use borderless/windowed-fullscreen. Exclusive fullscreen cannot be overlaid.'
+          )
+          $readme | Set-Content -Path (Join-Path $dist 'README-FIRST.txt') -Encoding UTF8
+
+          Compress-Archive -Path "$dist\*" -DestinationPath 'JustFlow-Ready-FG.zip' -Force
+          Get-FileHash 'JustFlow-Ready-FG.zip' -Algorithm SHA256
+
+      - name: Upload ready build
+        uses: actions/upload-artifact@v4
+        with:
+          name: JustFlow-Ready-FG
+          path: JustFlow-Ready-FG.zip
+          if-no-files-found: error
+          retention-days: 7
