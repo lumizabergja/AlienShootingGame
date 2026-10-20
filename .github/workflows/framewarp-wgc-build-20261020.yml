@@ -1,0 +1,111 @@
+name: Build External WGC NVIDIA Frame Warp
+on:
+  push:
+    branches:
+      - chatgpt-framewarp-wgc-build-20261020
+  workflow_dispatch:
+jobs:
+  windows-x64:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out build instructions
+        uses: actions/checkout@v4
+      - name: Fetch pinned JustFlow sources
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git clone --quiet https://github.com/wealdly/JustFlow.git upstream
+          if ($LASTEXITCODE -ne 0) { throw 'git clone failed' }
+          git -C upstream checkout --quiet 99bf6484484345096ba5f044db057f3a8a86d6dc
+          if ($LASTEXITCODE -ne 0) { throw 'git checkout failed' }
+          Write-Host 'Pinned source:' (git -C upstream rev-parse HEAD)
+      - name: Adapt post-build optional runtime requirements
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $p = 'upstream/CMakeLists.txt'
+          $s = [IO.File]::ReadAllText($p)
+          $pattern = '(?m)^\s*COMMAND \$\{CMAKE_COMMAND\} -E copy_if_different \$\{CMAKE_SOURCE_DIR\}/runtime/nvngx_dlssnr\.dll[^\r\n]*'
+          $patched = [regex]::Replace($s, $pattern, '')
+          if ($patched -eq $s) { throw 'Upstream optional runtime copy rule not found; stop for review.' }
+          [IO.File]::WriteAllText($p, $patched)
+      - name: Build Windows x64 native executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sdk = 'C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64/fxc.exe'
+          $inc = 'C:/Program Files (x86)/Windows Kits/10/Include/10.0.26100.0/cppwinrt'
+          if (!(Test-Path $sdk)) { throw "Missing required Windows shader compiler: $sdk" }
+          if (!(Test-Path $inc)) { throw "Missing required C++/WinRT headers: $inc" }
+          cmake -S upstream -B build-framewarp -G 'Visual Studio 17 2022' -A x64 -DWINSDK_VER=10.0.26100.0
+          if ($LASTEXITCODE -ne 0) { throw 'CMake configure failed' }
+          cmake --build build-framewarp --target justflow --config Release --parallel 4
+          if ($LASTEXITCODE -ne 0) { throw 'Native C++ compilation failed' }
+          if (!(Test-Path 'build-framewarp/Release/justflow.exe')) { throw 'EXE not found in Release output' }
+      - name: Package the compiled executable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path package/profiles | Out-Null
+          Copy-Item build-framewarp/Release/justflow.exe package/FrameWarpWGC.exe
+          $forwarder = 'build-framewarp/Release/nvngx.dll_justflow.dll'
+          if (!(Test-Path $forwarder)) { throw 'NGX forwarder DLL was not compiled' }
+          Copy-Item $forwarder package/
+          $config = @'
+          [app]
+          profile=none
+          [overlay]
+          mode=composed
+          [nr]
+          enabled=0
+          [filters]
+          enabled=0
+          [fg]
+          enabled=1
+          '@
+          Set-Content -Path package/justflow.ini -Value $config -Encoding ascii
+          $profile = @'
+          [capture]
+          mode=wgc
+          window_class=
+          window_title=Counter-Strike 2
+          cursor=0
+          border=0
+          [fg]
+          engine=latewarp
+          multiplier=2
+          lw_fov=60
+          pacing=vblank
+          min_gain=0
+          max_input_fps=0
+          '@
+          Set-Content -Path package/profiles/cs2.ini -Value $profile -Encoding ascii
+          $lol = $profile.Replace('Counter-Strike 2','League of Legends')
+          Set-Content -Path package/profiles/lol.ini -Value $lol -Encoding ascii
+          Copy-Item upstream/LICENSE package/UPSTREAM_LICENSE.txt
+          Copy-Item upstream/NOTICE package/UPSTREAM_NOTICE.txt
+          @'
+          FrameWarpWGC - compiled Windows x64 executable
+
+          Based on JustFlow; includes NVIDIA NGX reserved feature-15 Frame Warp adapter.
+          Frame Warp REQUIRES a compatible, legally obtained, NVIDIA-signed
+          nvngx_latewarp.dll next to FrameWarpWGC.exe. The NVIDIA file is not included.
+          Feature cannot activate without it; behavior not runtime tested.
+          For Windows 11 x64 and supported RTX GPU and NVIDIA driver.
+          Run FrameWarpWGC.exe; select CS2 or LoL profile in tray.
+          WGC source, click-through overlay, Frame Warp engine=latewarp.
+          F8 toggles Frame Warp. Ctrl+F12 exits.
+          Check log for: [latewarp] feature created
+          Source: https://github.com/wealdly/JustFlow
+          Commit: 99bf6484484345096ba5f044db057f3a8a86d6dc
+          '@ | Set-Content -Path package/README.txt -Encoding ascii
+          Get-FileHash package/FrameWarpWGC.exe -Algorithm SHA256 | Format-List
+          Compress-Archive -Path package/* -DestinationPath FrameWarpWGC_Windows_x64_Needs_Nvidia_DLL.zip -Force
+          if (!(Test-Path FrameWarpWGC_Windows_x64_Needs_Nvidia_DLL.zip)) { throw 'ZIP missing' }
+      - name: Upload compiled Windows EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: FrameWarpWGC-Windows-x64-EXE
+          path: FrameWarpWGC_Windows_x64_Needs_Nvidia_DLL.zip
+          if-no-files-found: error
