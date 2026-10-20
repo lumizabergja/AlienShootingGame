@@ -1,0 +1,68 @@
+name: Build Custom Frame Warp GUI
+on:
+  push:
+    branches: [custom-wgc-framewarp-ui-20261020]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch NVIDIA SDK (headers and import library)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          git clone --filter=blob:none --sparse --depth=1 https://github.com/NVIDIA/DLSS.git NVIDIA-DLSS
+          if ($LASTEXITCODE) {throw "NVIDIA SDK git clone failed"}
+          git -C NVIDIA-DLSS sparse-checkout set include lib/Windows_x86_64/x64
+          if ($LASTEXITCODE) {throw "NVIDIA SDK sparse checkout failed"}
+          if (!(Test-Path NVIDIA-DLSS/lib/Windows_x86_64/x64/nvsdk_ngx_d.lib)) {throw "NGX import lib missing"}
+      - name: Configure and compile independent app
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $generators = (cmake --help | Out-String)
+          $g = if ($generators.Contains("Visual Studio 18 2026")) { "Visual Studio 18 2026" } else { "Visual Studio 17 2022" }
+          cmake -S custom-framewarp-ui -B custom-framewarp-ui/build -G $g -A x64 "-DDLSS_SDK=$((Resolve-Path NVIDIA-DLSS).Path)"
+          if ($LASTEXITCODE) {throw "CMake configure failed"}
+          cmake --build custom-framewarp-ui/build --config Release --parallel 4
+          if ($LASTEXITCODE) {throw "C++ build failed"}
+          if (!(Test-Path custom-framewarp-ui/build/Release/FrameWarpCustom.exe)) {throw "Windows exe missing"}
+      - name: Assemble ready-to-launch package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path output | Out-Null
+          Copy-Item custom-framewarp-ui/build/Release/FrameWarpCustom.exe output/FrameWarpCustom.exe
+          Copy-Item custom-framewarp-ui/CMakeLists.txt output/CMakeLists.txt
+          Copy-Item custom-framewarp-ui/src/main.cpp output/main.cpp
+          @'
+          FrameWarp Custom 1.0 - Independent WGC + DX12 + NVIDIA Frame Warp
+          
+          1. Start FrameWarpCustom.exe on Windows 11.
+          2. Select game/window from the list; Refresh if needed.
+          3. Set vertical field of view (default 60 degrees) and estimated mouse camera rotation in degrees per mouse count.
+          4. Enable "Use NVIDIA Frame Warp", V-Sync/tearing, and cursor capture as desired.
+          5. Select Start Capture and focus the game. Stop returns to UI.
+          
+          Uses NVIDIA NGX feature 15, not software Late Warp and not JustFlow.
+          REQUIRES a legitimate compatible nvngx_latewarp.dll to activate NVIDIA Frame Warp.
+          The DLL is NOT included and no substitute is used if missing.
+          Without the proprietary DLL, the program works as a WGC capture -> DX12 passthrough only.
+          WGC capture may fail in exclusive fullscreen games; use borderless windowed.
+          Click-through output and capture frame pacing require Windows display/GPU testing.
+          The camera reprojection is an approximation: WGC does not supply game depth matrices.
+          This build is compilation-verified, not NVIDIA-runtime/anti-cheat tested.
+          No injection into, or modification of, the game process.
+          
+          Build sources are included; NGX SDK may be obtained from NVIDIA's official DLSS repository.
+          '@ | Set-Content output/README.txt
+          $hash = Get-FileHash output/FrameWarpCustom.exe -Algorithm SHA256
+          Write-Host "Executable SHA256 $($hash.Hash)"
+          Compress-Archive -Path output/* -DestinationPath FrameWarpCustom_Windows_x64.zip -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FrameWarpCustom-Windows-x64
+          path: FrameWarpCustom_Windows_x64.zip
+          if-no-files-found: error
