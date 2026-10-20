@@ -286,7 +286,11 @@ struct Graphics{
   Verify(D3D11CreateDevice(adapter.Get(),D3D_DRIVER_TYPE_UNKNOWN,nullptr,flags,nullptr,0,D3D11_SDK_VERSION,&d11,nullptr,&c11),"D3D11 device");
   Verify(d11.As(&d11v1),"D3D11.1");Verify(d11.As(&d11v5),"D3D11.5");
   Verify(c11.As(&c11v4),"D3D11 context4");
-  src12=Tex(d12.Get(),width,height,DXGI_FORMAT_B8G8R8A8_UNORM,D3D12_RESOURCE_FLAG_NONE,D3D12_RESOURCE_STATE_COMMON,D3D12_HEAP_FLAG_SHARED);
+  // D3D11 OpenSharedResource1 requires the shared D3D12 resource to expose D3D11-compatible flags.
+  // D3D12_RESOURCE_FLAG_NONE was the cause of E_INVALIDARG at the D3D11 shared color stage.
+  src12=Tex(d12.Get(),width,height,DXGI_FORMAT_B8G8R8A8_UNORM,
+      D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS,
+      D3D12_RESOURCE_STATE_COMMON,D3D12_HEAP_FLAG_SHARED);
   Verify(d12->CreateSharedHandle(src12.Get(),nullptr,GENERIC_ALL,nullptr,&shareTex),"shared color handle");
   Verify(d11v1->OpenSharedResource1(shareTex,IID_PPV_ARGS(&src11)),"D3D11 shared color");
   Verify(d12->CreateSharedHandle(bridgeFence.Get(),nullptr,GENERIC_ALL,nullptr,&shareFence),"shared fence handle");
