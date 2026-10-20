@@ -396,14 +396,14 @@ static void CaptureWorker(Settings opts){
      L"Running WGC passthrough: NVIDIA Frame Warp runtime missing or feature unavailable.":
      L"Running WGC passthrough (Frame Warp off).");
   while(g_run.load()){
-   if(!IsWindow(opts.target)||IsIconic(opts.target)){ShowWindow(g_overlay,SW_HIDE);Sleep(15);continue;}
+   if(!IsWindow(opts.target)||IsIconic(opts.target)){ShowWindow(g_overlay,SW_HIDE);g_presenting=false;Sleep(15);continue;}
    RECT cr{};GetClientRect(opts.target,&cr);
    if(UINT(cr.right)!=gpu.width||UINT(cr.bottom)!=gpu.height){Status(L"Game resolution changed. Stop and Start to resize.");break;}
    POINT top{};ClientToScreen(opts.target,&top);
    SetWindowPos(g_overlay,HWND_TOPMOST,top.x,top.y,gpu.width,gpu.height,SWP_NOACTIVATE);
    HWND fg=GetForegroundWindow();
    bool foreground=(fg==opts.target || GetAncestor(fg,GA_ROOT)==opts.target);
-   if(!foreground){ShowWindow(g_overlay,SW_HIDE);Sleep(5);continue;}
+   if(!foreground){ShowWindow(g_overlay,SW_HIDE);g_presenting=false;Sleep(5);continue;}
    if(!g_presenting.exchange(true))ShowWindow(g_overlay,SW_SHOWNOACTIVATE);
    wc::Direct3D11CaptureFrame newest{nullptr};
    for(int i=0;i<4;i++){
@@ -416,7 +416,7 @@ static void CaptureWorker(Settings opts){
      auto size=newest.ContentSize();
      if((UINT)size.Width!=gpu.width||(UINT)size.Height!=gpu.height){Status(L"Game capture size changed. Restart capture.");break;}
      auto surface=newest.Surface();
-     auto access=surface.as<w11::IDirect3DDxgiInterfaceAccess>();
+     auto access=surface.as<::Windows::Graphics::DirectX::Direct3D11::IDirect3DDxgiInterfaceAccess>();
      ComPtr<ID3D11Texture2D> texture;
      Verify(access->GetInterface(IID_PPV_ARGS(&texture)),"WGC surface");
      gpu.Capture(texture.Get());
