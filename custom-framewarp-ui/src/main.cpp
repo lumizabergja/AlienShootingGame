@@ -246,8 +246,8 @@ struct Graphics{
  void End(){Verify(cl->Close(),"list close");ID3D12CommandList* lists[]={cl.Get()};queue->ExecuteCommandLists(1,lists);Sync();}
  D3D12_CPU_DESCRIPTOR_HANDLE CPU(ID3D12DescriptorHeap*h,int n){auto a=h->GetCPUDescriptorHandleForHeapStart();a.ptr+=SIZE_T(n)*stride;return a;}
  D3D12_GPU_DESCRIPTOR_HANDLE GPU(ID3D12DescriptorHeap*h,int n){auto a=h->GetGPUDescriptorHandleForHeapStart();a.ptr+=UINT64(n)*stride;return a;}
- void Init(HWND overlay,HWND target, const Settings&s){
-  RECT r{};GetClientRect(target,&r);width=UINT(std::max(1L,r.right));height=UINT(std::max(1L,r.bottom));
+ void Init(HWND overlay,HWND target, const Settings&s, UINT frameW, UINT frameH){
+  width=frameW;height=frameH;
   if(width>7680||height>4320)throw std::runtime_error("Capture resolution too high");
   Verify(CreateDXGIFactory2(0,IID_PPV_ARGS(&factory)),"DXGI factory");
   bool found=false;
@@ -282,7 +282,7 @@ struct Graphics{
   Verify(factory->CreateSwapChainForHwnd(queue.Get(),overlay,&sc,nullptr,nullptr,&temp),"CreateSwapChainForHwnd");
   Verify(temp.As(&swap),"swapchain 3");
   for(UINT i=0;i<2;i++)Verify(swap->GetBuffer(i,IID_PPV_ARGS(&back[i])),"swap buffer");
-  UINT flags=D3D11_CREATE_DEVICE_BGRA_SUPPORT|D3D11_CREATE_DEVICE_SINGLETHREADED;
+  UINT flags=D3D11_CREATE_DEVICE_BGRA_SUPPORT;
   Verify(D3D11CreateDevice(adapter.Get(),D3D_DRIVER_TYPE_UNKNOWN,nullptr,flags,nullptr,0,D3D11_SDK_VERSION,&d11,nullptr,&c11),"D3D11 device");
   Verify(d11.As(&d11v1),"D3D11.1");Verify(d11.As(&d11v5),"D3D11.5");
   Verify(c11.As(&c11v4),"D3D11 context4");
@@ -377,14 +377,15 @@ struct Graphics{
 static void CaptureWorker(Settings opts){
  try{
   winrt::init_apartment(winrt::apartment_type::multi_threaded);
-  Graphics gpu;gpu.Init(g_overlay,opts.target,opts);
+  wc::GraphicsCaptureItem item{nullptr};
+  auto factory=winrt::get_activation_factory<wc::GraphicsCaptureItem,IGraphicsCaptureItemInterop>();
+  Verify(factory->CreateForWindow(opts.target,winrt::guid_of<wc::GraphicsCaptureItem>(),winrt::put_abi(item)),"capture item");
+  const auto initialSize=item.Size();
+  Graphics gpu;gpu.Init(g_overlay,opts.target,opts,UINT(initialSize.Width),UINT(initialSize.Height));
   ComPtr<IDXGIDevice> dxgi;Verify(gpu.d11.As(&dxgi),"DXGI D3D11 device");
   winrt::com_ptr<IInspectable> inspectable;
   Verify(CreateDirect3D11DeviceFromDXGIDevice(dxgi.Get(),inspectable.put()),"WinRT WGC device");
   auto captureDevice=inspectable.as<w11::IDirect3DDevice>();
-  wc::GraphicsCaptureItem item{nullptr};
-  auto factory=winrt::get_activation_factory<wc::GraphicsCaptureItem,IGraphicsCaptureItemInterop>();
-  Verify(factory->CreateForWindow(opts.target,winrt::guid_of<wc::GraphicsCaptureItem>(),winrt::put_abi(item)),"capture item");
   auto pool=wc::Direct3D11CaptureFramePool::CreateFreeThreaded(captureDevice,wd::DirectXPixelFormat::B8G8R8A8UIntNormalized,2,item.Size());
   auto session=pool.CreateCaptureSession(item);
   try{session.IsCursorCaptureEnabled(opts.cursor);session.IsBorderRequired(false);}catch(...){}
@@ -397,10 +398,9 @@ static void CaptureWorker(Settings opts){
      L"Running WGC passthrough (Frame Warp off).");
   while(g_run.load()){
    if(!IsWindow(opts.target)||IsIconic(opts.target)){ShowWindow(g_overlay,SW_HIDE);g_presenting=false;Sleep(15);continue;}
-   RECT cr{};GetClientRect(opts.target,&cr);
-   if(UINT(cr.right)!=gpu.width||UINT(cr.bottom)!=gpu.height){Status(L"Game resolution changed. Stop and Start to resize.");break;}
-   POINT top{};ClientToScreen(opts.target,&top);
-   SetWindowPos(g_overlay,HWND_TOPMOST,top.x,top.y,gpu.width,gpu.height,SWP_NOACTIVATE);
+   RECT visual{};
+   if(FAILED(DwmGetWindowAttribute(opts.target,DWMWA_EXTENDED_FRAME_BOUNDS,&visual,sizeof visual)))GetWindowRect(opts.target,&visual);
+   SetWindowPos(g_overlay,HWND_TOPMOST,visual.left,visual.top,gpu.width,gpu.height,SWP_NOACTIVATE);
    HWND fg=GetForegroundWindow();
    bool foreground=(fg==opts.target || GetAncestor(fg,GA_ROOT)==opts.target);
    if(!foreground){ShowWindow(g_overlay,SW_HIDE);g_presenting=false;Sleep(5);continue;}
@@ -467,6 +467,7 @@ static void BuildUI(HWND h){
  RefreshGames();SetTimer(h,1,500,nullptr);
 }
 int WINAPI wWinMain(HINSTANCE inst,HINSTANCE,LPWSTR,int show){
+ SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
  QueryPerformanceFrequency(&g_frequency);
  WNDCLASSW wc{};wc.lpfnWndProc=ControlProc;wc.hInstance=inst;wc.lpszClassName=MAIN_CLASS;wc.hCursor=LoadCursor(nullptr,IDC_ARROW);
  wc.hbrBackground=(HBRUSH)(COLOR_WINDOW+1);RegisterClassW(&wc);
