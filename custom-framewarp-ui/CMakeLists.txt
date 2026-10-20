@@ -12,4 +12,4 @@ target_include_directories(FrameWarpCustom PRIVATE "${DLSS_SDK}/include" "${CPPW
 target_link_directories(FrameWarpCustom PRIVATE "${DLSS_SDK}/lib/Windows_x86_64/x64")
 target_link_libraries(FrameWarpCustom PRIVATE nvsdk_ngx_d d3d11 d3d12 d3dcompiler dxgi dwmapi comctl32 runtimeobject WindowsApp)
 target_compile_options(FrameWarpCustom PRIVATE /EHsc /W3 /utf-8 /await:strict)
-set_property(TARGET FrameWarpCustom PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+set_property(TARGET FrameWarpCustom PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
