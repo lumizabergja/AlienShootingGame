@@ -26,9 +26,9 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $p = 'upstream/CMakeLists.txt'
           $s = [IO.File]::ReadAllText($p)
-          $pattern = '(?m)^\s*COMMAND \$\{CMAKE_COMMAND\} -E copy_if_different \$\{CMAKE_SOURCE_DIR\}/runtime/nvngx_dlssnr\.dll[^\r\n]*'
-          $patched = [regex]::Replace($s, $pattern, '')
-          if ($patched -eq $s) { throw 'Upstream optional runtime copy rule not found; stop for review.' }
+          $patched = $s.Replace('COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/runtime/nvngx_dlssnr.dll $<TARGET_FILE_DIR:justflow_spike>)', 'COMMAND ${CMAKE_COMMAND} -E echo Skip_optional_runtime)')
+          $patched = $patched.Replace('COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/runtime/nvngx_dlssnr.dll ${CMAKE_SOURCE_DIR}/runtime/nvngx_dlssg.dll $<TARGET_FILE_DIR:justflow>)', 'COMMAND ${CMAKE_COMMAND} -E echo Skip_optional_runtimes)')
+          if ($patched -eq $s) { throw 'Optional runtime CMake rules not found; stop for review.' }
           [IO.File]::WriteAllText($p, $patched)
       - name: Build Windows x64 native executable
         shell: pwsh
@@ -38,7 +38,10 @@ jobs:
           $inc = 'C:/Program Files (x86)/Windows Kits/10/Include/10.0.26100.0/cppwinrt'
           if (!(Test-Path $sdk)) { throw "Missing required Windows shader compiler: $sdk" }
           if (!(Test-Path $inc)) { throw "Missing required C++/WinRT headers: $inc" }
-          cmake -S upstream -B build-framewarp -G 'Visual Studio 17 2022' -A x64 -DWINSDK_VER=10.0.26100.0
+          $cmakeHelp = cmake --help | Out-String
+          $generator = if ($cmakeHelp.Contains('Visual Studio 18 2026')) { 'Visual Studio 18 2026' } else { 'Visual Studio 17 2022' }
+          Write-Host "Using CMake generator $generator"
+          cmake -S upstream -B build-framewarp -G $generator -A x64 '-DWINSDK_VER:STRING=10.0.26100.0'
           if ($LASTEXITCODE -ne 0) { throw 'CMake configure failed' }
           cmake --build build-framewarp --target justflow --config Release --parallel 4
           if ($LASTEXITCODE -ne 0) { throw 'Native C++ compilation failed' }
