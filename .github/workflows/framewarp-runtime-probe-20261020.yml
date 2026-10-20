@@ -23,7 +23,7 @@ jobs:
             Write-Host "HARDWARELUX_status $($r.StatusCode) bytes $($b.Length) type $($r.Headers['Content-Type'])"
           } catch {Write-Host "HARDWARELUX_ERROR $_"}
           python -m pip install --quiet gdown
-          python -m gdown --id 1ukze_0VLw_gAHchX9Uc2IPJH6Dg-yCp2 -O probe\puredark.bin --fuzzy
+          python -m gdown 'https://drive.google.com/uc?id=1ukze_0VLw_gAHchX9Uc2IPJH6Dg-yCp2' -O probe/puredark.bin
           if (Test-Path probe\puredark.bin){$b=Get-Item probe\puredark.bin;Write-Host "PUREDARK_bytes $($b.Length)"}
           Get-ChildItem probe | Select-Object Name,Length | Format-Table | Out-String | Write-Host
       - name: Identify nested DLL and Authenticode
