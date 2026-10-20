@@ -1,0 +1,66 @@
+name: Probe NVIDIA Latewarp Runtime Sources
+on:
+  push:
+    branches: [custom-wgc-framewarp-ui-20261020]
+    paths: [.github/workflows/framewarp-runtime-probe-20261020.yml]
+  workflow_dispatch:
+jobs:
+  sources:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download and inspect public community runtime candidates
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          $ErrorActionPreference="Continue"
+          New-Item -ItemType Directory -Force -Path probe | Out-Null
+          $u="https://www.hardwareluxx.de/community/attachments/nvngx_latewarp-zip.1157515/"
+          try {
+            $r=Invoke-WebRequest -Uri $u -OutFile probe\hardwareluxx.bin -MaximumRedirection 7 -TimeoutSec 40 -PassThru
+            $b=Get-Item probe\hardwareluxx.bin
+            Write-Host "HARDWARELUX_status $($r.StatusCode) bytes $($b.Length) type $($r.Headers['Content-Type'])"
+          } catch {Write-Host "HARDWARELUX_ERROR $_"}
+          python -m pip install --quiet gdown
+          python -m gdown --id 1ukze_0VLw_gAHchX9Uc2IPJH6Dg-yCp2 -O probe\puredark.bin --fuzzy
+          if (Test-Path probe\puredark.bin){$b=Get-Item probe\puredark.bin;Write-Host "PUREDARK_bytes $($b.Length)"}
+          Get-ChildItem probe | Select-Object Name,Length | Format-Table | Out-String | Write-Host
+      - name: Identify nested DLL and Authenticode
+        shell: pwsh
+        run: |
+          $ErrorActionPreference="Continue"
+          @'
+          import os,zipfile,hashlib,subprocess,shutil
+          for p in ["probe/hardwareluxx.bin","probe/puredark.bin"]:
+            if not os.path.isfile(p):continue
+            x=open(p,"rb").read(24)
+            print("CANDIDATE",p,os.stat(p).st_size,repr(x))
+            if zipfile.is_zipfile(p):
+              try:
+                with zipfile.ZipFile(p) as z:
+                  for x in z.infolist():
+                    print("ZIP_MEMBER",x.filename,x.file_size)
+                    if os.path.basename(x.filename).lower()=="nvngx_latewarp.dll" and x.file_size<120*1024*1024:
+                      data=z.read(x)
+                      print("DLL_SHA256",hashlib.sha256(data).hexdigest())
+                      if data[:2]==b'MZ':
+                        with open("probe/nvngx_latewarp.dll","wb") as f:f.write(data)
+              except Exception as e:print("ZIP_ERR",repr(e))
+          '@ | Set-Content probe\scan.py
+          python probe\scan.py
+          if (Test-Path probe/nvngx_latewarp.dll){
+            $sig=Get-AuthenticodeSignature probe/nvngx_latewarp.dll
+            Write-Host "DLL_AUTHENTICODE_STATUS $($sig.Status)"
+            Write-Host "DLL_CERT_SUBJECT $($sig.SignerCertificate.Subject)"
+            Get-FileHash probe/nvngx_latewarp.dll -Algorithm SHA256 | Format-List
+          } else {
+            Write-Host "NO_VALID_DLL_FOUND"
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FrameWarp-NVIDIA-runtime-probe
+          path: |
+            probe/scan.py
+            probe/nvngx_latewarp.dll
+          if-no-files-found: warn
