@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.25)
+project(FrameWarpCustomUI LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 20)
+add_executable(FrameWarpCustom WIN32 controller.cpp)
+target_compile_options(FrameWarpCustom PRIVATE /W3 /EHsc /utf-8)
+target_compile_definitions(FrameWarpCustom PRIVATE UNICODE _UNICODE)
+target_link_libraries(FrameWarpCustom PRIVATE dwmapi user32 advapi32 shell32)
+set_property(TARGET FrameWarpCustom PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
