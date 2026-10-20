@@ -416,7 +416,7 @@ static void CaptureWorker(Settings opts){
      auto size=newest.ContentSize();
      if((UINT)size.Width!=gpu.width||(UINT)size.Height!=gpu.height){Status(L"Game capture size changed. Restart capture.");break;}
      auto surface=newest.Surface();
-     auto access=surface.as<IDirect3DDxgiInterfaceAccess>();
+     auto access=surface.as<w11::IDirect3DDxgiInterfaceAccess>();
      ComPtr<ID3D11Texture2D> texture;
      Verify(access->GetInterface(IID_PPV_ARGS(&texture)),"WGC surface");
      gpu.Capture(texture.Get());
