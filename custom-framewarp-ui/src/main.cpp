@@ -36,7 +36,7 @@ namespace wg = winrt::Windows::Graphics;
 namespace wc = winrt::Windows::Graphics::Capture;
 namespace wd = winrt::Windows::Graphics::DirectX;
 namespace w11 = winrt::Windows::Graphics::DirectX::Direct3D11;
-static constexpr int IDC_GAMES=1001,IDC_REFRESH=1002,IDC_START=1003,IDC_STOP=1004,IDC_FOV=1005,IDC_GAIN=1006,IDC_VSYNC=1007,IDC_WARP=1008,IDC_STATUS=1009,IDC_CURSOR=1010;
+static constexpr int IDC_GAMES=1001,IDC_REFRESH=1002,IDC_START=1003,IDC_STOP=1004,IDC_FOV=1005,IDC_GAIN=1006,IDC_VSYNC=1007,IDC_WARP=1008,IDC_STATUS=1009,IDC_CURSOR=1010,IDC_MAX_WARP=1011;
 static constexpr UINT WM_STATUS=WM_APP+80;
 static constexpr wchar_t MAIN_CLASS[]=L"FWCustom.Control", OVERLAY_CLASS[]=L"FWCustom.TransparentOutput", INPUT_CLASS[]=L"FWCustom.Input";
 static std::atomic<bool> g_run{false};
@@ -51,7 +51,7 @@ static std::mutex g_mouseLock;
 struct MouseSample {long long timestamp; long dx,dy;};
 static std::deque<MouseSample> g_mouse;
 static LARGE_INTEGER g_frequency{};
-struct Settings { HWND target{}; int fov=60; double degreesPerCount=0.028; bool vsync=false; bool wantWarp=true; bool cursor=false; };
+struct Settings { HWND target{}; int fov=60; double degreesPerCount=0.028; double maxWarpDegrees=0.65; bool vsync=false; bool wantWarp=true; bool cursor=false; };
 static Settings g_opts;
 static void Status(const std::wstring& s){std::lock_guard<std::mutex> lock(g_messageLock);g_message=s; if(g_main) PostMessageW(g_main,WM_STATUS,0,0);}
 static void Verify(HRESULT hr,const char* msg){if(FAILED(hr))throw std::runtime_error(std::string(msg)+" HRESULT "+std::to_string((unsigned)hr));}
@@ -109,11 +109,13 @@ static LRESULT CALLBACK ControlProc(HWND h,UINT m,WPARAM w,LPARAM l){
       int i=(int)SendMessageW(g_combo,CB_GETCURSEL,0,0);
       if(i<0 || i>=(int)g_windows.size()){Status(L"Choose a window first.");return 0;}
       Settings s{};s.target=g_windows[i];
-      wchar_t fov[64]{},gain[64]{};
+      wchar_t fov[64]{},gain[64]{},maxWarp[64]{};
       GetWindowTextW(GetDlgItem(h,IDC_FOV),fov,64);
       GetWindowTextW(GetDlgItem(h,IDC_GAIN),gain,64);
+      GetWindowTextW(GetDlgItem(h,IDC_MAX_WARP),maxWarp,64);
       s.fov=std::clamp(_wtoi(fov),30,130);
-      s.degreesPerCount=std::clamp(_wtof(gain),0.001,2.0);
+      s.degreesPerCount=std::clamp(_wtof(gain),0.0001,2.0);
+      s.maxWarpDegrees=std::clamp(_wtof(maxWarp),0.1,2.0);
       s.vsync=SendDlgItemMessageW(h,IDC_VSYNC,BM_GETCHECK,0,0)==BST_CHECKED;
       s.wantWarp=SendDlgItemMessageW(h,IDC_WARP,BM_GETCHECK,0,0)==BST_CHECKED;
       s.cursor=SendDlgItemMessageW(h,IDC_CURSOR,BM_GETCHECK,0,0)==BST_CHECKED;
@@ -230,7 +232,7 @@ struct Graphics{
  ComPtr<ID3D12Resource> src12,converted,warped,depth,mv,ui;
  ComPtr<ID3D12Resource> back[2];
  ComPtr<ID3D12RootSignature> root;
- ComPtr<ID3D12PipelineState> convertPSO;
+ ComPtr<ID3D12PipelineState> convertPSO,protectPSO;
  ComPtr<ID3D12DescriptorHeap> shaders,clears;
  HANDLE event=nullptr,shareTex=nullptr,shareFence=nullptr;
  UINT width=0,height=0,stride=0;
@@ -301,7 +303,7 @@ struct Graphics{
   mv=Tex(d12.Get(),width,height,DXGI_FORMAT_R16G16_FLOAT,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
   ui=Tex(d12.Get(),width,height,DXGI_FORMAT_R8G8B8A8_UNORM,D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
   stride=d12->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-  D3D12_DESCRIPTOR_HEAP_DESC hd{};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;hd.NumDescriptors=5;hd.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
+  D3D12_DESCRIPTOR_HEAP_DESC hd{};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;hd.NumDescriptors=7;hd.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
   Verify(d12->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&shaders)),"GPU descriptor heap");
   hd.NumDescriptors=3;hd.Flags=D3D12_DESCRIPTOR_HEAP_FLAG_NONE;
   Verify(d12->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&clears)),"CPU descriptor heap");
@@ -313,6 +315,11 @@ struct Graphics{
   ID3D12Resource* guides[]={depth.Get(),mv.Get(),ui.Get()};
   const DXGI_FORMAT formats[]={DXGI_FORMAT_R32_FLOAT,DXGI_FORMAT_R16G16_FLOAT,DXGI_FORMAT_R8G8B8A8_UNORM};
   for(int i=0;i<3;i++){uav.Format=formats[i];d12->CreateUnorderedAccessView(guides[i],nullptr,&uav,CPU(shaders.Get(),i+2));d12->CreateUnorderedAccessView(guides[i],nullptr,&uav,CPU(clears.Get(),i));}
+  D3D12_SHADER_RESOURCE_VIEW_DESC nativeView{};nativeView.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
+  nativeView.ViewDimension=D3D12_SRV_DIMENSION_TEXTURE2D;nativeView.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;nativeView.Texture2D.MipLevels=1;
+  d12->CreateShaderResourceView(converted.Get(),&nativeView,CPU(shaders.Get(),5));
+  uav.Format=DXGI_FORMAT_R8G8B8A8_UNORM;
+  d12->CreateUnorderedAccessView(warped.Get(),nullptr,&uav,CPU(shaders.Get(),6));
   D3D12_DESCRIPTOR_RANGE ranges[2]{};
   ranges[0].RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;ranges[0].NumDescriptors=1;ranges[0].BaseShaderRegister=0;
   ranges[1].RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_UAV;ranges[1].NumDescriptors=1;ranges[1].BaseShaderRegister=0;ranges[1].OffsetInDescriptorsFromTableStart=1;
@@ -332,6 +339,27 @@ struct Graphics{
   if(FAILED(hr)){std::string str="Compile conversion shader";if(errors)str+=": "+std::string((const char*)errors->GetBufferPointer(),errors->GetBufferSize());throw std::runtime_error(str);}
   D3D12_COMPUTE_PIPELINE_STATE_DESC ps{};ps.pRootSignature=root.Get();ps.CS.pShaderBytecode=code->GetBufferPointer();ps.CS.BytecodeLength=code->GetBufferSize();
   Verify(d12->CreateComputePipelineState(&ps,IID_PPV_ARGS(&convertPSO)),"compute PSO");
+  // Preserve a circular native crosshair region instead of reprojecting HUD pixels.
+  // Only a 96x96 ROI is processed (not the full output).
+  const char* protectShader=R"(
+      Texture2D<float4> nativeFrame : register(t0);
+      RWTexture2D<float4> warpOutput : register(u0);
+      [numthreads(8,8,1)] void CSMain(uint3 tid : SV_DispatchThreadID) {
+        if (tid.x >= 96 || tid.y >= 96) return;
+        uint w,h; warpOutput.GetDimensions(w,h);
+        int2 p=int2(w/2,h/2)+int2(tid.xy)-int2(48,48);
+        if(p.x<0||p.y<0||p.x>=int(w)||p.y>=int(h)) return;
+        float2 d=float2(p)+0.5-float2(w,h)*0.5;
+        float k=saturate((length(d)-20.0)/24.0);
+        k=k*k*(3.0-2.0*k);
+        float4 n=nativeFrame.Load(int3(p,0));
+        warpOutput[p]=lerp(n,warpOutput[p],k);
+      })";
+  code.Reset();errors.Reset();
+  hr=D3DCompile(protectShader,strlen(protectShader),nullptr,nullptr,nullptr,"CSMain","cs_5_0",D3DCOMPILE_OPTIMIZATION_LEVEL3,0,&code,&errors);
+  if(FAILED(hr)){std::string str="Compile crosshair protection shader";if(errors)str+=": "+std::string((const char*)errors->GetBufferPointer(),errors->GetBufferSize());throw std::runtime_error(str);}
+  ps.CS.pShaderBytecode=code->GetBufferPointer();ps.CS.BytecodeLength=code->GetBufferSize();
+  Verify(d12->CreateComputePipelineState(&ps,IID_PPV_ARGS(&protectPSO)),"crosshair protection PSO");
   Begin();
   ID3D12DescriptorHeap* heaps[]={shaders.Get()};cl->SetDescriptorHeaps(1,heaps);
   const float flat[]={0.9995f,0.9995f,0.9995f,0.9995f},zero[]={0,0,0,0};
@@ -363,7 +391,15 @@ struct Graphics{
   if(warpAvailable){
    if(!warp.Warp(cl.Get(),converted.Get(),warped.Get(),width,height,fresh,yaw,pitch,s.fov)){
      warpAvailable=false;Status(L"NVIDIA Frame Warp evaluation failed. Running WGC passthrough.");
-   }else {UavBarrier(cl.Get(),warped.Get());display=warped.Get();}
+   }else {
+      UavBarrier(cl.Get(),warped.Get());
+      cl->SetPipelineState(protectPSO.Get());
+      cl->SetComputeRootSignature(root.Get());
+      cl->SetComputeRootDescriptorTable(0,GPU(shaders.Get(),5));
+      cl->Dispatch(12,12,1); // protect 96x96 feathered native crosshair region
+      UavBarrier(cl.Get(),warped.Get());
+      display=warped.Get();
+    }
   }
   if(display==warped.Get())Barrier(cl.Get(),warped.Get(),D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_COPY_SOURCE);
   else Barrier(cl.Get(),converted.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COPY_SOURCE);
@@ -407,7 +443,7 @@ static void CaptureWorker(Settings opts){
    SetWindowPos(g_overlay,HWND_TOPMOST,visual.left,visual.top,gpu.width,gpu.height,SWP_NOACTIVATE);
    HWND fg=GetForegroundWindow();
    bool foreground=(fg==opts.target || GetAncestor(fg,GA_ROOT)==opts.target);
-   if(!foreground){ShowWindow(g_overlay,SW_HIDE);g_presenting=false;Sleep(5);continue;}
+   if(!foreground){ShowWindow(g_overlay,SW_HIDE);g_presenting=false;have=false;timestamp=0;Sleep(5);continue;}
    if(!g_presenting.exchange(true))ShowWindow(g_overlay,SW_SHOWNOACTIVATE);
    wc::Direct3D11CaptureFrame newest{nullptr};
    for(int i=0;i<4;i++){
@@ -424,14 +460,29 @@ static void CaptureWorker(Settings opts){
      ComPtr<ID3D11Texture2D> texture;
      Verify(access->GetInterface(IID_PPV_ARGS(&texture)),"WGC surface");
      gpu.Capture(texture.Get());
-     timestamp=(newest.SystemRelativeTime().count()*g_frequency.QuadPart)/10000000LL;
+     // WGC reports a 100 ns TimeSpan. Multiplying the full uptime by QPC frequency
+     // OVERFLOWS int64 on normal Windows uptimes, causing runaway mouse warp.
+     const long long ts100ns = newest.SystemRelativeTime().count();
+     const long long freq = g_frequency.QuadPart;
+     timestamp = (ts100ns/10000000LL)*freq + ((ts100ns%10000000LL)*freq)/10000000LL;
      ++frames;have=true;
    }
    if(have){
      LARGE_INTEGER now{};QueryPerformanceCounter(&now);
-     long mx=0,my=0;MouseDiff(timestamp,now.QuadPart,mx,my);
+     const long long frameAge=now.QuadPart-timestamp;
+     // Do not continue warping a stale source frame or interpret invalid timestamps as
+     // seconds of mouse motion. Keep capture visible only when reasonably recent.
+     if(frameAge<0 || frameAge>g_frequency.QuadPart/12) {
+       ShowWindow(g_overlay,SW_HIDE);g_presenting=false;
+       Sleep(2);continue;
+     }
+     long mx=0,my=0;
+     if(frameAge<=g_frequency.QuadPart/20) MouseDiff(timestamp,now.QuadPart,mx,my);
      const float deg=float(opts.degreesPerCount*3.14159265358979323846/180.);
-     gpu.Draw(fresh,mx*deg,my*deg,opts);
+     const float maxRad=float(opts.maxWarpDegrees*3.14159265358979323846/180.);
+     const float yaw=std::clamp(float(mx)*deg,-maxRad,maxRad);
+     const float pitch=std::clamp(float(my)*deg,-maxRad,maxRad);
+     gpu.Draw(fresh,yaw,pitch,opts);
      if(!opts.vsync)Sleep(1);
    }else Sleep(1);
   }
@@ -458,7 +509,9 @@ static void BuildUI(HWND h){
  HWND fov=CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",L"60",WS_CHILD|WS_VISIBLE|ES_NUMBER,18,113,120,26,h,(HMENU)IDC_FOV,GetModuleHandleW(nullptr),nullptr);
  MakeLabel(h,L"Mouse rotation (degrees / count)",174,91,270,18);
  HWND gain=CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",L"0.028",WS_CHILD|WS_VISIBLE,174,113,125,26,h,(HMENU)IDC_GAIN,GetModuleHandleW(nullptr),nullptr);
- SendMessageW(fov,WM_SETFONT,(WPARAM)font,TRUE);SendMessageW(gain,WM_SETFONT,(WPARAM)font,TRUE);
+ MakeLabel(h,L"Max warp (degrees)",350,91,170,18);
+ HWND limit=CreateWindowExW(WS_EX_CLIENTEDGE,L"EDIT",L"0.65",WS_CHILD|WS_VISIBLE,350,113,125,26,h,(HMENU)IDC_MAX_WARP,GetModuleHandleW(nullptr),nullptr);
+ SendMessageW(fov,WM_SETFONT,(WPARAM)font,TRUE);SendMessageW(gain,WM_SETFONT,(WPARAM)font,TRUE);SendMessageW(limit,WM_SETFONT,(WPARAM)font,TRUE);
  add(L"Use NVIDIA Frame Warp",BS_AUTOCHECKBOX,18,159,250,25,IDC_WARP);
  add(L"V-Sync (off = lower delay)",BS_AUTOCHECKBOX,18,188,280,25,IDC_VSYNC);
  add(L"Capture game cursor",BS_AUTOCHECKBOX,18,217,250,25,IDC_CURSOR);
