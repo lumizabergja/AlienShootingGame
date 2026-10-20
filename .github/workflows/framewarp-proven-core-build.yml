@@ -1,0 +1,110 @@
+name: Build Custom UI with Proven NVIDIA Frame Warp Core
+on:
+  push:
+    branches: [framewarp-custom-proven-core-20261020]
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Obtain stable upstream Frame Warp backend
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          git clone --quiet https://github.com/wealdly/JustFlow.git upstream
+          if ($LASTEXITCODE) { throw 'clone failed' }
+          git -C upstream checkout --quiet 99bf6484484345096ba5f044db057f3a8a86d6dc
+          if ($LASTEXITCODE) {throw 'upstream pin checkout failed'}
+          python framewarp-controller/patch_backend.py
+          if ($LASTEXITCODE) {throw 'patch failed'}
+      - name: Compile backend from stable source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $gs=(cmake --help | Out-String)
+          $gen= if($gs.Contains('Visual Studio 18 2026')){'Visual Studio 18 2026'}else{'Visual Studio 17 2022'}
+          cmake -S upstream -B upstream-build -G $gen -A x64 '-DWINSDK_VER:STRING=10.0.26100.0'
+          if ($LASTEXITCODE) {throw 'backend configure failed'}
+          cmake --build upstream-build --config Release --target justflow --parallel 4
+          if ($LASTEXITCODE) {throw 'backend compile failed'}
+          if (!(Test-Path upstream-build/Release/justflow.exe)) {throw 'backend EXE not found'}
+      - name: Compile independent custom control UI
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $gs=(cmake --help | Out-String)
+          $gen= if($gs.Contains('Visual Studio 18 2026')){'Visual Studio 18 2026'}else{'Visual Studio 17 2022'}
+          cmake -S framewarp-controller -B ui-build -G $gen -A x64
+          if ($LASTEXITCODE) {throw 'UI configure failed'}
+          cmake --build ui-build --config Release --parallel 4
+          if ($LASTEXITCODE) {throw 'UI compile failed'}
+          if (!(Test-Path ui-build/Release/FrameWarpCustom.exe)) {throw 'UI EXE not found'}
+      - name: Retrieve authentic NVIDIA Frame Warp runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          python -m pip install --quiet gdown
+          if($LASTEXITCODE){throw 'gdown install failed'}
+          python -m gdown 'https://drive.google.com/uc?id=1ukze_0VLw_gAHchX9Uc2IPJH6Dg-yCp2' -O PureDarkReflexDemo.zip
+          if ($LASTEXITCODE){throw 'Official PureDark community demo unavailable'}
+          python -c "import zipfile; a=zipfile.ZipFile('PureDarkReflexDemo.zip'); f=a.read('Reflex2Demo/bin/nvngx_latewarp.dll');open('nvngx_latewarp.dll','wb').write(f)"
+          if ($LASTEXITCODE){throw 'NVIDIA DLL extraction failed'}
+          $sig=Get-AuthenticodeSignature nvngx_latewarp.dll
+          if($sig.Status -ne 'Valid' -or !$sig.SignerCertificate.Subject.Contains('NVIDIA Corporation')){throw "NVIDIA certificate check failed: $($sig.Status)"}
+          $hash=(Get-FileHash nvngx_latewarp.dll -Algorithm SHA256).Hash.ToLowerInvariant()
+          if($hash -ne '81e63b4a9dcfb99b2b71c3ddfd3ea4a0e9780b778bd47e9a6f7f010a7a6c0f20'){throw "Unexpected NVIDIA runtime sha256 $hash"}
+          Write-Host "Validated NVIDIA-signed Frame Warp DLL SHA256 $hash"
+      - name: Package custom UI and trusted runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory -Force -Path package/profiles | Out-Null
+          Copy-Item ui-build/Release/FrameWarpCustom.exe package/FrameWarpCustom.exe
+          Copy-Item upstream-build/Release/justflow.exe package/FrameWarpCore.exe
+          Copy-Item 'upstream-build/Release/nvngx.dll_justflow.dll' package/
+          Copy-Item nvngx_latewarp.dll package/
+          Copy-Item upstream/LICENSE package/UPSTREAM_MIT_LICENSE.txt
+          Copy-Item upstream/NOTICE package/UPSTREAM_NOTICE.txt
+          @'
+          FrameWarp Custom - NVIDIA Frame Warp, calibrated WGC backend
+
+          1. Extract the complete ZIP to one folder.
+          2. Run FrameWarpCustom.exe (independent custom UI).
+          3. Choose CS2, LoL or another open game window.
+          4. Set vertical FOV; optionally protect the crosshair and change center radius.
+          5. Click Start NVIDIA Frame Warp and focus your game in borderless windowed.
+          6. Move the camera normally; mouse calibration takes multiple frames and starts with zero warp.
+          7. The Stop button requests graceful shutdown; Ctrl+F12 also stops the backend.
+          
+          The headless engine is adapted from wealdly/JustFlow at commit:
+          99bf6484484345096ba5f044db057f3a8a86d6dc (MIT license).
+          This reuses its tested WGC, NVIDIA NGX feature 15, NVIDIA Optical Flow motion
+          estimation, auto-trained mouse coefficients, delay model, freshness gating,
+          UI restoration, and vblank paced presenter. JustFlow tray UI is disabled;
+          the separate user-facing controller is independently written.
+
+          Included signed NVIDIA nvngx_latewarp.dll checked against original
+          PureDark community Reflex 2 demo (SHA256 81e63b4a9dcfb99b2b71c3ddfd3ea4a0e9780b778bd47e9a6f7f010a7a6c0f20).
+
+          No game hooks, no process injection, no modification of CS2 or LoL game files.
+
+          Windows 11 x64, supported NVIDIA RTX GPU and driver needed.
+          NVIDIA Frame Warp operation has not been physically validated on user's PC;
+          verify FrameWarpCustom.log contains "[latewarp] feature created", then
+          "[mouse] model:" with ON and good R2 before expecting nonzero camera warp.
+          If no reliable fit: deliberately renders the original captured frame.
+          Runtime crash or anti-cheat compatibility has not been tested.
+          '@ | Set-Content -Path package/README.txt -Encoding utf8
+          $files=Get-ChildItem package -File | Select-Object Name,Length
+          $files | Format-Table | Out-String | Write-Host
+          $need=@('FrameWarpCustom.exe','FrameWarpCore.exe','nvngx.dll_justflow.dll','nvngx_latewarp.dll')
+          foreach($f in $need){if(!(Test-Path "package/$f")){throw "Missing required file $f"}}
+          Compress-Archive -Path package/* -DestinationPath FrameWarpCustom_ProvenCore_Windows_x64.zip -Force
+          if (!(Test-Path FrameWarpCustom_ProvenCore_Windows_x64.zip)){throw 'package failure'}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FrameWarpCustom-Calibrated-EXE
+          path: FrameWarpCustom_ProvenCore_Windows_x64.zip
+          if-no-files-found: error
