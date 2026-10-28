@@ -2,8 +2,12 @@
 #error This controller targets Win32.
 #endif
 
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 #include <cerrno>
 #include <cmath>
@@ -171,7 +175,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
     cls.hInstance = instance;
     cls.lpfnWndProc = windowProc;
     cls.lpszClassName = L"VkFrameBridge.SettingsController";
-    cls.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    cls.hCursor = LoadCursorW(nullptr, MAKEINTRESOURCEW(32512));
     cls.hbrBackground = GetSysColorBrush(COLOR_WINDOW);
     if (!RegisterClassW(&cls)) return 1;
     const auto hwnd = CreateWindowExW(0, cls.lpszClassName, L"Vulkan Frame Bridge Settings",
