@@ -1,0 +1,85 @@
+name: Build Preset C Numeric FPS (Windows x64)
+
+on:
+  push:
+    branches:
+      - 'experiment/presetc-working-numeric-fps-*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Fetch NVIDIA SDK headers (official sources)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tmp = $env:RUNNER_TEMP
+          git clone --depth 1 --filter=blob:none --sparse --branch v2.14.16 https://github.com/NVIDIA-RTX/Streamline.git "$tmp\Streamline"
+          git -C "$tmp\Streamline" sparse-checkout set include
+          git clone --depth 1 https://github.com/NVIDIA/nvapi.git "$tmp\nvapi"
+          git clone --depth 1 https://github.com/NVIDIA/NVIDIAOpticalFlowSDK.git "$tmp\nvof"
+          New-Item -ItemType Directory -Force -Path "PresetCApp\vendor\streamline" | Out-Null
+          New-Item -ItemType Directory -Force -Path "PresetCApp\vendor\nvapi" | Out-Null
+          New-Item -ItemType Directory -Force -Path "PresetCApp\vendor\nvof" | Out-Null
+          Copy-Item "$tmp\Streamline\include\*.h" "PresetCApp\vendor\streamline"
+          Copy-Item "$tmp\nvapi\*.h" "PresetCApp\vendor\nvapi"
+          Copy-Item "$tmp\nvof\nvOpticalFlow*.h" "PresetCApp\vendor\nvof"
+          Get-ChildItem "PresetCApp\vendor\streamline\sl_dlss_g.h", "PresetCApp\vendor\nvapi\nvapi.h", "PresetCApp\vendor\nvof\nvOpticalFlowD3D12.h" | Select-Object Name, Length
+
+      - name: Configure (MSVC x64)
+        shell: pwsh
+        run: cmake -S PresetCApp -B build-presetc -A x64
+
+      - name: Build actual frame-generation application
+        shell: pwsh
+        run: cmake --build build-presetc --config Release --parallel
+
+      - name: Download official Streamline SDK 2.14.16 release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $uri = 'https://github.com/NVIDIA-RTX/Streamline/releases/download/v2.14.16/streamline-sdk-v2.14.16.zip'
+          curl.exe -fSL --retry 3 --retry-delay 5 -o "$env:RUNNER_TEMP\streamline-sdk.zip" $uri
+          if ($LASTEXITCODE -ne 0) { throw 'Failed to download official Streamline SDK' }
+          Expand-Archive -LiteralPath "$env:RUNNER_TEMP\streamline-sdk.zip" -DestinationPath "$env:RUNNER_TEMP\streamline-sdk" -Force
+
+      - name: Package complete runtime and source instructions
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dist = Join-Path $PWD 'PresetC-NumericFPS-Windows-x64'
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item 'build-presetc\Release\FrameGeneration.exe' $dist
+          $sdk = "$env:RUNNER_TEMP\streamline-sdk"
+          $required = @('sl.interposer.dll', 'sl.common.dll', 'sl.pcl.dll', 'sl.reflex.dll', 'sl.dlss_g.dll', 'nvngx_dlssg.dll')
+          foreach ($name in $required) {
+            $candidates = @(Get-ChildItem -LiteralPath $sdk -Recurse -File -Filter $name)
+            if ($candidates.Count -eq 0) { throw "Required runtime DLL missing: $name" }
+            $chosen = $candidates | Where-Object { $_.FullName -match '[\\/]bin[\\/]x64[\\/]' } | Select-Object -First 1
+            if (-not $chosen) { $chosen = $candidates | Select-Object -First 1 }
+            Copy-Item -LiteralPath $chosen.FullName -Destination (Join-Path $dist $name)
+            Write-Host "$name source: $($chosen.FullName)"
+          }
+          Copy-Item 'PresetCApp\README.md' (Join-Path $dist 'README.md')
+          $licenseDir = Join-Path $dist 'licenses'
+          New-Item -ItemType Directory -Force -Path $licenseDir | Out-Null
+          Copy-Item "$env:RUNNER_TEMP\Streamline\LICENSE" $licenseDir -ErrorAction SilentlyContinue
+          Copy-Item "$env:RUNNER_TEMP\nvapi\License.txt" $licenseDir -ErrorAction SilentlyContinue
+          Copy-Item "$env:RUNNER_TEMP\nvof\LICENSE" $licenseDir -ErrorAction SilentlyContinue
+          $sdkLicenses = @(Get-ChildItem -LiteralPath $sdk -Recurse -File | Where-Object { $_.Name -match '^(NGX-LICENSE|Streamline-LICENSE|THIRD-PARTY-LICENSES|reflex\\.license)' })
+          foreach ($item in $sdkLicenses | Select-Object -First 12) {
+            Copy-Item -LiteralPath $item.FullName -Destination (Join-Path $licenseDir $item.Name) -Force
+          }
+          Compress-Archive -Path "$dist\*" -DestinationPath 'PresetC-NumericFPS-Windows-x64.zip' -Force
+
+      - name: Upload ready-to-run Windows package
+        uses: actions/upload-artifact@v4
+        with:
+          name: PresetC-NumericFPS-Windows-x64
+          path: PresetC-NumericFPS-Windows-x64.zip
+          retention-days: 14
