@@ -1,0 +1,48 @@
+name: VkFrameBridge Windows build
+
+on:
+  push:
+    branches:
+      - 'experiment/vulkan-framebridge-*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Get official Vulkan headers
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/KhronosGroup/Vulkan-Headers.git "$env:RUNNER_TEMP\Vulkan-Headers"
+
+      - name: Configure with MSVC
+        shell: pwsh
+        run: |
+          cmake -S GPUFrameBridge -B build-vkbridge -A x64 -DVULKAN_HEADERS_DIR="$env:RUNNER_TEMP\Vulkan-Headers\include"
+
+      - name: Compile
+        run: cmake --build build-vkbridge --config Release --parallel
+
+      - name: Test frame scheduler
+        run: ctest --test-dir build-vkbridge -C Release --output-on-failure
+
+      - name: Package diagnostics and layer
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path distribution | Out-Null
+          Copy-Item "build-vkbridge\Release\VkFrameBridgeLayer.dll" distribution
+          Copy-Item "build-vkbridge\Release\VkFrameBridgeController.exe" distribution
+          Copy-Item "GPUFrameBridge\VK_LAYER_FRAMEBRIDGE_sampler.json" distribution
+          Copy-Item "GPUFrameBridge\README.md" distribution
+          Compress-Archive -Path distribution\* -DestinationPath "VkFrameBridge-Windows-x64-POC.zip" -Force
+
+      - name: Upload diagnostic build
+        uses: actions/upload-artifact@v4
+        with:
+          name: VkFrameBridge-Windows-x64-POC
+          path: VkFrameBridge-Windows-x64-POC.zip
+          retention-days: 14
