@@ -5,6 +5,7 @@
 #endif
 
 #define VK_USE_PLATFORM_WIN32_KHR
+#define VK_NO_PROTOTYPES
 #include <windows.h>
 #include <vulkan/vulkan.h>
 #include <vulkan/vk_layer.h>
@@ -133,7 +134,7 @@ extern "C" {
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance, const char*);
 VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice, const char*);
 
-__declspec(dllexport) VKAPI_ATTR VkResult VKAPI_CALL
+VKAPI_ATTR VkResult VKAPI_CALL
 vkNegotiateLoaderLayerInterfaceVersion(VkNegotiateLayerInterface* version) {
     if (!version) return VK_ERROR_INITIALIZATION_FAILED;
     if (version->loaderLayerInterfaceVersion > 2) version->loaderLayerInterfaceVersion = 2;
@@ -143,7 +144,7 @@ vkNegotiateLoaderLayerInterfaceVersion(VkNegotiateLayerInterface* version) {
     return VK_SUCCESS;
 }
 
-__declspec(dllexport) VKAPI_ATTR VkResult VKAPI_CALL
+VKAPI_ATTR VkResult VKAPI_CALL
 vkCreateInstance(const VkInstanceCreateInfo* ci, const VkAllocationCallbacks* alloc, VkInstance* instance) {
     auto* link = findInstanceLink(ci);
     if (!link || !link->u.pLayerInfo) return VK_ERROR_INITIALIZATION_FAILED;
@@ -162,7 +163,7 @@ vkCreateInstance(const VkInstanceCreateInfo* ci, const VkAllocationCallbacks* al
     return result;
 }
 
-__declspec(dllexport) VKAPI_ATTR void VKAPI_CALL
+VKAPI_ATTR void VKAPI_CALL
 vkDestroyInstance(VkInstance instance, const VkAllocationCallbacks* alloc) {
     PFN_vkDestroyInstance next = nullptr;
     {
@@ -173,7 +174,7 @@ vkDestroyInstance(VkInstance instance, const VkAllocationCallbacks* alloc) {
     if (next) next(instance, alloc);
 }
 
-__declspec(dllexport) VKAPI_ATTR VkResult VKAPI_CALL
+VKAPI_ATTR VkResult VKAPI_CALL
 vkCreateDevice(VkPhysicalDevice physical, const VkDeviceCreateInfo* ci,
                const VkAllocationCallbacks* alloc, VkDevice* device) {
     auto* link = findDeviceLink(ci);
@@ -199,7 +200,7 @@ vkCreateDevice(VkPhysicalDevice physical, const VkDeviceCreateInfo* ci,
     return result;
 }
 
-__declspec(dllexport) VKAPI_ATTR void VKAPI_CALL
+VKAPI_ATTR void VKAPI_CALL
 vkDestroyDevice(VkDevice device, const VkAllocationCallbacks* alloc) {
     PFN_vkDestroyDevice next = nullptr;
     {
@@ -214,7 +215,7 @@ vkDestroyDevice(VkDevice device, const VkAllocationCallbacks* alloc) {
     if (next) next(device, alloc);
 }
 
-__declspec(dllexport) VKAPI_ATTR void VKAPI_CALL
+VKAPI_ATTR void VKAPI_CALL
 vkGetDeviceQueue(VkDevice device, uint32_t family, uint32_t index, VkQueue* queue) {
     PFN_vkGetDeviceQueue next = nullptr;
     {
@@ -226,7 +227,7 @@ vkGetDeviceQueue(VkDevice device, uint32_t family, uint32_t index, VkQueue* queu
     if (queue && *queue) { std::lock_guard lock(g_mutex); g_queues[*queue] = device; }
 }
 
-__declspec(dllexport) VKAPI_ATTR void VKAPI_CALL
+VKAPI_ATTR void VKAPI_CALL
 vkGetDeviceQueue2(VkDevice device, const VkDeviceQueueInfo2* info, VkQueue* queue) {
     PFN_vkGetDeviceQueue2 next = nullptr;
     {
@@ -238,7 +239,7 @@ vkGetDeviceQueue2(VkDevice device, const VkDeviceQueueInfo2* info, VkQueue* queu
     if (queue && *queue) { std::lock_guard lock(g_mutex); g_queues[*queue] = device; }
 }
 
-__declspec(dllexport) VKAPI_ATTR VkResult VKAPI_CALL
+VKAPI_ATTR VkResult VKAPI_CALL
 vkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* info) {
     PFN_vkQueuePresentKHR next = nullptr;
     {
@@ -265,7 +266,7 @@ vkQueuePresentKHR(VkQueue queue, const VkPresentInfoKHR* info) {
     return next ? next(queue, info) : VK_ERROR_INITIALIZATION_FAILED;
 }
 
-__declspec(dllexport) VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 vkGetInstanceProcAddr(VkInstance instance, const char* name) {
     if (!name) return nullptr;
     if (std::strcmp(name, "vkGetInstanceProcAddr") == 0) return reinterpret_cast<PFN_vkVoidFunction>(vkGetInstanceProcAddr);
@@ -276,7 +277,7 @@ vkGetInstanceProcAddr(VkInstance instance, const char* name) {
     return nullptr;
 }
 
-__declspec(dllexport) VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
+VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL
 vkGetDeviceProcAddr(VkDevice device, const char* name) {
     if (!name) return nullptr;
     if (std::strcmp(name, "vkGetDeviceProcAddr") == 0) return reinterpret_cast<PFN_vkVoidFunction>(vkGetDeviceProcAddr);
