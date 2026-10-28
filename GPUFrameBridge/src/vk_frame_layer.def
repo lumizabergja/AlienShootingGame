@@ -1,0 +1,12 @@
+LIBRARY VkFrameBridgeLayer
+EXPORTS
+    vkNegotiateLoaderLayerInterfaceVersion
+    vkGetInstanceProcAddr
+    vkGetDeviceProcAddr
+    vkCreateInstance
+    vkDestroyInstance
+    vkCreateDevice
+    vkDestroyDevice
+    vkGetDeviceQueue
+    vkGetDeviceQueue2
+    vkQueuePresentKHR
