@@ -22,7 +22,7 @@ if(WIN32)
     find_path(VULKAN_HEADERS_INCLUDE_DIR vulkan/vulkan.h
         HINTS "${VULKAN_HEADERS_DIR}" "$ENV{VULKAN_SDK}/Include" "$ENV{VULKAN_SDK}/include"
         REQUIRED)
-    add_library(VkFrameBridgeLayer SHARED src/vk_frame_layer.cpp)
+    add_library(VkFrameBridgeLayer SHARED src/vk_frame_layer.cpp src/vk_frame_layer.def)
     target_include_directories(VkFrameBridgeLayer PRIVATE
         "${VULKAN_HEADERS_INCLUDE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/include")
     target_compile_definitions(VkFrameBridgeLayer PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
