@@ -22,13 +22,10 @@ jobs:
           git clone --depth 1 --filter=blob:none --sparse --branch v2.14.16 https://github.com/NVIDIA-RTX/Streamline.git "$tmp\Streamline"
           git -C "$tmp\Streamline" sparse-checkout set include
           git clone --depth 1 https://github.com/NVIDIA/nvapi.git "$tmp\nvapi"
-          git clone --depth 1 https://github.com/NVIDIA/NVIDIAOpticalFlowSDK.git "$tmp\nvof"
           New-Item -ItemType Directory -Force -Path "PresetCApp\vendor\streamline" | Out-Null
           New-Item -ItemType Directory -Force -Path "PresetCApp\vendor\nvapi" | Out-Null
-          New-Item -ItemType Directory -Force -Path "PresetCApp\vendor\nvof" | Out-Null
           Copy-Item "$tmp\Streamline\include\*.h" "PresetCApp\vendor\streamline"
           Copy-Item "$tmp\nvapi\*.h" "PresetCApp\vendor\nvapi"
-          Copy-Item "$tmp\nvof\nvOpticalFlow*.h" "PresetCApp\vendor\nvof"
           Get-ChildItem "PresetCApp\vendor\streamline\sl_dlss_g.h", "PresetCApp\vendor\nvapi\nvapi.h", "PresetCApp\vendor\nvof\nvOpticalFlowD3D12.h" | Select-Object Name, Length
 
       - name: Configure (MSVC x64)
@@ -70,7 +67,6 @@ jobs:
           New-Item -ItemType Directory -Force -Path $licenseDir | Out-Null
           Copy-Item "$env:RUNNER_TEMP\Streamline\LICENSE" $licenseDir -ErrorAction SilentlyContinue
           Copy-Item "$env:RUNNER_TEMP\nvapi\License.txt" $licenseDir -ErrorAction SilentlyContinue
-          Copy-Item "$env:RUNNER_TEMP\nvof\LICENSE" $licenseDir -ErrorAction SilentlyContinue
           $sdkLicenses = @(Get-ChildItem -LiteralPath $sdk -Recurse -File | Where-Object { $_.Name -match '^(NGX-LICENSE|Streamline-LICENSE|THIRD-PARTY-LICENSES|reflex\\.license)' })
           foreach ($item in $sdkLicenses | Select-Object -First 12) {
             Copy-Item -LiteralPath $item.FullName -Destination (Join-Path $licenseDir $item.Name) -Force
