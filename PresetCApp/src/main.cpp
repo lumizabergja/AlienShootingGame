@@ -103,7 +103,7 @@ void start() {
 
     Options options;
     options.multiplier = UINT(SendDlgItemMessageW(window, Multiplier, CB_GETCURSEL, 0, 0)) + 1;
-    // Independent Flip candidate: never clip a native center hole.
+    // Click-through / no hole: never clip a native center hole.
     options.centerRadius = 0;
     options.vsync = false;
     options.gpuProfile = false;
@@ -124,24 +124,26 @@ void start() {
                                "x" + std::to_string(dm.dmPelsHeight) +
                                " refresh_hz=" + std::to_string(dm.dmDisplayFrequency));
     }
-    // Experimental Independent Flip candidate: a full-monitor, non-layered,
-    // non-redirected-by-alpha HWND. Windows decides whether direct scanout engages.
-    // WS_DISABLED keeps this presentation-only top-level window out of normal
-    // mouse hit testing; WS_EX_NOACTIVATE prevents it stealing game focus.
-    // Preserve the native click-through goal without a layered surface.
+    // Reliable cross-process click-through: layered + transparent is required
+    // for a top-level overlay. It remains visually opaque (alpha = 255).
+    // No native center-hole region is created in this build.
     output = CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW,
-        L"FrameGeneration.Output", L"FrameGeneration", WS_POPUP | WS_DISABLED,
+        WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_TOOLWINDOW,
+        L"FrameGeneration.Output", L"FrameGeneration", WS_POPUP,
         mi.rcMonitor.left, mi.rcMonitor.top,
         mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top,
         nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
     if (!output) {
-        SetWindowTextW(status, L"Cannot create Independent Flip output window.");
+        SetWindowTextW(status, L"Cannot create click-through output window.");
         return;
     }
-    diagnostics::write("Output candidate: non-layered disabled full-monitor HWND, no native center hole.");
-    // Keep the feedback guard from v3. DWM-dependent capture exclusion can
-    // interact with Independent Flip eligibility; verify using PresentMon.
+    if (!SetLayeredWindowAttributes(output, 0, 255, LWA_ALPHA)) {
+        SetWindowTextW(status, L"Cannot enable reliable click-through.");
+        DestroyWindow(output);
+        output = nullptr;
+        return;
+    }
+    diagnostics::write("Output: fully opaque WS_EX_LAYERED + WS_EX_TRANSPARENT click-through; no native center hole.");
     if (!SetWindowDisplayAffinity(output, 0x11))
         diagnostics::write("WDA_EXCLUDEFROMCAPTURE unavailable; check NvFBC feedback on target system.");
 
@@ -280,7 +282,7 @@ LRESULT CALLBACK proc(HWND w, UINT m, WPARAM a, LPARAM b) {
                     uint64_t v2 = control->perf.version.load(std::memory_order_acquire);
                     if (v1 == v2) {
                         wchar_t text[360];
-                        swprintf(text, 360, L"%.1f base | %.1f present | %.2f ms age | drop %llu\nDLSS 0x%X | Independent Flip candidate",
+                        swprintf(text, 360, L"%.1f base | %.1f present | %.2f ms age | drop %llu\nDLSS 0x%X | Click-through / no hole",
                                  base / 1000.0, presents / 1000.0, age / 1000.0,
                                  (unsigned long long)dropped, sdk);
                         SetWindowTextW(status, text);
@@ -391,7 +393,7 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, PWSTR, int show) {
     wc.hbrBackground = GetSysColorBrush(COLOR_WINDOW);
     RegisterClassW(&wc);
 
-    HWND w = CreateWindowExW(0, wc.lpszClassName, L"FrameGeneration - Preset C / Independent Flip Test",
+    HWND w = CreateWindowExW(0, wc.lpszClassName, L"FrameGeneration - Preset C / Click-Through No Hole",
                              WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
                              CW_USEDEFAULT, CW_USEDEFAULT, 455, 292,
                              nullptr, nullptr, h, nullptr);

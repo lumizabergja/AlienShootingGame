@@ -1,4 +1,4 @@
-name: Build Preset C v3 Independent Flip Candidate (Windows x64)
+name: Build Preset C v3 Reliable Click-Through No Hole (Windows x64)
 
 on:
   push:
@@ -31,12 +31,12 @@ jobs:
           Copy-Item "$tmp\nvapi\*.h" "PresetCApp\vendor\nvapi"
           Get-ChildItem "PresetCApp\vendor\streamline\sl_dlss_g.h", "PresetCApp\vendor\nvapi\nvapi.h", "PresetCApp\vendor\nvof\nvOpticalFlowD3D12.h" | Select-Object Name, Length
 
-      - name: Check independent-flip source invariants
+      - name: Verify cross-process click-through and no-hole code
         shell: pwsh
         run: |
           $src = Get-Content 'PresetCApp/src/main.cpp' -Raw
-          if ($src.Contains('SetWindowRgn') -or $src.Contains('WS_EX_LAYERED') -or $src.Contains('CenterRadius')) { throw 'Legacy center hole or layered output still present' }
-          if (-not $src.Contains('WS_POPUP | WS_DISABLED')) { throw 'Missing non-layered click-through test window' }
+          if ($src.Contains('SetWindowRgn') -or $src.Contains('CenterRadius') -or $src.Contains('WS_DISABLED')) { throw 'Legacy bypass or disabled non-clickthrough output still present' }
+          if (-not $src.Contains('WS_EX_LAYERED') -or -not $src.Contains('SetLayeredWindowAttributes') -or -not $src.Contains('WS_EX_TRANSPARENT')) { throw 'Missing layered cross-process click-through output' }
 
       - name: Configure (MSVC x64)
         shell: pwsh
@@ -59,7 +59,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $dist = Join-Path $PWD 'PresetC-v3-IndependentFlip-NoHole-Windows-x64'
+          $dist = Join-Path $PWD 'PresetC-v3-ClickThrough-NoHole-Windows-x64'
           New-Item -ItemType Directory -Force -Path $dist | Out-Null
           Copy-Item 'build-presetc\Release\FrameGeneration.exe' $dist
           $sdk = "$env:RUNNER_TEMP\streamline-sdk"
@@ -81,27 +81,27 @@ jobs:
           foreach ($item in $sdkLicenses | Select-Object -First 12) {
             Copy-Item -LiteralPath $item.FullName -Destination (Join-Path $licenseDir $item.Name) -Force
           }
-          Compress-Archive -Path "$dist\*" -DestinationPath 'PresetC-v3-IndependentFlip-NoHole-Windows-x64.zip' -Force
+          Compress-Archive -Path "$dist\*" -DestinationPath 'PresetC-v3-ClickThrough-NoHole-Windows-x64.zip' -Force
 
       - name: Upload ready-to-run Windows package
         uses: actions/upload-artifact@v4
         with:
-          name: PresetC-v3-IndependentFlip-NoHole-Windows-x64
-          path: PresetC-v3-IndependentFlip-NoHole-Windows-x64.zip
+          name: PresetC-v3-ClickThrough-NoHole-Windows-x64
+          path: PresetC-v3-ClickThrough-NoHole-Windows-x64.zip
           retention-days: 14
 
-      - name: Publish direct-download ZIP on this branch
+      - name: Publish fixed click-through ZIP on this branch
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           New-Item -ItemType Directory -Force -Path 'downloads' | Out-Null
-          Copy-Item -LiteralPath 'PresetC-v3-IndependentFlip-NoHole-Windows-x64.zip' -Destination 'downloads/PresetC-v3-IndependentFlip-NoHole-Windows-x64.zip' -Force
+          Copy-Item -LiteralPath 'PresetC-v3-ClickThrough-NoHole-Windows-x64.zip' -Destination 'downloads/PresetC-v3-ClickThrough-NoHole-Windows-x64.zip' -Force
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add -- 'downloads/PresetC-v3-IndependentFlip-NoHole-Windows-x64.zip'
-          $changed = @(git diff --cached --name-only -- 'downloads/PresetC-v3-IndependentFlip-NoHole-Windows-x64.zip')
+          git add -- 'downloads/PresetC-v3-ClickThrough-NoHole-Windows-x64.zip'
+          $changed = @(git diff --cached --name-only -- 'downloads/PresetC-v3-ClickThrough-NoHole-Windows-x64.zip')
           if ($changed.Count -gt 0) {
-            git commit -m 'Publish portable Windows ZIP [skip ci]'
+            git commit -m 'Publish click-through Windows ZIP [skip ci]'
             if ($LASTEXITCODE -ne 0) { throw 'Commit failed' }
             git push origin "HEAD:$env:GITHUB_REF_NAME"
             if ($LASTEXITCODE -ne 0) { throw 'Publishing direct-download ZIP failed' }
