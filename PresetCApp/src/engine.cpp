@@ -124,6 +124,17 @@ void Engine::init() {
             if (desc.Monitor == monitor) {
                 adapter = a;
                 display = desc;
+                // Capability is not the active present mode. PresentMon must
+                // confirm Hardware: Independent Flip on the running system.
+                ComPtr<IDXGIOutput6> out6;
+                if (SUCCEEDED(out.As(&out6))) {
+                    UINT hwCaps = 0;
+                    if (SUCCEEDED(out6->CheckHardwareCompositionSupport(&hwCaps))) {
+                        diagnostics::write("DirectFlip HW capability flags=" + std::to_string(hwCaps) +
+                            " fullscreen=" + ((hwCaps & DXGI_HARDWARE_COMPOSITION_SUPPORT_FLAG_FULLSCREEN) ? "yes" : "no") +
+                            " windowed=" + ((hwCaps & DXGI_HARDWARE_COMPOSITION_SUPPORT_FLAG_WINDOWED) ? "yes" : "no"));
+                    }
+                }
                 break;
             }
         }
@@ -323,12 +334,6 @@ void Engine::makeSwap() {
 void Engine::captureLoop() {
     try {
         MmcssScope mmcss;
-        using Clock = std::chrono::steady_clock;
-        const Clock::duration samplePeriod = options.captureFps > 0.0
-            ? std::chrono::duration_cast<Clock::duration>(
-                  std::chrono::duration<double>(1.0 / options.captureFps))
-            : Clock::duration::zero();
-        Clock::time_point nextSample{};
         uint64_t seq = 0;
         bool wasPaused = false;
         while (!control.stop) {
@@ -345,21 +350,6 @@ void Engine::captureLoop() {
             if (wasPaused) {
                 ++epoch;
                 wasPaused = false;
-                nextSample = Clock::time_point{}; // first frame after refocus is immediate
-            }
-            // Rate-limit source grabs without adding a queue to the presenter.
-            // Always take a fresh NvFBC frame when due; never duplicate an older grab.
-            if (samplePeriod != Clock::duration::zero() &&
-                nextSample.time_since_epoch().count() != 0) {
-                const auto now = Clock::now();
-                if (now < nextSample) {
-                    const auto remainingUs =
-                        std::chrono::duration_cast<std::chrono::microseconds>(nextSample - now).count();
-                    if (remainingUs > 1500) Sleep(1);
-                    else if (remainingUs > 100) SwitchToThread();
-                    else YieldProcessor();
-                    continue;
-                }
             }
             auto captureDone=captured->GetCompletedValue(),releaseDone=release->GetCompletedValue();
             if(captureDone==UINT64_MAX || releaseDone==UINT64_MAX)throw std::runtime_error("GPU removed during capture");
@@ -382,16 +372,6 @@ void Engine::captureLoop() {
                     break;
                 }
                 throw std::runtime_error(std::string(error.begin(),error.end()));
-            }
-            if (samplePeriod != Clock::duration::zero()) {
-                const auto now = Clock::now();
-                if (nextSample.time_since_epoch().count() == 0) {
-                    nextSample = now + samplePeriod;
-                } else {
-                    // Preserve the average requested rate even if a real game frame
-                    // arrives later than its sampling deadline.
-                    do { nextSample += samplePeriod; } while (nextSample <= now);
-                }
             }
             // Commit the fence counter only after CUDA accepted its signal.
             auto ready=nextCapture.load()+1;

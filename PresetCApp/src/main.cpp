@@ -3,13 +3,10 @@
 #include "diagnostics.h"
 #include <commctrl.h>
 #include <memory>
-#include <cerrno>
-#include <cmath>
-#include <cwchar>
 
 namespace {
-constexpr int Target = 101, Refresh = 102, Multiplier = 103, CenterRadius = 105,
-              CaptureFps = 112, Start = 107, Stop = 108, Status = 109;
+constexpr int Target = 101, Refresh = 102, Multiplier = 103, OpticalFlow = 110,
+              OpticalFlowResolution = 111, Start = 107, Stop = 108, Status = 109;
 
 HWND window{}, output{}, targetCombo{}, status{};
 HFONT uiFont{};
@@ -88,7 +85,7 @@ LRESULT CALLBACK outputProc(HWND w, UINT m, WPARAM a, LPARAM b) {
 }
 
 void setRunning(bool running) {
-    for (int id : {Target, Refresh, Multiplier, CenterRadius, CaptureFps})
+    for (int id : {Target, Refresh, Multiplier, OpticalFlow, OpticalFlowResolution})
         EnableWindow(GetDlgItem(window, id), !running);
     EnableWindow(GetDlgItem(window, Start), !running);
     EnableWindow(GetDlgItem(window, Stop), running);
@@ -106,34 +103,13 @@ void start() {
 
     Options options;
     options.multiplier = UINT(SendDlgItemMessageW(window, Multiplier, CB_GETCURSEL, 0, 0)) + 1;
-    BOOL valid = FALSE;
-    UINT bypass = GetDlgItemInt(window, CenterRadius, &valid, FALSE);
-    if (!valid) {
-        SetWindowTextW(status, L"Center bypass: enter 0 or a positive pixel value.");
-        return;
-    }
-    options.centerRadius = bypass;
-    wchar_t fpsText[32]{};
-    GetDlgItemTextW(window, CaptureFps, fpsText, 32);
-    errno = 0;
-    wchar_t *end = nullptr;
-    const double fps = std::wcstod(fpsText, &end);
-    while (end && (*end == L' ' || *end == L'\t')) ++end;
-    if (end == fpsText || (end && *end) || errno == ERANGE ||
-        !std::isfinite(fps) || fps < 0.0 || fps > 1000.0 ||
-        (fps > 0.0 && fps < 0.001)) {
-        SetWindowTextW(status, L"Capture FPS: enter 0 (unlimited), or 0.001 to 1000. Example: 75");
-        diagnostics::write("Capture FPS rejected: invalid field");
-        return;
-    }
-    options.captureFps = fps;
+    // Independent Flip candidate: never clip a native center hole.
+    options.centerRadius = 0;
     options.vsync = false;
     options.gpuProfile = false;
-    options.opticalFlow = true;
-    options.opticalFlowPercent = 10u;
-    diagnostics::write("Capture FPS target=" + std::to_string(fps) +
-                       " NVOFA=4x4 FAST scale=10% FG multiplier=" +
-                       std::to_string(options.multiplier));
+    options.opticalFlow = SendDlgItemMessageW(window, OpticalFlow, BM_GETCHECK, 0, 0) == BST_CHECKED;
+    const int scaleChoice = int(SendDlgItemMessageW(window, OpticalFlowResolution, CB_GETCURSEL, 0, 0));
+    options.opticalFlowPercent = scaleChoice == 1 ? 25u : scaleChoice == 2 ? 10u : 50u;
 
     MONITORINFO mi{};
     mi.cbSize = sizeof mi;
@@ -148,59 +124,26 @@ void start() {
                                "x" + std::to_string(dm.dmPelsHeight) +
                                " refresh_hz=" + std::to_string(dm.dmDisplayFrequency));
     }
-    // The presenter is fully opaque; the native center bypass is still a real Win32
-    // window region.  For a top-level overlay over another process, WS_EX_TRANSPARENT
-    // alone is not reliable input pass-through.  Pair it with WS_EX_LAYERED at full
-    // opacity so mouse input is passed to the game underneath while visuals stay opaque.
+    // Experimental Independent Flip candidate: a full-monitor, non-layered,
+    // non-redirected-by-alpha HWND. Windows decides whether direct scanout engages.
+    // WS_DISABLED keeps this presentation-only top-level window out of normal
+    // mouse hit testing; WS_EX_NOACTIVATE prevents it stealing game focus.
+    // Preserve the native click-through goal without a layered surface.
     output = CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_TOOLWINDOW,
-        L"FrameGeneration.Output", L"FrameGeneration", WS_POPUP, mi.rcMonitor.left, mi.rcMonitor.top,
-        mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top, nullptr, nullptr,
-        GetModuleHandleW(nullptr), nullptr);
+        WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW,
+        L"FrameGeneration.Output", L"FrameGeneration", WS_POPUP | WS_DISABLED,
+        mi.rcMonitor.left, mi.rcMonitor.top,
+        mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top,
+        nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
     if (!output) {
-        SetWindowTextW(status, L"Cannot create output window.");
+        SetWindowTextW(status, L"Cannot create Independent Flip output window.");
         return;
     }
-    // Keep the layered window visually fully opaque.  WS_EX_LAYERED +
-    // WS_EX_TRANSPARENT provides true cross-process mouse pass-through.
-    if (!SetLayeredWindowAttributes(output, 0, 255, LWA_ALPHA)) {
-        SetWindowTextW(status, L"Cannot enable click-through output window.");
-        DestroyWindow(output);
-        output = nullptr;
-        return;
-    }
-
-    // Literal native center bypass: clip the FG output window itself so the requested
-    // square is not covered by the Streamline/DLSS-G presenter at all. The selected
-    // game remains directly visible through this hole, keeping a centered crosshair
-    // native on base and generated presents alike. This avoids DLSS-G UI interpolation
-    // and avoids the full-width/full-height seams required by rectangular subrects.
-    if (options.centerRadius) {
-        const int ow = mi.rcMonitor.right - mi.rcMonitor.left;
-        const int oh = mi.rcMonitor.bottom - mi.rcMonitor.top;
-        const int r = int(options.centerRadius);
-        const int cx = ow / 2, cy = oh / 2;
-        if (r >= cx || r >= cy) {
-            SetWindowTextW(status, L"Center bypass is too large for this display.");
-            DestroyWindow(output);
-            output = nullptr;
-            return;
-        }
-        HRGN visible = CreateRectRgn(0, 0, ow, oh);
-        HRGN hole = CreateRectRgn(cx - r, cy - r, cx + r, cy + r);
-        if (!visible || !hole || CombineRgn(visible, visible, hole, RGN_DIFF) == ERROR ||
-            SetWindowRgn(output, visible, FALSE) == 0) {
-            if (visible) DeleteObject(visible);
-            if (hole) DeleteObject(hole);
-            SetWindowTextW(status, L"Cannot create native center bypass.");
-            DestroyWindow(output);
-            output = nullptr;
-            return;
-        }
-        // SetWindowRgn owns 'visible' on success.
-        DeleteObject(hole);
-    }
-    SetWindowDisplayAffinity(output, 0x11);
+    diagnostics::write("Output candidate: non-layered disabled full-monitor HWND, no native center hole.");
+    // Keep the feedback guard from v3. DWM-dependent capture exclusion can
+    // interact with Independent Flip eligibility; verify using PresentMon.
+    if (!SetWindowDisplayAffinity(output, 0x11))
+        diagnostics::write("WDA_EXCLUDEFROMCAPTURE unavailable; check NvFBC feedback on target system.");
 
     control = std::make_unique<SessionControl>();
     control->expectedMonitor = MonitorFromWindow(game, MONITOR_DEFAULTTONEAREST);
@@ -244,27 +187,24 @@ LRESULT CALLBACK proc(HWND w, UINT m, WPARAM a, LPARAM b) {
             SendMessageW(fg, CB_ADDSTRING, 0, (LPARAM)text);
         SendMessageW(fg, CB_SETCURSEL, 1, 0);
 
-        add(L"STATIC", L"Capture FPS", SS_LEFT | SS_NOPREFIX, 12, 85, 145, 20, 0);
-        auto fpsEdit = add(L"EDIT", L"120", WS_BORDER | ES_AUTOHSCROLL,
-                           170, 80, 100, 24, CaptureFps);
-        SendMessageW(fpsEdit, EM_SETLIMITTEXT, 12, 0);
+        add(L"BUTTON", L"NVOFA 4x4 FAST (experimental)", BS_AUTOCHECKBOX,
+            12, 84, 307, 24, OpticalFlow);
 
-        add(L"STATIC", L"Center bypass (px)", SS_LEFT | SS_NOPREFIX, 12, 119, 150, 20, 0);
-        auto bypass = add(L"EDIT", L"10", WS_BORDER | ES_NUMBER | ES_AUTOHSCROLL,
-                          170, 114, 70, 24, CenterRadius);
-        SendMessageW(bypass, EM_SETLIMITTEXT, 4, 0);
+        add(L"STATIC", L"NVOFA resolution", SS_LEFT | SS_NOPREFIX, 12, 119, 150, 20, 0);
+        auto ofaResolution = add(L"COMBOBOX", L"", CBS_DROPDOWNLIST,
+                                 170, 114, 115, 112, OpticalFlowResolution);
+        for (auto label : {L"50%", L"25%", L"10%"})
+            SendMessageW(ofaResolution, CB_ADDSTRING, 0, (LPARAM)label);
+        SendMessageW(ofaResolution, CB_SETCURSEL, 0, 0);
 
-        add(L"STATIC", L"NVOFA: 4x4 FAST, 10% fixed (zero-motion fallback)",
-            SS_LEFT | SS_NOPREFIX, 12, 148, 400, 20, 0);
-
-        add(L"BUTTON", L"Start", BS_DEFPUSHBUTTON, 12, 183, 205, 30, Start);
-        add(L"BUTTON", L"Stop", 0, 226, 183, 205, 30, Stop);
+        add(L"BUTTON", L"Start", BS_DEFPUSHBUTTON, 12, 157, 205, 30, Start);
+        add(L"BUTTON", L"Stop", 0, 226, 157, 205, 30, Stop);
         EnableWindow(GetDlgItem(w, Stop), FALSE);
 
-        add(L"STATIC", L"Status", SS_LEFT | SS_NOPREFIX, 12, 230, 92, 20, 0);
+        add(L"STATIC", L"Status", SS_LEFT | SS_NOPREFIX, 12, 204, 92, 20, 0);
         status = add(L"STATIC", presetC.configured ? L"Ready - Preset C profile saved" :
                      L"Ready - Preset C unavailable (see PRESET-C.txt)",
-                     SS_LEFT | SS_NOPREFIX, 108, 227, 323, 52, Status);
+                     SS_LEFT | SS_NOPREFIX, 108, 201, 323, 52, Status);
 
         refresh();
         SetTimer(w, 1, 50, nullptr);
@@ -337,18 +277,12 @@ LRESULT CALLBACK proc(HWND w, UINT m, WPARAM a, LPARAM b) {
                     uint32_t age = control->perf.ageUs.load(std::memory_order_relaxed);
                     uint64_t dropped = control->perf.dropped.load(std::memory_order_relaxed);
                     uint32_t sdk = control->perf.dlssStatus.load(std::memory_order_relaxed);
-                    uint32_t radius = control->perf.centerRadius.load(std::memory_order_relaxed);
                     uint64_t v2 = control->perf.version.load(std::memory_order_acquire);
                     if (v1 == v2) {
                         wchar_t text[360];
-                        if (radius)
-                            swprintf(text, 360, L"%.1f base | %.1f present | %.2f ms age | drop %llu\nDLSS 0x%X | bypass %ux%u",
-                                     base / 1000.0, presents / 1000.0, age / 1000.0,
-                                     (unsigned long long)dropped, sdk, radius * 2, radius * 2);
-                        else
-                            swprintf(text, 360, L"%.1f base | %.1f present | %.2f ms age | drop %llu\nDLSS 0x%X | bypass Off",
-                                     base / 1000.0, presents / 1000.0, age / 1000.0,
-                                     (unsigned long long)dropped, sdk);
+                        swprintf(text, 360, L"%.1f base | %.1f present | %.2f ms age | drop %llu\nDLSS 0x%X | Independent Flip candidate",
+                                 base / 1000.0, presents / 1000.0, age / 1000.0,
+                                 (unsigned long long)dropped, sdk);
                         SetWindowTextW(status, text);
                         lastPerfVersion = v2;
                     }
@@ -457,9 +391,9 @@ int WINAPI wWinMain(HINSTANCE h, HINSTANCE, PWSTR, int show) {
     wc.hbrBackground = GetSysColorBrush(COLOR_WINDOW);
     RegisterClassW(&wc);
 
-    HWND w = CreateWindowExW(0, wc.lpszClassName, L"FrameGeneration - Preset C / NVOFA FAST",
+    HWND w = CreateWindowExW(0, wc.lpszClassName, L"FrameGeneration - Preset C / Independent Flip Test",
                              WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-                             CW_USEDEFAULT, CW_USEDEFAULT, 455, 324,
+                             CW_USEDEFAULT, CW_USEDEFAULT, 455, 292,
                              nullptr, nullptr, h, nullptr);
     if (!w)
         return 1;

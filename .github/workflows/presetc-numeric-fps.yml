@@ -1,9 +1,9 @@
-name: Build Preset C Numeric FPS (Windows x64)
+name: Build Preset C v3 Independent Flip Candidate (Windows x64)
 
 on:
   push:
     branches:
-      - 'experiment/presetc-working-numeric-fps-*'
+      - 'experiment/presetc-v3-independent-flip-*'
   workflow_dispatch:
 
 jobs:
@@ -28,6 +28,13 @@ jobs:
           Copy-Item "$tmp\nvapi\*.h" "PresetCApp\vendor\nvapi"
           Get-ChildItem "PresetCApp\vendor\streamline\sl_dlss_g.h", "PresetCApp\vendor\nvapi\nvapi.h", "PresetCApp\vendor\nvof\nvOpticalFlowD3D12.h" | Select-Object Name, Length
 
+      - name: Check independent-flip source invariants
+        shell: pwsh
+        run: |
+          $src = Get-Content 'PresetCApp/src/main.cpp' -Raw
+          if ($src.Contains('SetWindowRgn') -or $src.Contains('WS_EX_LAYERED') -or $src.Contains('CenterRadius')) { throw 'Legacy center hole or layered output still present' }
+          if (-not $src.Contains('WS_POPUP | WS_DISABLED')) { throw 'Missing non-layered click-through test window' }
+
       - name: Configure (MSVC x64)
         shell: pwsh
         run: cmake -S PresetCApp -B build-presetc -A x64
@@ -49,7 +56,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $dist = Join-Path $PWD 'PresetC-NumericFPS-Windows-x64'
+          $dist = Join-Path $PWD 'PresetC-v3-IndependentFlip-NoHole-Windows-x64'
           New-Item -ItemType Directory -Force -Path $dist | Out-Null
           Copy-Item 'build-presetc\Release\FrameGeneration.exe' $dist
           $sdk = "$env:RUNNER_TEMP\streamline-sdk"
@@ -71,11 +78,11 @@ jobs:
           foreach ($item in $sdkLicenses | Select-Object -First 12) {
             Copy-Item -LiteralPath $item.FullName -Destination (Join-Path $licenseDir $item.Name) -Force
           }
-          Compress-Archive -Path "$dist\*" -DestinationPath 'PresetC-NumericFPS-Windows-x64.zip' -Force
+          Compress-Archive -Path "$dist\*" -DestinationPath 'PresetC-v3-IndependentFlip-NoHole-Windows-x64.zip' -Force
 
       - name: Upload ready-to-run Windows package
         uses: actions/upload-artifact@v4
         with:
-          name: PresetC-NumericFPS-Windows-x64
-          path: PresetC-NumericFPS-Windows-x64.zip
+          name: PresetC-v3-IndependentFlip-NoHole-Windows-x64
+          path: PresetC-v3-IndependentFlip-NoHole-Windows-x64.zip
           retention-days: 14

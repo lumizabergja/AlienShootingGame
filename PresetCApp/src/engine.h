@@ -4,12 +4,11 @@
 
 struct Options {
     UINT multiplier = 2;
-    UINT centerRadius = 10; // 0 disables; N leaves a centered 2N x 2N square outside FG
+    UINT centerRadius = 0; // Center-hole bypass removed in this Independent Flip test build.
     bool vsync = false;
     bool gpuProfile = false;
     bool opticalFlow = false; // Experimental NVOFA 4x4 FAST input; zero-motion fallback.
-    UINT opticalFlowPercent = 10; // fixed 10% low-latency NvOFA input scale.
-    double captureFps = 120.0; // 0 = uncapped; sampled real frames only.
+    UINT opticalFlowPercent = 50; // NVOFA input scale: 50, 25 or 10 percent of captured dimensions.
 };
 
 struct PerformanceSnapshot {
