@@ -6,6 +6,9 @@ on:
       - 'experiment/presetc-v3-independent-flip-*'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
@@ -86,3 +89,20 @@ jobs:
           name: PresetC-v3-IndependentFlip-NoHole-Windows-x64
           path: PresetC-v3-IndependentFlip-NoHole-Windows-x64.zip
           retention-days: 14
+
+      - name: Publish direct-download ZIP on this branch
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path 'downloads' | Out-Null
+          Copy-Item -LiteralPath 'PresetC-v3-IndependentFlip-NoHole-Windows-x64.zip' -Destination 'downloads/PresetC-v3-IndependentFlip-NoHole-Windows-x64.zip' -Force
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- 'downloads/PresetC-v3-IndependentFlip-NoHole-Windows-x64.zip'
+          $changed = @(git diff --cached --name-only -- 'downloads/PresetC-v3-IndependentFlip-NoHole-Windows-x64.zip')
+          if ($changed.Count -gt 0) {
+            git commit -m 'Publish portable Windows ZIP [skip ci]'
+            if ($LASTEXITCODE -ne 0) { throw 'Commit failed' }
+            git push origin "HEAD:$env:GITHUB_REF_NAME"
+            if ($LASTEXITCODE -ne 0) { throw 'Publishing direct-download ZIP failed' }
+          }
