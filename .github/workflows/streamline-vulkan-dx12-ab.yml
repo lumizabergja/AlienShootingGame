@@ -1,0 +1,118 @@
+name: Build official Streamline Vulkan vs D3D12 A/B demo
+on:
+  push:
+    branches:
+      - 'experiment/streamline-vulkan-dx12-ab-*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 90
+    steps:
+      - name: Checkout experiment branch
+        uses: actions/checkout@v4
+
+      - name: Clone NVIDIA's actual Vulkan/D3D12 DLSS-G sample
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git clone --recurse-submodules --depth 1 https://github.com/NVIDIA-RTX/Streamline_Sample.git "$env:RUNNER_TEMP\Streamline_Sample"
+          if ($LASTEXITCODE -ne 0) { throw 'Streamline sample clone failed' }
+
+      - name: Install official LunarG Vulkan SDK with SHA-256 verification
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = '1.4.350.0'
+          $installer = Join-Path $env:RUNNER_TEMP 'vulkan-sdk-installer.exe'
+          curl.exe -fSL --retry 3 --retry-delay 5 -o $installer "https://sdk.lunarg.com/sdk/download/$version/windows/vulkansdk-windows-X64-$version.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'Vulkan SDK download failed' }
+          $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $installer).Hash
+          $expected = '855B27BA05D2D8119C5114C5D4FF870CA38F2C632B11E1BB9923B9B7E6ECFE7B'
+          if ($actual -ne $expected) { throw "Vulkan SDK SHA-256 mismatch: $actual" }
+          & $installer --accept-licenses --default-answer --confirm-command install
+          if ($LASTEXITCODE -ne 0) { throw "Vulkan SDK install returned $LASTEXITCODE" }
+          $sdk = "C:\VulkanSDK\$version"
+          if (-not (Test-Path "$sdk\Bin\dxc.exe")) { throw 'Vulkan SDK SPIR-V DXC compiler missing' }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "VULKAN_SDK=$sdk"
+          Add-Content -LiteralPath $env:GITHUB_PATH -Value "$sdk\Bin"
+
+      - name: Install NVIDIA Streamline SDK 2.14.16
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = Join-Path $env:RUNNER_TEMP 'streamline-sdk.zip'
+          curl.exe -fSL --retry 3 --retry-delay 5 -o $zip 'https://github.com/NVIDIA-RTX/Streamline/releases/download/v2.14.16/streamline-sdk-v2.14.16.zip'
+          if ($LASTEXITCODE -ne 0) { throw 'Streamline SDK download failed' }
+          $sdk = Join-Path $env:RUNNER_TEMP 'sl-release'
+          Expand-Archive -LiteralPath $zip -DestinationPath $sdk -Force
+          $roots = @($sdk) + @(Get-ChildItem $sdk -Recurse -Directory | Select-Object -ExpandProperty FullName)
+          $sdkRoot = $roots | Where-Object { Test-Path (Join-Path $_ 'include\sl.h') } | Select-Object -First 1
+          if (-not $sdkRoot) { throw 'SDK include/sl.h not found' }
+          $sample = Join-Path $env:RUNNER_TEMP 'Streamline_Sample'
+          Copy-Item -Path (Join-Path $sdkRoot '*') -Destination (Join-Path $sample 'streamline') -Recurse -Force
+          if (-not (Test-Path (Join-Path $sample 'streamline\CMakeLists.txt'))) { throw 'Sample Streamline CMakeLists.txt missing from SDK' }
+          Write-Host "Using SDK content from $sdkRoot"
+
+      - name: Configure and build one EXE supporting both APIs
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sample = Join-Path $env:RUNNER_TEMP 'Streamline_Sample'
+          cmake -S $sample -B "$sample\_build" -A x64 -DUSE_SL=ON -DSTREAMLINE_FEATURE_DLSS_FG=ON -DSTREAMLINE_FEATURE_REFLEX=ON -DSTREAMLINE_FEATURE_NVPERF=OFF -DSTREAMLINE_FEATURE_IMGUI=OFF -DSTREAMLINE_FEATURE_DEEPDVC=OFF -DSTREAMLINE_FEATURE_DLSS_RR=OFF
+          if ($LASTEXITCODE -ne 0) { throw 'CMake configure failed' }
+          cmake --build "$sample\_build" --config Release --parallel 4
+          if ($LASTEXITCODE -ne 0) { throw 'Streamline sample build failed' }
+          cmake --install "$sample\_build" --config Release
+          if ($LASTEXITCODE -ne 0) { throw 'Sample dependency/data install failed' }
+
+      - name: Package both API modes and license files
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sample = Join-Path $env:RUNNER_TEMP 'Streamline_Sample'
+          $from = Join-Path $sample '_package'
+          $dist = Join-Path $PWD 'Alien-Streamline-Vulkan-vs-DX12-AB'
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item -Path (Join-Path $from '*') -Destination $dist -Recurse -Force
+          $bin = Join-Path $dist '_bin'
+          if (-not (Test-Path "$bin\StreamlineSample.exe")) { throw 'Release EXE was not installed' }
+          $runVK = '@echo off' + [Environment]::NewLine + 'cd /d "%~dp0\_bin"' + [Environment]::NewLine + 'start "" "StreamlineSample.exe" -vk -height 1080'
+          $runDX = '@echo off' + [Environment]::NewLine + 'cd /d "%~dp0\_bin"' + [Environment]::NewLine + 'start "" "StreamlineSample.exe" -d3d12 -height 1080'
+          Set-Content -LiteralPath (Join-Path $dist 'RUN_VULKAN.cmd') -Value $runVK -Encoding ASCII
+          Set-Content -LiteralPath (Join-Path $dist 'RUN_DX12.cmd') -Value $runDX -Encoding ASCII
+          Copy-Item 'experiments\vulkan-dx12-ab\README.txt' (Join-Path $dist 'READ_FIRST.txt')
+          Copy-Item "$sample\donut\LICENSE.txt" (Join-Path $dist 'DONUT-LICENSE.txt') -ErrorAction SilentlyContinue
+          Copy-Item "$sample\donut\ThirdPartyLicenses.txt" (Join-Path $dist 'DONUT-THIRD-PARTY-LICENSES.txt') -ErrorAction SilentlyContinue
+          $output = Join-Path $PWD 'Alien-Streamline-Vulkan-vs-DX12-AB-Windows-x64.zip'
+          Compress-Archive -Path (Join-Path $dist '*') -DestinationPath $output -CompressionLevel Optimal -Force
+          Write-Host "ZIP bytes: $((Get-Item $output).Length)"
+
+      - name: Upload CI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Alien-Streamline-Vulkan-vs-DX12-AB-Windows-x64
+          path: Alien-Streamline-Vulkan-vs-DX12-AB-Windows-x64.zip
+          retention-days: 30
+
+      - name: Publish public direct-download prerelease
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = 'streamline-vulkan-dx12-ab-20261031'
+          $name = 'Alien Vulkan vs DX12 DLSS-G A/B Test (experimental)'
+          $notes = 'Official NVIDIA Streamline Sample 2.14.16, packaged with both Vulkan and D3D12 launchers for an API-controlled DLSS Frame Generation test. This is not yet the external Alien NvFBC overlay. Read READ_FIRST.txt.'
+          $asset = 'Alien-Streamline-Vulkan-vs-DX12-AB-Windows-x64.zip'
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $asset --repo $env:GITHUB_REPOSITORY --clobber
+          } else {
+            gh release create $tag $asset --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --prerelease --title $name --notes $notes
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'Direct-download release publishing failed' }
