@@ -5,7 +5,7 @@ on:
       - 'experiment/nvfbc-pid-fresh-hwnd-*'
   workflow_dispatch:
 permissions:
-  contents: read
+  contents: write
 jobs:
   windows:
     runs-on: windows-2022
@@ -64,6 +64,21 @@ jobs:
             Copy-Item -LiteralPath $preferred.FullName -Destination (Join-Path $dst $name)
           }
           Compress-Archive -Path "$dst/*" -DestinationPath 'NvShaderFresh-PresetC-Windows-x64.zip' -Force
+      - name: Publish stable GitHub Release download
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = 'nvshaderfresh-reflexfix-20261104'
+          $asset = 'NvShaderFresh-PresetC-Windows-x64.zip'
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $asset --clobber --repo $env:GITHUB_REPOSITORY
+          } else {
+            gh release create $tag $asset --target $env:GITHUB_SHA --title "NvShaderFresh experimental PID hierarchical FG build" --notes "Experimental Windows x64 build: NvFBC PID capture, hierarchical 4x4 shader motion and DLSS-G with Reflex. NVIDIA GPU output and click-through are not guaranteed or verified." --repo $env:GITHUB_REPOSITORY
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }
       - uses: actions/upload-artifact@v4
         with:
           name: NvShaderFresh-PresetC-Windows-x64
