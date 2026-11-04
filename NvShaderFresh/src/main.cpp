@@ -577,6 +577,8 @@ struct Engine {
     status(L"Presenter ready (message pump enabled). Activate game window.");
     running=true;
     UINT previousRaw=0;bool first=true;
+    uint64_t reportStartMs=GetTickCount64();
+    uint64_t inputsInWindow=0, actualPresentsInWindow=0;
     while(!stopRequested.load(std::memory_order_acquire)){
       // A worker-owned HWND must pump its thread message queue or DWM/Win32
       // activation and visibility changes can stall despite successful Present calls.
@@ -592,7 +594,9 @@ struct Engine {
       if(focusedPid!=config.pid){
         if(first)status(L"Waiting for game focus — Alt+Tab to game");
         ShowWindow(overlay,SW_HIDE);
-        first=true;Sleep(8);continue;
+        first=true;reportStartMs=GetTickCount64();
+        inputsInWindow=0;actualPresentsInWindow=0;
+        Sleep(8);continue;
       }
       if(first)status(L"Game focused. Capturing first frame...");
       ShowWindow(overlay,SW_SHOWNOACTIVATE);
@@ -619,10 +623,19 @@ struct Engine {
       previousRaw=currentRaw;
       if(first)status(L"Presenting frames");
       first=false;++frameNo;
-      if(activeFg && frameNo%120==0)
-        status(L"DLSS-G actual frames: "+std::to_wstring(fg.actualPresentCount())+
-               L" | status bits: "+std::to_wstring(fg.dlssStatusBits())+
-               L" (0=OK, 2=Reflex missing, 8=invalid constants, 16=swapchain index)");
+      ++inputsInWindow;
+      actualPresentsInWindow+=activeFg?fg.actualPresentCount():1;
+      const uint64_t reportNow=GetTickCount64();
+      if(reportNow-reportStartMs>=2000 && inputsInWindow){
+        double baseFps=1000.0*double(inputsInWindow)/double(reportNow-reportStartMs);
+        double presentedFps=1000.0*double(actualPresentsInWindow)/double(reportNow-reportStartMs);
+        double multiplier=double(actualPresentsInWindow)/double(inputsInWindow);
+        status(L"Input FPS "+std::to_wstring(int(baseFps+0.5))+
+          L" | Presented FPS "+std::to_wstring(int(presentedFps+0.5))+
+          L" | FG ratio "+std::to_wstring(multiplier)+
+          L" | DLSS status "+std::to_wstring(activeFg?fg.dlssStatusBits():0));
+        reportStartMs=reportNow;inputsInWindow=0;actualPresentsInWindow=0;
+      }
     }
     status(L"Stopped");
   }
