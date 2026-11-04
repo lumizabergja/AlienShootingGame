@@ -23,8 +23,8 @@ int2 toNative(int2 p) {
 }
 float comparePyramid(int2 origin, int2 displacement, int scale, bool dense) {
     float error=0.0;
-    [unroll] for(int y=0;y<4;y++) {
-      [unroll] for(int x=0;x<4;x++) {
+    [loop] for(int y=0;y<4;y++) {
+      [loop] for(int x=0;x<4;x++) {
         if(!dense && ((x+y)&1)) continue;
         int2 q=origin+(int2(x,y)-int2(1,1))*scale;
         int2 c=toNative(q);
@@ -47,8 +47,8 @@ void Flow4x4(uint3 dt:SV_DispatchThreadID) {
     int2 best=int2(0,0);
     float bestScore=1e20;
     // Pyramid level 2: 4x spatial spacing, wide search up to +/- 32 grid pixels.
-    [loop] for(int y=-8;y<=8;y++) {
-      [loop] for(int x=-8;x<=8;x++) {
+    [loop] for(int y=-8;y<=8;y+=2) {
+      [loop] for(int x=-8;x<=8;x+=2) {
         int2 d=int2(x,y)*4;
         float value=comparePyramid(origin,d,4,false)+0.0025*length(float2(d));
         if(value<bestScore){bestScore=value;best=d;}
@@ -56,8 +56,8 @@ void Flow4x4(uint3 dt:SV_DispatchThreadID) {
     }
     // Pyramid level 1: refine +/- 4 pixels in steps of 2.
     int2 anchor=best;bestScore=1e20;
-    [unroll] for(int y=-2;y<=2;y++) {
-      [unroll] for(int x=-2;x<=2;x++) {
+    [loop] for(int y=-2;y<=2;y++) {
+      [loop] for(int x=-2;x<=2;x++) {
         int2 d=anchor+int2(x,y)*2;
         float value=comparePyramid(origin,d,2,true)+0.003*length(float2(d));
         if(value<bestScore){bestScore=value;best=d;}
@@ -65,8 +65,8 @@ void Flow4x4(uint3 dt:SV_DispatchThreadID) {
     }
     // Pyramid level 0: native 4x4 matching, 1-pixel refinement.
     anchor=best;bestScore=1e20;
-    [unroll] for(int y=-2;y<=2;y++) {
-      [unroll] for(int x=-2;x<=2;x++) {
+    [loop] for(int y=-2;y<=2;y++) {
+      [loop] for(int x=-2;x<=2;x++) {
         int2 d=anchor+int2(x,y);
         float value=comparePyramid(origin,d,1,true)+0.003*length(float2(d));
         if(value<bestScore){bestScore=value;best=d;}
