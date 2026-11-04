@@ -116,6 +116,8 @@ class DlssG {
     PFun_slDLSSGSetOptions* optionsFn_{};
     PFun_slDLSSGGetState* stateFn_{};
     PFun_slReflexSetOptions* reflexFn_{};
+    PFun_slReflexSleep* reflexSleepFn_{};
+    uint32_t lastDlssStatus_{};
     PFun_slPCLSetMarker* pclFn_{};
     template<typename T> void symbol(T& fn,const char* name){
       fn=reinterpret_cast<T>(GetProcAddress(dll_,name));
@@ -165,6 +167,7 @@ public:
       plugin(optionsFn_,sl::kFeatureDLSS_G,"slDLSSGSetOptions");
       plugin(stateFn_,sl::kFeatureDLSS_G,"slDLSSGGetState");
       plugin(reflexFn_,sl::kFeatureReflex,"slReflexSetOptions");
+      plugin(reflexSleepFn_,sl::kFeatureReflex,"slReflexSleep");
       plugin(pclFn_,sl::kFeaturePCL,"slPCLSetMarker");
       sl::DLSSGOptions options{};
       options.mode=sl::DLSSGMode::eOff;
@@ -198,6 +201,8 @@ public:
     void begin(bool reset){
       if(!enabled_)return;
       slcheck(tokenFn_(token_,&frameId_),"Frame token");++frameId_;
+      // Streamline Reflex sleep must be called on every frame with the same token.
+      slcheck(reflexSleepFn_(*token_),"Reflex sleep");
       constants_.reset=reset?sl::eTrue:sl::eFalse;
       slcheck(constantsFn_(constants_,*token_,viewport_),"Frame constants");
       marker(sl::PCLMarker::eSimulationStart);
@@ -221,11 +226,13 @@ public:
       slcheck(tagFn_(*token_,viewport_,tags,3,cmd),"DLSS-G input resources");
     }
     uint32_t actualPresentCount() const {return actualPresentCount_;}
+    uint32_t dlssStatusBits() const {return lastDlssStatus_;}
     std::pair<ComPtr<ID3D12Fence>,uint64_t> afterPresent(){
       if(!enabled_)return {};
       sl::DLSSGState state{};
       slcheck(stateFn_(viewport_,state,nullptr),"DLSS-G frame state");
       actualPresentCount_=state.numFramesActuallyPresented;
+      lastDlssStatus_=static_cast<uint32_t>(state.status);
       std::pair<ComPtr<ID3D12Fence>,uint64_t> out;
       if(state.inputsProcessingCompletionFence&&state.lastPresentInputsProcessingCompletionFenceValue){
         out.first=static_cast<ID3D12Fence*>(state.inputsProcessingCompletionFence);
@@ -613,7 +620,9 @@ struct Engine {
       if(first)status(L"Presenting frames");
       first=false;++frameNo;
       if(activeFg && frameNo%120==0)
-        status(L"DLSS-G actual frames presented per game frame: "+std::to_wstring(fg.actualPresentCount()));
+        status(L"DLSS-G actual frames: "+std::to_wstring(fg.actualPresentCount())+
+               L" | status bits: "+std::to_wstring(fg.dlssStatusBits())+
+               L" (0=OK, 2=Reflex missing, 8=invalid constants, 16=swapchain index)");
     }
     status(L"Stopped");
   }
