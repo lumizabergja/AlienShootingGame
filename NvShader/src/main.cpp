@@ -6,6 +6,7 @@
 #include <d3d9.h>
 #include <d3d12.h>
 #include <d3dcompiler.h>
+#include <dcomp.h>
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 #include <sl.h>
@@ -255,6 +256,9 @@ struct Engine {
   ComPtr<ID3D12Device> device;
   ComPtr<ID3D12CommandQueue> queue;
   ComPtr<IDXGISwapChain3> swap;
+  ComPtr<IDCompositionDevice> composition;
+  ComPtr<IDCompositionTarget> compositionTarget;
+  ComPtr<IDCompositionVisual> compositionVisual;
   ComPtr<ID3D12Fence> captureReady,finished;
   std::array<ComPtr<ID3D12Resource>,4> captured;
   std::array<uint64_t,4> rawDone{};
@@ -329,13 +333,13 @@ struct Engine {
     if(!outputW||!outputH)throw std::runtime_error("Invalid monitor geometry");
   }
   void createOverlay(){
-    overlay=CreateWindowExW(WS_EX_TOPMOST|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE|WS_EX_TRANSPARENT,
-      L"NvShaderOverlay",L"NvShaderPresenter",WS_POPUP|WS_DISABLED,
+    overlay=CreateWindowExW(WS_EX_TOPMOST|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE|WS_EX_LAYERED|WS_EX_TRANSPARENT,
+      L"NvShaderOverlay",L"NvShaderPresenter",WS_POPUP,
       monitorRect.left,monitorRect.top,outputW,outputH,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
     if(!overlay)throw std::runtime_error("Cannot create presenter window");
-    // Disabled top-level windows do not receive mouse or keyboard input;
-    // WS_EX_TRANSPARENT alone is not reliable across process boundaries.
-    EnableWindow(overlay,FALSE);
+    // Layered + transparent performs cross-process mouse pass-through.
+    if(!SetLayeredWindowAttributes(overlay,0,255,LWA_ALPHA))
+      throw std::runtime_error("Failed configuring click-through layered window");
     ShowWindow(overlay,SW_SHOWNOACTIVATE);
     SetWindowPos(overlay,HWND_TOPMOST,monitorRect.left,monitorRect.top,outputW,outputH,
       SWP_NOACTIVATE|SWP_SHOWWINDOW);
@@ -372,13 +376,18 @@ struct Engine {
     DXGI_SWAP_CHAIN_DESC1 sd{};
     sd.Width=outputW;sd.Height=outputH;sd.Format=DXGI_FORMAT_B8G8R8A8_UNORM;
     sd.BufferUsage=DXGI_USAGE_RENDER_TARGET_OUTPUT;sd.BufferCount=2;
-    sd.SampleDesc.Count=1;sd.SwapEffect=DXGI_SWAP_EFFECT_FLIP_DISCARD;
-    sd.Scaling=DXGI_SCALING_STRETCH;sd.AlphaMode=DXGI_ALPHA_MODE_IGNORE;
-    sd.Flags=tearing?DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING:0;
+    sd.SampleDesc.Count=1;sd.SwapEffect=DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+    sd.Scaling=DXGI_SCALING_STRETCH;sd.AlphaMode=DXGI_ALPHA_MODE_PREMULTIPLIED;
+    sd.Flags=0;tearing=false;
     ComPtr<IDXGISwapChain1> s;
-    hrcheck(factory->CreateSwapChainForHwnd(queue.Get(),overlay,&sd,nullptr,nullptr,&s),"present swapchain");
+    hrcheck(factory->CreateSwapChainForComposition(queue.Get(),&sd,nullptr,&s),"DirectComposition swapchain");
     hrcheck(s.As(&swap),"swapchain interface");
-    factory->MakeWindowAssociation(overlay,DXGI_MWA_NO_ALT_ENTER);
+    hrcheck(DCompositionCreateDevice(nullptr,IID_PPV_ARGS(&composition)),"DirectComposition device");
+    hrcheck(composition->CreateTargetForHwnd(overlay,TRUE,&compositionTarget),"DirectComposition target");
+    hrcheck(composition->CreateVisual(&compositionVisual),"DirectComposition visual");
+    hrcheck(compositionVisual->SetContent(s.Get()),"DirectComposition content");
+    hrcheck(compositionTarget->SetRoot(compositionVisual.Get()),"DirectComposition root");
+    hrcheck(composition->Commit(),"DirectComposition commit");
     D3D12_DESCRIPTOR_HEAP_DESC hd{};hd.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;hd.NumDescriptors=2;
     hrcheck(device->CreateDescriptorHeap(&hd,IID_PPV_ARGS(&rtvs)),"rtv heap");
     rtvSize=device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
