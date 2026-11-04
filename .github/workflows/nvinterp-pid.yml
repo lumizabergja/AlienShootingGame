@@ -1,0 +1,59 @@
+name: NvInterp PID Hierarchical 4x4 Windows x64
+on:
+  push:
+    branches: ['experiment/nvfbc-pid-shader-interp-*']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Windows x64
+        shell: pwsh
+        run: |
+          cmake -S NvInterp -B build-nvinterp -A x64
+          if ($LASTEXITCODE -ne 0) { throw 'CMake configure failed' }
+          cmake --build build-nvinterp --config Release --parallel
+          if ($LASTEXITCODE -ne 0) { throw 'CMake compile failed' }
+      - name: Compile all HLSL shader entrypoints
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $fxc = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Recurse -Filter fxc.exe -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match '[\\/]x64[\\/]fxc.exe$' } | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $fxc) { throw 'Windows SDK fxc not found' }
+          foreach ($item in @(@('Flow4x4','cs_5_1'),@('ExpandAndDecode','cs_5_1'),@('FullscreenVS','vs_5_1'),@('FullscreenPS','ps_5_1'))) {
+            & $fxc.FullName /nologo /T $item[1] /E $item[0] /Fo "$env:RUNNER_TEMP\$($item[0]).cso" NvInterp/shader_motion.hlsl
+            if ($LASTEXITCODE -ne 0) { throw "Shader compile failed $($item[0])" }
+          }
+      - name: Package ready to run
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Copy-Item build-nvinterp/Release/NvInterp.exe dist/
+          Copy-Item NvInterp/shader_motion.hlsl dist/
+          Copy-Item NvInterp/README.md dist/
+          Compress-Archive -Path dist/* -DestinationPath NvInterp-PID-Hierarchical4x4-Windows-x64.zip -Force
+      - name: Publish permanent release asset
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference='Stop'
+          $tag='nvinterp-pid-hierarchical-20261104'
+          $asset='NvInterp-PID-Hierarchical4x4-Windows-x64.zip'
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $asset --clobber --repo $env:GITHUB_REPOSITORY
+          } else {
+            gh release create $tag $asset --target $env:GITHUB_SHA --title "NvInterp CUDA PID Hierarchical Shader Interpolation" --notes "Experimental standalone external shader frame interpolation. No NVIDIA Streamline or NvOFA processing. Unverified on the target RTX PC." --repo $env:GITHUB_REPOSITORY
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub release failed' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NvInterp-PID-Windows-x64
+          path: NvInterp-PID-Hierarchical4x4-Windows-x64.zip
+          retention-days: 14
