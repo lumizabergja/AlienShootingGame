@@ -28,15 +28,20 @@ jobs:
             & $fxc.FullName /nologo /T $item[1] /E $item[0] /Fo "$env:RUNNER_TEMP\$($item[0]).cso" NvInterp/shader_motion.hlsl
             if ($LASTEXITCODE -ne 0) { throw "Shader compile failed $($item[0])" }
           }
-      - name: Package ready to run
+      - name: Package complete portable folder and source
         shell: pwsh
         run: |
           $ErrorActionPreference='Stop'
-          New-Item -ItemType Directory -Path dist -Force | Out-Null
-          Copy-Item build-nvinterp/Release/NvInterp.exe dist/
-          Copy-Item NvInterp/shader_motion.hlsl dist/
-          Copy-Item NvInterp/README.md dist/
-          Compress-Archive -Path dist/* -DestinationPath NvInterp-PID-Hierarchical4x4-Windows-x64.zip -Force
+          $folder='dist/NvInterp'
+          New-Item -ItemType Directory -Path $folder -Force | Out-Null
+          Copy-Item build-nvinterp/Release/NvInterp.exe $folder
+          Copy-Item NvInterp/shader_motion.hlsl $folder
+          Copy-Item NvInterp/README.md $folder
+          New-Item -ItemType Directory -Path "$folder/Source" -Force | Out-Null
+          Copy-Item NvInterp/CMakeLists.txt "$folder/Source"
+          Copy-Item NvInterp/shader_motion.hlsl "$folder/Source"
+          Copy-Item NvInterp/src "$folder/Source/src" -Recurse
+          Compress-Archive -Path $folder -DestinationPath NvInterp-PID-Hierarchical4x4-Windows-x64.zip -Force
       - name: Publish permanent release asset
         shell: pwsh
         env:
