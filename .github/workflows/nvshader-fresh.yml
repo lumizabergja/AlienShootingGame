@@ -27,6 +27,16 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'CMake configure failed' }
           cmake --build build-nvshader --config Release --parallel
           if ($LASTEXITCODE -ne 0) { throw 'CMake build failed' }
+      - name: Validate motion and presentation shaders
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $fxc = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Recurse -Filter fxc.exe -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match '[\\/]x64[\\/]fxc.exe$' } | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $fxc) { throw 'Windows SDK fxc.exe was not found' }
+          foreach ($item in @(@('Flow4x4','cs_5_1'), @('ExpandAndDecode','cs_5_1'), @('FullscreenVS','vs_5_0'), @('FullscreenPS','ps_5_0'))) {
+            & $fxc.FullName /nologo /T $item[1] /E $item[0] /Fo "$env:RUNNER_TEMP\$($item[0]).cso" NvShader/shader_motion.hlsl
+            if ($LASTEXITCODE -ne 0) { throw "Shader compilation failed: $($item[0])" }
+          }
       - name: Download official Streamline runtime
         shell: pwsh
         run: |

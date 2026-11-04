@@ -41,10 +41,13 @@ void Flow4x4(uint3 dt:SV_DispatchThreadID) {
     int2 origin=int2(dt.xy*4);
     float2 best=float2(0,0);
     if(firstFrame!=0) {outBlockFlow[dt.xy]=best;return;}
+    // Stable pixels should stay still; repeated textures otherwise choose arbitrary far matches.
+    float baseline=compareBlock(origin,int2(0,0),true);
+    if(baseline<0.045) {outBlockFlow[dt.xy]=float2(0,0);return;}
     float score=1e20;
     [loop] for(int oy=-12;oy<=12;oy+=3) {
       [loop] for(int ox=-12;ox<=12;ox+=3) {
-        float s=compareBlock(origin,int2(ox,oy),false);
+        float s=compareBlock(origin,int2(ox,oy),false)+0.0025*length(float2(ox,oy));
         if(s<score) {score=s;best=float2(ox,oy);}
       }
     }
@@ -53,12 +56,11 @@ void Flow4x4(uint3 dt:SV_DispatchThreadID) {
     [loop] for(int dy=-2;dy<=2;dy++) {
       [loop] for(int dx=-2;dx<=2;dx++) {
         int2 candidate=coarse+int2(dx,dy);
-        float cost=compareBlock(origin,candidate,true);
+        float cost=compareBlock(origin,candidate,true)+0.0025*length(float2(candidate));
         if(cost<refined){refined=cost;best=float2(candidate);}
       }
     }
     // Reject inconsistent matches. This deliberately favors stability over excessive displacement.
-    float baseline=compareBlock(origin,int2(0,0),true);
     if(refined>1.65 || refined>baseline*1.25+0.05) best=float2(0,0);
     outBlockFlow[dt.xy]=best*float2(width,height)/float2(motionWidth,motionHeight);
 }
