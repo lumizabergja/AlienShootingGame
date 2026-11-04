@@ -149,7 +149,8 @@ public:
       sl::Feature features[]={sl::kFeatureDLSS_G,sl::kFeatureReflex,sl::kFeaturePCL};
       sl::Preferences p{};p.pathsToPlugins=paths;p.numPathsToPlugins=1;
       p.pathToLogsAndData=directory.c_str();p.featuresToLoad=features;p.numFeaturesToLoad=3;
-      p.logLevel=sl::LogLevel::eOff;
+      p.logLevel=sl::LogLevel::eVerbose;
+      p.showConsole=false;
       p.flags=sl::PreferenceFlags::eUseDXGIFactoryProxy|sl::PreferenceFlags::eUseFrameBasedResourceTagging;
       p.engine=sl::EngineType::eCustom;p.engineVersion="NvShaderFresh/1.0";
       p.projectId="c4e7b76a-1bc0-4d38-aad0-6ba998e4733c";
