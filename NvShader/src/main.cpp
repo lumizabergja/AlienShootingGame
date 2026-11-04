@@ -330,9 +330,12 @@ struct Engine {
   }
   void createOverlay(){
     overlay=CreateWindowExW(WS_EX_TOPMOST|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE|WS_EX_TRANSPARENT,
-      L"NvShaderOverlay",L"NvShaderPresenter",WS_POPUP,
+      L"NvShaderOverlay",L"NvShaderPresenter",WS_POPUP|WS_DISABLED,
       monitorRect.left,monitorRect.top,outputW,outputH,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
     if(!overlay)throw std::runtime_error("Cannot create presenter window");
+    // Disabled top-level windows do not receive mouse or keyboard input;
+    // WS_EX_TRANSPARENT alone is not reliable across process boundaries.
+    EnableWindow(overlay,FALSE);
     ShowWindow(overlay,SW_SHOWNOACTIVATE);
     SetWindowPos(overlay,HWND_TOPMOST,monitorRect.left,monitorRect.top,outputW,outputH,
       SWP_NOACTIVATE|SWP_SHOWWINDOW);
@@ -654,6 +657,10 @@ static void startSelected(){
   config.motionPercent=percent[std::clamp(mode,0,3)];
   stopRequested.store(false,std::memory_order_release);
   status(L"Starting NvFBC and Streamline...");
+  // Start is invoked from the foreground controller thread: Windows permits
+  // this thread to activate the chosen game without input injection.
+  if(IsIconic(game))ShowWindow(game,SW_RESTORE);
+  if(!SetForegroundWindow(game))status(L"Started. Click the game once if focus is blocked by Windows.");
   gWorker=std::thread([config](){
     try{
       Engine app(config);
