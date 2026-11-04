@@ -560,10 +560,19 @@ struct Engine {
     makePipelines();
     status(L"Allocating shader resources...");
     makeSlots();
-    status(L"Presenter ready. Activate game window to see it.");
+    status(L"Presenter ready (message pump enabled). Activate game window.");
     running=true;
     UINT previousRaw=0;bool first=true;
     while(!stopRequested.load(std::memory_order_acquire)){
+      // A worker-owned HWND must pump its thread message queue or DWM/Win32
+      // activation and visibility changes can stall despite successful Present calls.
+      MSG overlayMessage{};
+      while(PeekMessageW(&overlayMessage,nullptr,0,0,PM_REMOVE)){
+        if(overlayMessage.message==WM_QUIT){stopRequested.store(true);break;}
+        TranslateMessage(&overlayMessage);
+        DispatchMessageW(&overlayMessage);
+      }
+      if(stopRequested.load())break;
       if(!IsWindow(config.game))throw std::runtime_error("Selected game was closed");
       DWORD focusedPid=0;GetWindowThreadProcessId(GetForegroundWindow(),&focusedPid);
       if(focusedPid!=config.pid){
