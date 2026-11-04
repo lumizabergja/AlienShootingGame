@@ -1,0 +1,61 @@
+name: NvShader Fresh DX12 Windows x64
+on:
+  push:
+    branches:
+      - 'experiment/nvfbc-shader-c-fresh-*'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - name: Obtain NVIDIA Streamline headers
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          git clone --depth 1 --filter=blob:none --sparse --branch v2.14.16 https://github.com/NVIDIA-RTX/Streamline.git "$env:RUNNER_TEMP\Streamline"
+          git -C "$env:RUNNER_TEMP\Streamline" sparse-checkout set include
+          New-Item -ItemType Directory -Force -Path NvShader/vendor/streamline | Out-Null
+          Copy-Item "$env:RUNNER_TEMP\Streamline\include\*.h" NvShader/vendor/streamline
+      - name: Configure and compile Windows executable
+        shell: pwsh
+        run: |
+          cmake -S NvShader -B build-nvshader -A x64
+          if ($LASTEXITCODE -ne 0) { throw 'CMake configure failed' }
+          cmake --build build-nvshader --config Release --parallel
+          if ($LASTEXITCODE -ne 0) { throw 'CMake build failed' }
+      - name: Download official Streamline runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $archive = "$env:RUNNER_TEMP\streamline.zip"
+          curl.exe -fSL --retry 3 --retry-delay 5 -o $archive https://github.com/NVIDIA-RTX/Streamline/releases/download/v2.14.16/streamline-sdk-v2.14.16.zip
+          if ($LASTEXITCODE -ne 0) { throw 'Streamline SDK download failed' }
+          Expand-Archive -LiteralPath $archive -DestinationPath "$env:RUNNER_TEMP\streamline" -Force
+      - name: Package ready-to-run app
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dst = Join-Path $PWD 'NvShader-PresetC-Windows-x64'
+          New-Item -ItemType Directory -Force -Path $dst | Out-Null
+          Copy-Item 'build-nvshader/Release/NvShader.exe' $dst
+          Copy-Item 'NvShader/shader_motion.hlsl' $dst
+          Copy-Item 'NvShader/README.md' $dst
+          $sdk = "$env:RUNNER_TEMP\streamline"
+          $required = @('sl.interposer.dll', 'sl.common.dll', 'sl.dlss_g.dll', 'sl.reflex.dll', 'sl.pcl.dll', 'nvngx_dlssg.dll')
+          foreach ($name in $required) {
+            $matches = @(Get-ChildItem -LiteralPath $sdk -Recurse -File -Filter $name)
+            if (-not $matches.Count) { throw "Runtime file missing: $name" }
+            $preferred = $matches | Where-Object { $_.FullName -match '[\\/]bin[\\/]x64[\\/]' } | Select-Object -First 1
+            if (-not $preferred) { $preferred = $matches | Select-Object -First 1 }
+            Copy-Item -LiteralPath $preferred.FullName -Destination (Join-Path $dst $name)
+          }
+          Compress-Archive -Path "$dst/*" -DestinationPath 'NvShader-PresetC-Windows-x64.zip' -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NvShader-PresetC-Windows-x64
+          path: NvShader-PresetC-Windows-x64.zip
+          retention-days: 14
