@@ -25,6 +25,7 @@
 #include <thread>
 #include <vector>
 #include <cstring>
+#include <fstream>
 
 using Microsoft::WRL::ComPtr;
 static void hrcheck(HRESULT h,const char* what){
@@ -86,7 +87,13 @@ struct Config {HWND game{};DWORD pid{};int factor{2};int motionPercent{50};};
 static std::atomic<bool> stopRequested{false};
 static std::mutex statusLock;
 static std::wstring sessionStatus=L"Ready";
-static void status(const std::wstring& message){std::lock_guard<std::mutex> lock(statusLock);sessionStatus=message;}
+static void appendDiagnostic(const std::wstring& value){
+  wchar_t exe[MAX_PATH]{};GetModuleFileNameW(nullptr,exe,MAX_PATH);
+  const auto path=std::filesystem::path(exe).parent_path()/L"NvShader-Diagnostic.log";
+  std::wofstream file(path,std::ios::app);
+  if(file)file<<value<<L"\n";
+}
+static void status(const std::wstring& message){std::lock_guard<std::mutex> lock(statusLock);if(sessionStatus!=message){sessionStatus=message;appendDiagnostic(message);}}
 static std::wstring readStatus(){std::lock_guard<std::mutex> lock(statusLock);return sessionStatus;}
 
 class DlssG {
@@ -322,11 +329,10 @@ struct Engine {
     if(!outputW||!outputH)throw std::runtime_error("Invalid monitor geometry");
   }
   void createOverlay(){
-    overlay=CreateWindowExW(WS_EX_TOPMOST|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE|WS_EX_LAYERED|WS_EX_TRANSPARENT,
+    overlay=CreateWindowExW(WS_EX_TOPMOST|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE|WS_EX_TRANSPARENT,
       L"NvShaderOverlay",L"NvShaderPresenter",WS_POPUP,
       monitorRect.left,monitorRect.top,outputW,outputH,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
     if(!overlay)throw std::runtime_error("Cannot create presenter window");
-    SetLayeredWindowAttributes(overlay,0,255,LWA_ALPHA);
     ShowWindow(overlay,SW_SHOWNOACTIVATE);
     SetWindowPos(overlay,HWND_TOPMOST,monitorRect.left,monitorRect.top,outputW,outputH,
       SWP_NOACTIVATE|SWP_SHOWWINDOW);
@@ -545,21 +551,27 @@ struct Engine {
     sourceW=capture.Width();sourceH=capture.Height();
     if(!sourceW||!sourceH)throw std::runtime_error("NvFBC returned zero-sized frame");
     status(L"NvFBC CUDA active: "+std::to_wstring(sourceW)+L"x"+std::to_wstring(sourceH));
+    status(L"Creating DX12 / Streamline presenter...");
     createD3D();
     wchar_t modulePath[MAX_PATH]{};
     GetModuleFileNameW(nullptr,modulePath,MAX_PATH);
     shaderFile=(std::filesystem::path(modulePath).parent_path()/L"shader_motion.hlsl").wstring();
+    status(L"Compiling shaders...");
     makePipelines();
+    status(L"Allocating shader resources...");
     makeSlots();
+    status(L"Presenter ready. Activate game window to see it.");
     running=true;
     UINT previousRaw=0;bool first=true;
     while(!stopRequested.load(std::memory_order_acquire)){
       if(!IsWindow(config.game))throw std::runtime_error("Selected game was closed");
       DWORD focusedPid=0;GetWindowThreadProcessId(GetForegroundWindow(),&focusedPid);
       if(focusedPid!=config.pid){
+        if(first)status(L"Waiting for game focus — Alt+Tab to game");
         ShowWindow(overlay,SW_HIDE);
         first=true;Sleep(8);continue;
       }
+      if(first)status(L"Game focused. Capturing first frame...");
       ShowWindow(overlay,SW_SHOWNOACTIVATE);
       SetWindowPos(overlay,HWND_TOPMOST,monitorRect.left,monitorRect.top,outputW,outputH,
                    SWP_NOACTIVATE|SWP_SHOWWINDOW|SWP_NOSENDCHANGING);
@@ -582,6 +594,7 @@ struct Engine {
       if(activeFg)fg.begin(first);
       doFrame(currentRaw,first?currentRaw:previousRaw,nextReady,first);
       previousRaw=currentRaw;
+      if(first)status(L"Presenting frames");
       first=false;++frameNo;
     }
     status(L"Stopped");
@@ -636,7 +649,7 @@ static void startSelected(){
     try{
       Engine app(config);
       app.run();
-    }catch(const std::exception& e){status(L"Error: "+wide(e.what()));}
+    }catch(const std::exception& e){status(L"Error: "+wide(e.what()));MessageBoxW(gWindow,wide(e.what()).c_str(),L"NvShader failed to start",MB_OK|MB_ICONERROR); }
   });
 }
 static LRESULT CALLBACK overlayProc(HWND h,UINT msg,WPARAM w,LPARAM l){
