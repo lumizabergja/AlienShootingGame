@@ -21,6 +21,11 @@ jobs:
         run: |
           cmake -S external-dlssg -B "$env:RUNNER_TEMP/dlssg-build" -G "Visual Studio 17 2022" -A x64 -D "DLSS_SDK_DIR=$env:RUNNER_TEMP/DLSS"
           cmake --build "$env:RUNNER_TEMP/dlssg-build" --config Release --parallel
+      - name: Validate HLSL shader on Windows runner
+        shell: pwsh
+        run: |
+          $shaderTest = Start-Process -FilePath "$env:RUNNER_TEMP/dlssg-build/Release/ExternalDLSSG.exe" -ArgumentList "--shader-test" -Wait -PassThru
+          if ($shaderTest.ExitCode -ne 0) { throw "D3DCompile failed (exit $($shaderTest.ExitCode))" }
       - name: Package executable and NVIDIA runtime
         shell: pwsh
         run: |
