@@ -3,14 +3,16 @@ on:
   push:
     branches: [external-dlssg-presetc-20261105]
     paths:
-      - 'external-dlssg/**'
+      - 'external-dlssg/src/**'
+      - 'external-dlssg/CMakeLists.txt'
+      - 'external-dlssg/README.md'
       - '.github/workflows/external-dlssg-live-win-x64.yml'
   workflow_dispatch:
 jobs:
   build:
     runs-on: windows-2022
     permissions:
-      contents: read
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - name: Get official NVIDIA DLSS SDK
@@ -41,3 +43,13 @@ jobs:
           name: ExternalDLSSG-Experimental-Windows-x64
           path: ExternalDLSSG-Experimental-Windows-x64.zip
           if-no-files-found: error
+      - name: Publish ZIP on isolated GitHub branch
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          New-Item -ItemType Directory -Force external-dlssg/releases | Out-Null
+          Copy-Item ExternalDLSSG-Experimental-Windows-x64.zip external-dlssg/releases/
+          git add external-dlssg/releases/ExternalDLSSG-Experimental-Windows-x64.zip
+          git commit -m "Publish experimental Windows ZIP [skip ci]"
+          git push origin HEAD:external-dlssg-presetc-20261105
