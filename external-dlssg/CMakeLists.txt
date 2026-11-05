@@ -20,5 +20,5 @@ add_executable(ExternalDLSSG WIN32 src/main.cpp)
 target_include_directories(ExternalDLSSG PRIVATE "${DLSS_SDK_DIR}/include")
 target_compile_definitions(ExternalDLSSG PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN UNICODE _UNICODE)
 target_compile_options(ExternalDLSSG PRIVATE /W4 /EHsc /utf-8)
-target_link_libraries(ExternalDLSSG PRIVATE d3d11 d3d12 dxgi dxguid d3dcompiler user32 gdi32 dwmapi ole32
+target_link_libraries(ExternalDLSSG PRIVATE d3d11 d3d12 dxgi dxguid d3dcompiler dcomp user32 gdi32 dwmapi ole32
  "${DLSS_SDK_DIR}/lib/Windows_x86_64/x64/nvsdk_ngx_s.lib")
