@@ -173,6 +173,39 @@ Screen select_screen(HWND game_hwnd) {
   throw std::runtime_error("Game is not on an NVIDIA-connected display");
 }
 
+void make_shared_capture_texture(
+    ID3D12Device* device12, ID3D11Device* device11, UINT width, UINT height,
+    ComPtr<ID3D12Resource>& shared12, ComPtr<ID3D11Texture2D>& shared11,
+    HANDLE& shared_handle) {
+  // Resource ownership and handle direction follow Microsoft D3D11/D3D12
+  // interoperability documentation: D3D12 CreateSharedHandle, then
+  // D3D11 OpenSharedResource1.
+  D3D12_HEAP_PROPERTIES heap{};
+  heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+  D3D12_RESOURCE_DESC texture{};
+  texture.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+  texture.Width = width;
+  texture.Height = height;
+  texture.DepthOrArraySize = 1;
+  texture.MipLevels = 1;
+  texture.Format = bgra;
+  texture.SampleDesc.Count = 1;
+  texture.Layout = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+  texture.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET |
+                  D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
+  check(device12->CreateCommittedResource(
+            &heap, D3D12_HEAP_FLAG_SHARED, &texture, D3D12_RESOURCE_STATE_COMMON,
+            nullptr, IID_PPV_ARGS(&shared12)),
+        "Create shared D3D12 capture texture");
+  check(device12->CreateSharedHandle(shared12.Get(), nullptr, GENERIC_ALL,
+                                     nullptr, &shared_handle),
+        "CreateSharedHandle(D3D12 capture texture)");
+  ComPtr<ID3D11Device1> device1;
+  check(device11->QueryInterface(IID_PPV_ARGS(&device1)), "ID3D11Device1");
+  check(device1->OpenSharedResource1(shared_handle, IID_PPV_ARGS(&shared11)),
+        "D3D11 OpenSharedResource1(capture texture)");
+}
+
 struct Duplication {
   ComPtr<ID3D11Device> device11;
   ComPtr<ID3D11Device5> device5;
@@ -201,25 +234,9 @@ struct Duplication {
     const auto bounds = screen.desc.DesktopCoordinates;
     desktop_w = static_cast<UINT>(bounds.right - bounds.left);
     desktop_h = static_cast<UINT>(bounds.bottom - bounds.top);
-    D3D11_TEXTURE2D_DESC texture{};
-    texture.Width = desktop_w;
-    texture.Height = desktop_h;
-    texture.MipLevels = 1;
-    texture.ArraySize = 1;
-    texture.Format = bgra;
-    texture.SampleDesc.Count = 1;
-    texture.Usage = D3D11_USAGE_DEFAULT;
-    texture.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-    texture.MiscFlags = D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
-    check(device11->CreateTexture2D(&texture, nullptr, &shared11),
-          "Create shared D3D11 capture texture");
-    ComPtr<IDXGIResource1> dxgi_resource;
-    check(shared11.As(&dxgi_resource), "IDXGIResource1");
-    check(dxgi_resource->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ |
-                                           DXGI_SHARED_RESOURCE_WRITE, nullptr,
-                                           &shared_handle), "CreateSharedHandle(texture)");
-    check(gpu.device->OpenSharedHandle(shared_handle, IID_PPV_ARGS(&shared12)),
-          "OpenSharedHandle(texture)");
+    make_shared_capture_texture(gpu.device.Get(), device11.Get(),
+                                desktop_w, desktop_h, shared12, shared11,
+                                shared_handle);
     check(gpu.device->CreateFence(0, D3D12_FENCE_FLAG_SHARED,
                                   IID_PPV_ARGS(&capture_fence12)), "capture fence");
     check(gpu.device->CreateSharedHandle(capture_fence12.Get(), nullptr, GENERIC_ALL,
@@ -862,6 +879,34 @@ LRESULT CALLBACK control_proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   try {
+    if (wcsstr(GetCommandLineW(), L"--interop-test")) {
+      try {
+        ComPtr<IDXGIFactory4> factory;
+        check(CreateDXGIFactory1(IID_PPV_ARGS(&factory)), "test DXGI factory");
+        ComPtr<IDXGIAdapter> warp;
+        check(factory->EnumWarpAdapter(IID_PPV_ARGS(&warp)), "test WARP adapter");
+        ComPtr<ID3D12Device> d12;
+        check(D3D12CreateDevice(warp.Get(), D3D_FEATURE_LEVEL_11_0,
+                                IID_PPV_ARGS(&d12)), "test D3D12 device");
+        ComPtr<ID3D11Device> d11;
+        ComPtr<ID3D11DeviceContext> ctx;
+        D3D_FEATURE_LEVEL level{};
+        check(D3D11CreateDevice(warp.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr,
+                                D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0,
+                                D3D11_SDK_VERSION, &d11, &level, &ctx),
+              "test D3D11 device");
+        ComPtr<ID3D12Resource> resource12;
+        ComPtr<ID3D11Texture2D> resource11;
+        HANDLE shared = nullptr;
+        make_shared_capture_texture(d12.Get(), d11.Get(), 64, 64,
+                                    resource12, resource11, shared);
+        if (shared) CloseHandle(shared);
+        return 0;
+      } catch (const std::exception& e) {
+        OutputDebugStringA(e.what());
+        return 3;
+      }
+    }
     if (wcsstr(GetCommandLineW(), L"--shader-test")) {
       ComPtr<ID3DBlob> compiled, errors;
       return SUCCEEDED(D3DCompile(motion_cs, sizeof(motion_cs) - 1, nullptr,
