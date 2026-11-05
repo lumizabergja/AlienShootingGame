@@ -1,0 +1,38 @@
+name: External DLSS-G experimental Windows x64
+on:
+  push:
+    branches: [external-dlssg-presetc-20261105]
+    paths:
+      - 'external-dlssg/**'
+      - '.github/workflows/external-dlssg-live-win-x64.yml'
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Get official NVIDIA DLSS SDK
+        shell: pwsh
+        run: git clone --depth 1 https://github.com/NVIDIA/DLSS.git "$env:RUNNER_TEMP/DLSS"
+      - name: Configure and compile Windows app with MSVC
+        shell: pwsh
+        run: |
+          cmake -S external-dlssg -B "$env:RUNNER_TEMP/dlssg-build" -G "Visual Studio 17 2022" -A x64 -D "DLSS_SDK_DIR=$env:RUNNER_TEMP/DLSS"
+          cmake --build "$env:RUNNER_TEMP/dlssg-build" --config Release --parallel
+      - name: Package executable and NVIDIA runtime
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item "$env:RUNNER_TEMP/dlssg-build/Release/ExternalDLSSG.exe" dist/
+          Copy-Item "$env:RUNNER_TEMP/DLSS/lib/Windows_x86_64/rel/nvngx_dlssg.dll" dist/
+          Copy-Item external-dlssg/README.md dist/
+          Copy-Item external-dlssg/LICENSE-NOTICE.txt dist/
+          Get-FileHash dist/ExternalDLSSG.exe -Algorithm SHA256 | Format-List | Out-File dist/checksum.txt
+          Compress-Archive -Path dist/* -DestinationPath ExternalDLSSG-Experimental-Windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ExternalDLSSG-Experimental-Windows-x64
+          path: ExternalDLSSG-Experimental-Windows-x64.zip
+          if-no-files-found: error
