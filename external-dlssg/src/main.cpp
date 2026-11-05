@@ -279,16 +279,16 @@ float sampleGray(Texture2D<float4> tex, int2 p) {
  p = clamp(p, int2(0,0), int2(desktop) - 1);
  return lum(tex.Load(int3(p,0)));
 }
+groupshared float2 blockMotion;
 [numthreads(8,8,1)]
-void main(uint3 tid : SV_DispatchThreadID) {
+void main(uint3 tid : SV_DispatchThreadID,
+          uint3 local : SV_GroupThreadID,
+          uint3 group : SV_GroupID) {
  int2 xy = int2(tid.xy);
- if (xy.x >= int(size.x) || xy.y >= int(size.y)) return;
- int2 full = xy + int2(offset);
- colorOut[xy] = frameNow.Load(int3(full,0));
- depthOut[xy] = 1.0f;
- float2 mv = 0;
- if (firstFrame == 0 && motionMode != 0) {
-   int2 base = motionMode == 1 ? int2(size / 2) : (xy / 8) * 8 + 4;
+ if (local.x == 0 && local.y == 0) {
+  blockMotion = float2(0,0);
+  if (firstFrame == 0 && motionMode != 0) {
+   int2 base = motionMode == 1 ? int2(size / 2) : int2(group.xy)*8 + 4;
    base += int2(offset);
    float best = 1e10;
    int2 chosen = int2(0,0);
@@ -307,9 +307,15 @@ void main(uint3 tid : SV_DispatchThreadID) {
        if (error < best) { best=error; chosen=delta; }
      }
    }
-   if (best < 0.17f) mv = float2(chosen);
+   if (best < 0.17f) blockMotion = float2(chosen);
+  }
  }
- flowOut[xy] = mv;
+ GroupMemoryBarrierWithGroupSync();
+ if (xy.x >= int(size.x) || xy.y >= int(size.y)) return;
+ int2 full = xy + int2(offset);
+ colorOut[xy] = frameNow.Load(int3(full,0));
+ depthOut[xy] = 1.0f;
+ flowOut[xy] = blockMotion;
 }
 )HLSL";
 
