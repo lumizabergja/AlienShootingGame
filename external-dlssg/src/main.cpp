@@ -237,6 +237,11 @@ struct Duplication {
     const HRESULT hr = duplicate->AcquireNextFrame(5, &info, &frame);
     if (hr == DXGI_ERROR_WAIT_TIMEOUT) return false;
     check(hr, "AcquireNextFrame");
+    // Pointer-only changes should not generate synthetic game frames.
+    if (info.LastPresentTime.QuadPart == 0) {
+      check(duplicate->ReleaseFrame(), "Release pointer-only frame");
+      return false;
+    }
     try {
       ComPtr<ID3D11Texture2D> texture;
       check(frame.As(&texture), "captured texture");
@@ -549,6 +554,7 @@ class Presenter {
   HWND hwnd_ = nullptr;
   ComPtr<IDXGISwapChain3> swap_;
   std::array<ComPtr<ID3D12Resource>, 2> buffers_{};
+  HANDLE frame_ready_ = nullptr;
   bool excluded_ = false;
 public:
   Presenter(Gpu& gpu, HWND game, UINT w, UINT h)
@@ -571,7 +577,8 @@ public:
     desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     desc.BufferCount = 2;
     desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-    desc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+    desc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING |
+                 DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
     ComPtr<IDXGIFactory4> factory;
     check(CreateDXGIFactory1(IID_PPV_ARGS(&factory)), "swapchain factory");
     ComPtr<IDXGISwapChain1> base;
@@ -579,6 +586,11 @@ public:
                                            nullptr, nullptr, &base),
           "CreateSwapChainForHwnd");
     check(base.As(&swap_), "IDXGISwapChain3");
+    ComPtr<IDXGISwapChain2> frame_latency_swapchain;
+    check(swap_.As(&frame_latency_swapchain), "IDXGISwapChain2");
+    check(frame_latency_swapchain->SetMaximumFrameLatency(1),
+          "SetMaximumFrameLatency(1)");
+    frame_ready_ = frame_latency_swapchain->GetFrameLatencyWaitableObject();
     factory->MakeWindowAssociation(hwnd_, DXGI_MWA_NO_ALT_ENTER);
     for (UINT i=0; i<2; ++i)
       check(swap_->GetBuffer(i, IID_PPV_ARGS(&buffers_[i])), "swapchain buffer");
@@ -593,8 +605,12 @@ public:
     SetWindowPos(hwnd_, HWND_TOPMOST, p.x, p.y, int(w), int(h),
                  SWP_NOACTIVATE | SWP_SHOWWINDOW);
   }
-  ~Presenter() { if (hwnd_) DestroyWindow(hwnd_); }
+  ~Presenter() {
+    if (frame_ready_) CloseHandle(frame_ready_);
+    if (hwnd_) DestroyWindow(hwnd_);
+  }
   void present(ID3D12Resource* source, D3D12_RESOURCE_STATES state) {
+    if (frame_ready_) WaitForSingleObject(frame_ready_, 16);
     const UINT index = swap_->GetCurrentBackBufferIndex();
     auto* target = buffers_[index].Get();
     gpu_.begin();
@@ -686,6 +702,15 @@ struct App {
       Ngx ngx(gpu, input, generated);
       Presenter presenter(gpu, game, w, h);
       bool had_previous = false, overlay_visible = true;
+      DEVMODEW mode_info{};
+      mode_info.dmSize = sizeof(mode_info);
+      double physical_hz = 240.0;
+      if (EnumDisplaySettingsW(screen.desc.DeviceName, ENUM_CURRENT_SETTINGS, &mode_info) &&
+          mode_info.dmDisplayFrequency >= 30)
+        physical_hz = static_cast<double>(mode_info.dmDisplayFrequency);
+      using Clock = std::chrono::steady_clock;
+      auto previous_capture = Clock::now();
+      auto last_present = Clock::now();
       while (!stop.load()) {
         presenter.pump();
         if (!IsWindow(game)) break;
@@ -697,6 +722,23 @@ struct App {
         }
         if (!overlay_visible) { presenter.show(game, w, h); overlay_visible=true; }
         if (!capture.next(gpu)) continue;
+        const auto captured_at = Clock::now();
+        const double source_interval = std::chrono::duration<double>(
+            captured_at - previous_capture).count();
+        previous_capture = captured_at;
+        const double display_interval = std::max(1.0 / physical_hz,
+            std::clamp(source_interval, 1.0/500.0, 1.0/15.0) /
+            static_cast<double>(ngx.generated_count()+1));
+        const auto interval = std::chrono::duration_cast<Clock::duration>(
+            std::chrono::duration<double>(display_interval));
+        const auto paced_present = [&](ID3D12Resource* resource,
+                                       D3D12_RESOURCE_STATES state) {
+          const auto target = last_present + interval;
+          if (target > Clock::now())
+            std::this_thread::sleep_until(target);
+          presenter.present(resource, state);
+          last_present = Clock::now();
+        };
         input.compute(capture.shared12.Get(), mode);
         if (!had_previous) {
           // Seed DLSS-G's internal history without displaying an interpolated frame.
@@ -704,10 +746,10 @@ struct App {
         } else {
           for (unsigned i=1; i<=ngx.generated_count(); ++i) {
             ngx.evaluate(i, false);
-            presenter.present(input.output(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            paced_present(input.output(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
           }
         }
-        presenter.present(input.color(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        paced_present(input.color(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
         input.back_to_compute();
         had_previous = true;
       }
@@ -814,6 +856,13 @@ LRESULT CALLBACK control_proc(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   try {
+    if (wcsstr(GetCommandLineW(), L"--shader-test")) {
+      ComPtr<ID3DBlob> compiled, errors;
+      return SUCCEEDED(D3DCompile(motion_cs, sizeof(motion_cs) - 1, nullptr,
+                                   nullptr, nullptr, "main", "cs_5_1",
+                                   D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
+                                   &compiled, &errors)) ? 0 : 2;
+    }
     App app;
     WNDCLASSEXW wc{sizeof(wc)};
     wc.lpfnWndProc = control_proc;
