@@ -1,0 +1,64 @@
+name: NvFast Confidence Windows
+on:
+  push:
+    branches: [fresh-nvfast-confidence-20261105]
+    paths-ignore: ['dist/**']
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download pinned official Streamline SDK
+        shell: pwsh
+        run: |
+          Invoke-WebRequest 'https://github.com/NVIDIA-RTX/Streamline/releases/download/v2.14.16/streamline-sdk-v2.14.16.zip' -OutFile sdk.zip
+          $hash=(Get-FileHash sdk.zip -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne '32041e51db0cab709a271b72a352281b690c2abbd669a827809401a5dd23956b') { throw 'SDK checksum mismatch' }
+          Expand-Archive sdk.zip sdk
+          $include=(Get-ChildItem sdk -Recurse -Filter sl.h | Select-Object -First 1).Directory.FullName
+          if (!$include) { throw 'SDK include missing' }
+          "SL_INCLUDE=$include" >> $env:GITHUB_ENV
+      - name: Configure and compile
+        shell: pwsh
+        run: |
+          cmake -S . -B build -A x64 -DSTREAMLINE_INCLUDE="$env:SL_INCLUDE"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cmake --build build --config Release --parallel
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Compile shaders and validate pipelines with WARP
+        shell: pwsh
+        run: |
+          ctest --test-dir build -C Release --output-on-failure
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Package complete application and source
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force package, package/source | Out-Null
+          Copy-Item build/Release/NvFastConfidence.exe,README.txt package/
+          foreach ($dll in @('sl.interposer.dll','sl.common.dll','sl.dlss_g.dll','sl.reflex.dll','sl.pcl.dll','nvngx_dlssg.dll')) {
+            $candidate=Get-ChildItem sdk -Recurse -Filter $dll | Where-Object { $_.FullName -match '[\\/]x64[\\/]' -and $_.FullName -notmatch '[\\/](development|debug)[\\/]' } | Select-Object -First 1
+            if (!$candidate) { $candidate=Get-ChildItem sdk -Recurse -Filter $dll | Where-Object { $_.FullName -notmatch '[\\/](development|debug|aarch64|arm64ec)[\\/]' } | Select-Object -First 1 }
+            if (!$candidate) { throw "Missing $dll" }
+            Copy-Item $candidate.FullName package/
+          }
+          Copy-Item src,tests,vendor,CMakeLists.txt package/source -Recurse
+          Get-ChildItem sdk -Recurse -File | Where-Object { $_.Name -match '^(LICENSE|ThirdParty)' } | ForEach-Object { Copy-Item $_.FullName package/source -Force }
+          @("Source commit: $env:GITHUB_SHA",'Build: Windows x64 MSVC Release /MT','Checks: shader compilation and WARP PSO creation passed','NvFBC/NvOFA/DLSS-G: NOT hardware-tested on runner','Streamline SDK: v2.14.16, official release SHA256 verified','Fixed: NvOFA 4x4 FAST + output confidence ON (R8_UINT)','Full-resolution motion; no alternative motion modes') | Set-Content package/BUILD-VALIDATION.txt
+          Get-ChildItem package -Filter *.dll | ForEach-Object { "$($_.Name) SHA256 $((Get-FileHash $_ -Algorithm SHA256).Hash)" } | Add-Content package/BUILD-VALIDATION.txt
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive package/* dist/NvFast-Confidence-Windows-x64.zip -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NvFast-Confidence-Windows-x64
+          path: dist/NvFast-Confidence-Windows-x64.zip
+      - name: Save downloadable build on isolated branch
+        shell: pwsh
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add dist/NvFast-Confidence-Windows-x64.zip
+          git commit -m 'Package NvFast Confidence Windows build [skip ci]'
+          git push origin HEAD:fresh-nvfast-confidence-20261105
