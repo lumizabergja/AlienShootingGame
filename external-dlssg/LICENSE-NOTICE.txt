@@ -1,0 +1,7 @@
+The source in this directory was written for this project, using public
+NVIDIA NGX headers and public DirectX SDK interfaces. NVIDIA's DLSS SDK,
+NGX loader, and model binaries have their own license terms. Refer to
+https://github.com/NVIDIA/DLSS for those terms.
+
+The separately packaged diagnostic worker uses code from the MIT-licensed
+HECer/DLSSG-Stream-Worker project; see its upstream LICENSE.
