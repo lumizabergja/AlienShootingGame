@@ -2,6 +2,7 @@
 #include <d3d11_4.h>
 #include <d3d12.h>
 #include <d3dcompiler.h>
+#include <dcomp.h>
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 #include <nvsdk_ngx.h>
@@ -284,6 +285,7 @@ Texture2D<float4> framePrev : register(t1);
 RWTexture2D<float4> colorOut : register(u0);
 RWTexture2D<float2> flowOut : register(u1);
 RWTexture2D<float> depthOut : register(u2);
+RWByteAddressBuffer changed : register(u3);
 cbuffer Settings : register(b0) {
  uint2 size;
  uint2 offset;
@@ -304,6 +306,25 @@ void main(uint3 tid : SV_DispatchThreadID,
  int2 xy = int2(tid.xy);
  if (local.x == 0 && local.y == 0) {
   blockMotion = float2(0,0);
+  // Compare the real captured pixels against the previous REAL input.
+  // DDA may notify us of an excluded overlay's Presents on some Windows builds.
+  if (firstFrame != 0) {
+    uint ignored;
+    changed.InterlockedOr(0, 1, ignored);
+  } else {
+    int2 probe = int2(group.xy)*8 + int2(offset) + int2(4,4);
+    float diff = 0;
+    [unroll] for (int j=0; j<2; ++j) {
+      [unroll] for (int i=0; i<2; ++i) {
+        int2 p = probe + int2(i*2,j*2);
+        diff += abs(sampleGray(frameNow,p) - sampleGray(framePrev,p));
+      }
+    }
+    if (diff > 0.012f) {
+      uint ignored;
+      changed.InterlockedOr(0, 1, ignored);
+    }
+  }
   if (firstFrame == 0 && motionMode != 0) {
    int2 base = motionMode == 1 ? int2(size / 2) : int2(group.xy)*8 + 4;
    base += int2(offset);
@@ -340,6 +361,7 @@ class ShaderInput {
   Gpu& gpu_;
   UINT width_, height_, x_, y_, desktop_w_, desktop_h_;
   ComPtr<ID3D12Resource> prev_, color_, motion_, depth_, output_;
+  ComPtr<ID3D12Resource> changed_, changed_readback_;
   ComPtr<ID3D12RootSignature> signature_;
   ComPtr<ID3D12PipelineState> pipeline_;
   ComPtr<ID3D12DescriptorHeap> descriptors_;
@@ -366,10 +388,30 @@ public:
                          D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     output_ = gpu.texture(w, h, rgba, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
                            D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    D3D12_RESOURCE_DESC changed_desc{};
+    changed_desc.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+    changed_desc.Width = sizeof(UINT);
+    changed_desc.Height = 1;
+    changed_desc.DepthOrArraySize = 1;
+    changed_desc.MipLevels = 1;
+    changed_desc.SampleDesc.Count = 1;
+    changed_desc.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    changed_desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+    D3D12_HEAP_PROPERTIES default_heap{};
+    default_heap.Type = D3D12_HEAP_TYPE_DEFAULT;
+    check(gpu.device->CreateCommittedResource(&default_heap, D3D12_HEAP_FLAG_NONE,
+            &changed_desc, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, nullptr,
+            IID_PPV_ARGS(&changed_)), "Create change detection buffer");
+    D3D12_HEAP_PROPERTIES readback_heap{};
+    readback_heap.Type = D3D12_HEAP_TYPE_READBACK;
+    changed_desc.Flags = D3D12_RESOURCE_FLAG_NONE;
+    check(gpu.device->CreateCommittedResource(&readback_heap, D3D12_HEAP_FLAG_NONE,
+            &changed_desc, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+            IID_PPV_ARGS(&changed_readback_)), "Create change detection readback");
 
     D3D12_DESCRIPTOR_RANGE ranges[2]{};
     ranges[0] = {D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 2, 0, 0, 0};
-    ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 3, 0, 0, 0};
+    ranges[1] = {D3D12_DESCRIPTOR_RANGE_TYPE_UAV, 4, 0, 0, 0};
     D3D12_ROOT_PARAMETER roots[3]{};
     roots[0].ParameterType = D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
     roots[0].Constants = {0, 0, 8};
@@ -402,7 +444,7 @@ public:
           "CreateComputePipelineState");
     D3D12_DESCRIPTOR_HEAP_DESC heap{};
     heap.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
-    heap.NumDescriptors = 5;
+    heap.NumDescriptors = 6;
     heap.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
     check(gpu.device->CreateDescriptorHeap(&heap, IID_PPV_ARGS(&descriptors_)),
           "CreateDescriptorHeap");
@@ -424,6 +466,13 @@ public:
       gpu.device->CreateUnorderedAccessView(resource, nullptr, &uav,
                                              handle(descriptors_.Get(), stride, i+2));
     }
+    D3D12_UNORDERED_ACCESS_VIEW_DESC change_uav{};
+    change_uav.Format = DXGI_FORMAT_R32_TYPELESS;
+    change_uav.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
+    change_uav.Buffer.NumElements = 1;
+    change_uav.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
+    gpu.device->CreateUnorderedAccessView(changed_.Get(), nullptr, &change_uav,
+                                          handle(descriptors_.Get(), stride, 5));
   }
 
   bool first_frame() const { return first_; }
@@ -434,7 +483,7 @@ public:
   ID3D12Resource* depth() const { return depth_.Get(); }
   ID3D12Resource* output() const { return output_.Get(); }
 
-  void compute(ID3D12Resource* captured, unsigned mode) {
+  bool compute(ID3D12Resource* captured, unsigned mode) {
     gpu_.begin();
     auto* cmd = gpu_.list.Get();
     Gpu::barrier(cmd, captured, D3D12_RESOURCE_STATE_COMMON,
@@ -443,10 +492,19 @@ public:
                               D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     ID3D12DescriptorHeap* heaps[] = {descriptors_.Get()};
     cmd->SetDescriptorHeaps(1, heaps);
-    cmd->SetComputeRootSignature(signature_.Get());
-    cmd->SetPipelineState(pipeline_.Get());
     const UINT stride = gpu_.device->GetDescriptorHandleIncrementSize(
         D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+    const auto change_cpu = handle(descriptors_.Get(), stride, 5);
+    auto change_gpu = descriptors_->GetGPUDescriptorHandleForHeapStart();
+    change_gpu.ptr += static_cast<UINT64>(stride) * 5;
+    const UINT zeros[4] = {};
+    cmd->ClearUnorderedAccessViewUint(change_gpu, change_cpu, changed_.Get(), zeros, 0, nullptr);
+    D3D12_RESOURCE_BARRIER uav_sync{};
+    uav_sync.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    uav_sync.UAV.pResource = changed_.Get();
+    cmd->ResourceBarrier(1, &uav_sync);
+    cmd->SetComputeRootSignature(signature_.Get());
+    cmd->SetPipelineState(pipeline_.Get());
     const UINT parameters[] = {width_, height_, x_, y_, mode, first_ ? 1U : 0U,
                                desktop_w_, desktop_h_};
     cmd->SetComputeRoot32BitConstants(0, 8, parameters, 0);
@@ -455,6 +513,11 @@ public:
     address.ptr += static_cast<UINT64>(stride) * 2;
     cmd->SetComputeRootDescriptorTable(2, address);
     cmd->Dispatch((width_+7)/8, (height_+7)/8, 1);
+    Gpu::barrier(cmd, changed_.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                 D3D12_RESOURCE_STATE_COPY_SOURCE);
+    cmd->CopyBufferRegion(changed_readback_.Get(), 0, changed_.Get(), 0, sizeof(UINT));
+    Gpu::barrier(cmd, changed_.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE,
+                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
     Gpu::barrier(cmd, captured, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                  D3D12_RESOURCE_STATE_COPY_SOURCE);
     Gpu::barrier(cmd, prev_.Get(), D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
@@ -469,6 +532,13 @@ public:
                    D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
     gpu_.flush();
     first_ = false;
+    D3D12_RANGE read_range{0, sizeof(UINT)};
+    void* detected = nullptr;
+    check(changed_readback_->Map(0, &read_range, &detected), "Map change detection");
+    const bool has_new_content = *static_cast<const UINT*>(detected) != 0;
+    D3D12_RANGE written{0, 0};
+    changed_readback_->Unmap(0, &written);
+    return has_new_content;
   }
   void back_to_compute() {
     gpu_.begin();
@@ -576,6 +646,9 @@ class Presenter {
   Gpu& gpu_;
   HWND hwnd_ = nullptr;
   ComPtr<IDXGISwapChain3> swap_;
+  ComPtr<IDCompositionDevice> composition_;
+  ComPtr<IDCompositionTarget> composition_target_;
+  ComPtr<IDCompositionVisual> composition_visual_;
   std::array<ComPtr<ID3D12Resource>, 2> buffers_{};
   HANDLE frame_ready_ = nullptr;
   bool excluded_ = false;
@@ -587,11 +660,16 @@ public:
     wc.hInstance = GetModuleHandleW(nullptr);
     wc.lpszClassName = output_class;
     RegisterClassExW(&wc);
-    hwnd_ = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE |
-                           WS_EX_TOOLWINDOW, output_class, L"External DLSS-G output",
+    // Layered + transparent is required to pass actual mouse hits through
+    // reliably. WS_EX_TRANSPARENT alone does NOT guarantee input passthrough.
+    hwnd_ = CreateWindowExW(WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT |
+                           WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+                           output_class, L"External DLSS-G output",
                            WS_POPUP, 0, 0, int(w), int(h), nullptr, nullptr,
                            GetModuleHandleW(nullptr), nullptr);
     if (!hwnd_) throw std::runtime_error("Create overlay window failed");
+    if (!SetLayeredWindowAttributes(hwnd_, 0, 255, LWA_ALPHA))
+      throw std::runtime_error("SetLayeredWindowAttributes failed");
     DXGI_SWAP_CHAIN_DESC1 desc{};
     desc.Width = w;
     desc.Height = h;
@@ -599,28 +677,59 @@ public:
     desc.SampleDesc.Count = 1;
     desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     desc.BufferCount = 2;
-    desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+    // Layered HWNDs cannot be relied on with a traditional HWND swapchain.
+    // DirectComposition is the supported flip-model presentation route.
+    desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+    desc.Scaling = DXGI_SCALING_STRETCH;
+    desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
     desc.Flags = DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING |
                  DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
     ComPtr<IDXGIFactory4> factory;
     check(CreateDXGIFactory1(IID_PPV_ARGS(&factory)), "swapchain factory");
     ComPtr<IDXGISwapChain1> base;
-    check(factory->CreateSwapChainForHwnd(gpu.queue.Get(), hwnd_, &desc,
-                                           nullptr, nullptr, &base),
-          "CreateSwapChainForHwnd");
+    check(factory->CreateSwapChainForComposition(gpu.queue.Get(), &desc,
+                                                  nullptr, &base),
+          "CreateSwapChainForComposition");
     check(base.As(&swap_), "IDXGISwapChain3");
+    check(DirectCompositionCreateDevice(nullptr, IID_PPV_ARGS(&composition_)),
+          "DirectCompositionCreateDevice");
+    check(composition_->CreateTargetForHwnd(hwnd_, TRUE, &composition_target_),
+          "DirectComposition CreateTargetForHwnd");
+    check(composition_->CreateVisual(&composition_visual_),
+          "DirectComposition CreateVisual");
+    check(composition_visual_->SetContent(swap_.Get()),
+          "DirectComposition SetContent");
+    check(composition_target_->SetRoot(composition_visual_.Get()),
+          "DirectComposition SetRoot");
+    check(composition_->Commit(), "DirectComposition Commit");
     ComPtr<IDXGISwapChain2> frame_latency_swapchain;
     check(swap_.As(&frame_latency_swapchain), "IDXGISwapChain2");
     check(frame_latency_swapchain->SetMaximumFrameLatency(1),
           "SetMaximumFrameLatency(1)");
     frame_ready_ = frame_latency_swapchain->GetFrameLatencyWaitableObject();
-    factory->MakeWindowAssociation(hwnd_, DXGI_MWA_NO_ALT_ENTER);
     for (UINT i=0; i<2; ++i)
       check(swap_->GetBuffer(i, IID_PPV_ARGS(&buffers_[i])), "swapchain buffer");
-    // WDA_EXCLUDEFROMCAPTURE prevents the overlay becoming its own input.
+    // Two independent Windows capture exclusions are used: WDA protects
+    // ordinary capture APIs; WCA_EXCLUDED_FROM_DDA targets Desktop Duplication.
     excluded_ = SetWindowDisplayAffinity(hwnd_, 0x00000011) != 0;
     if (!excluded_) throw std::runtime_error(
         "SetWindowDisplayAffinity(EXCLUDEFROMCAPTURE) failed: refusing recursive capture");
+    struct CompositionAttributeData {
+      int attribute;
+      void* value;
+      SIZE_T size;
+    };
+    using SetWindowCompositionAttributeFn = BOOL(WINAPI*)(HWND,
+                                                          CompositionAttributeData*);
+    const auto user32 = GetModuleHandleW(L"user32.dll");
+    const auto set_attribute = reinterpret_cast<SetWindowCompositionAttributeFn>(
+        GetProcAddress(user32, "SetWindowCompositionAttribute"));
+    BOOL exclude_from_dda = TRUE;
+    CompositionAttributeData exclude_attribute{24, &exclude_from_dda,
+                                                sizeof(exclude_from_dda)};
+    if (!set_attribute || !set_attribute(hwnd_, &exclude_attribute))
+      throw std::runtime_error(
+          "WCA_EXCLUDED_FROM_DDA failed: cannot protect against DXGI capture feedback");
     RECT rc{};
     GetClientRect(game, &rc);
     POINT p{0,0};
@@ -646,7 +755,7 @@ public:
                  D3D12_RESOURCE_STATE_PRESENT);
     Gpu::barrier(cmd, source, D3D12_RESOURCE_STATE_COPY_SOURCE, state);
     gpu_.flush();
-    check(swap_->Present(0, DXGI_PRESENT_ALLOW_TEARING), "swapchain Present");
+    check(swap_->Present(0, DXGI_PRESENT_ALLOW_TEARING), "composition Present");
   }
   void hide() { ShowWindow(hwnd_, SW_HIDE); }
   void show(HWND game, UINT w, UINT h) {
@@ -745,6 +854,13 @@ struct App {
         }
         if (!overlay_visible) { presenter.show(game, w, h); overlay_visible=true; }
         if (!capture.next(gpu)) continue;
+        if (!input.compute(capture.shared12.Get(), mode)) {
+          // A DDA notification without new game pixels is often our own
+          // excluded composition window being presented. Do not run DLSS-G
+          // or feed such a duplicate back into its motion history.
+          input.back_to_compute();
+          continue;
+        }
         const auto captured_at = Clock::now();
         const double source_interval = std::chrono::duration<double>(
             captured_at - previous_capture).count();
@@ -762,7 +878,6 @@ struct App {
           presenter.present(resource, state);
           last_present = Clock::now();
         };
-        input.compute(capture.shared12.Get(), mode);
         if (!had_previous) {
           // Seed DLSS-G's internal history without displaying an interpolated frame.
           ngx.evaluate(1, true);
