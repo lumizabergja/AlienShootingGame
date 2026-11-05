@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 project(ExternalDLSSG LANGUAGES CXX)
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
 if(NOT WIN32)
   message(FATAL_ERROR "This experimental application targets Windows 11 x64")
