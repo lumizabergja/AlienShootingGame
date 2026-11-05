@@ -691,8 +691,8 @@ public:
                                                   nullptr, &base),
           "CreateSwapChainForComposition");
     check(base.As(&swap_), "IDXGISwapChain3");
-    check(DirectCompositionCreateDevice(nullptr, IID_PPV_ARGS(&composition_)),
-          "DirectCompositionCreateDevice");
+    check(DCompositionCreateDevice(nullptr, IID_PPV_ARGS(&composition_)),
+          "DCompositionCreateDevice");
     check(composition_->CreateTargetForHwnd(hwnd_, TRUE, &composition_target_),
           "DirectComposition CreateTargetForHwnd");
     check(composition_->CreateVisual(&composition_visual_),
