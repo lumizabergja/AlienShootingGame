@@ -28,7 +28,7 @@ jobs:
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           cmake --build build --config Release --parallel
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-      - name: Compile shaders and validate pipelines with WARP
+      - name: Compile shaders and verify output with WARP readback
         shell: pwsh
         run: |
           ctest --test-dir build -C Release --output-on-failure
@@ -46,7 +46,7 @@ jobs:
           }
           Copy-Item src,tests,vendor,CMakeLists.txt package/source -Recurse
           Get-ChildItem sdk -Recurse -File | Where-Object { $_.Name -match '^(LICENSE|ThirdParty)' } | ForEach-Object { Copy-Item $_.FullName package/source -Force }
-          @("Source commit: $env:GITHUB_SHA",'Build: Windows x64 MSVC Release /MT','Checks: shader compilation and WARP PSO creation passed','NvFBC/NvOFA/DLSS-G: NOT hardware-tested on runner','Streamline SDK: v2.14.16, official release SHA256 verified','Fixed: NvOFA 4x4 FAST + output confidence ON (R8_UINT)','Full-resolution motion; no alternative motion modes') | Set-Content package/BUILD-VALIDATION.txt
+          @("Source commit: $env:GITHUB_SHA",'Build: Windows x64 MSVC Release /MT','Checks: shader compilation, WARP PSOs, BGRA/pitch and motion/confidence GPU readback passed','NvFBC/NvOFA/DLSS-G: NOT hardware-tested on runner','Streamline SDK: v2.14.16, official release SHA256 verified','Fixed: NvOFA 4x4 FAST + output confidence ON (R8_UINT)','Full-resolution motion; no alternative motion modes') | Set-Content package/BUILD-VALIDATION.txt
           Get-ChildItem package -Filter *.dll | ForEach-Object { "$($_.Name) SHA256 $((Get-FileHash $_ -Algorithm SHA256).Hash)" } | Add-Content package/BUILD-VALIDATION.txt
           New-Item -ItemType Directory -Force dist | Out-Null
           Compress-Archive package/* dist/NvFast-Confidence-Windows-x64.zip -Force

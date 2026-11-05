@@ -24,7 +24,7 @@ float2 PSMotion(Vertex v):SV_Target {
   float cost=float(Cost.Load(int3(c,0)));float conf=exp2(-cost/32.0);
   float3 local=CurrentAt(c*4+2).rgb;float edge=exp2(-20*dot(abs(local-center),float3(.299,.587,.114)));
   float2 f=lerp(1-fracq,fracq,float2(off));float weight=max(.001,f.x*f.y)*edge*conf;
-  bool valid=all(isfinite(flow))&&all(abs(flow)<float2(Width,Height))&&cost<240;
+  bool valid=all(abs(flow)<float2(Width,Height))&&cost<240;
   weight=valid?weight:0;candidates[i]=flow;weights[i]=weight;total+=weight;if(weight>best){best=weight;chosen=i;}
  }
  if(total<1e-6)return 0;
