@@ -1,0 +1,40 @@
+name: DLSS-G Windows x64 build
+on:
+  push:
+    branches:
+      - external-dlssg-presetc-20261105
+    paths:
+      - '.github/workflows/external-dlssg-win-x64.yml'
+      - 'external-dlssg/**'
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: windows-2022
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch NVIDIA SDK and licensed MIT worker
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/NVIDIA/DLSS.git $env:RUNNER_TEMP/DLSS
+          git clone --depth 1 https://github.com/HECer/DLSSG-Stream-Worker.git $env:RUNNER_TEMP/worker
+      - name: Build genuine NVIDIA NGX worker using MSVC
+        shell: pwsh
+        run: |
+          cmake -S "$env:RUNNER_TEMP/worker" -B "$env:RUNNER_TEMP/build" -G "Visual Studio 17 2022" -A x64 -D "DLSS_SDK_DIR=$env:RUNNER_TEMP/DLSS" -D BUILD_TESTING=ON
+          cmake --build "$env:RUNNER_TEMP/build" --config Release --parallel
+          ctest --test-dir "$env:RUNNER_TEMP/build" -C Release --output-on-failure
+      - name: Package NVIDIA NGX probe
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force "dist" | Out-Null
+          Copy-Item "$env:RUNNER_TEMP/build/Release/dlssg-worker.exe" "dist/"
+          Copy-Item "$env:RUNNER_TEMP/DLSS/lib/Windows_x86_64/rel/nvngx_dlssg.dll" "dist/"
+          Copy-Item "external-dlssg/README.txt" "dist/"
+          Compress-Archive -Path "dist/*" -DestinationPath "DLSSG-Probe-Windows-x64.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DLSSG-Probe-Windows-x64
+          path: DLSSG-Probe-Windows-x64.zip
+          if-no-files-found: error
