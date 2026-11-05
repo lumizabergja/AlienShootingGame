@@ -28,6 +28,11 @@ jobs:
         run: |
           $shaderTest = Start-Process -FilePath "$env:RUNNER_TEMP/dlssg-build/Release/ExternalDLSSG.exe" -ArgumentList "--shader-test" -Wait -PassThru
           if ($shaderTest.ExitCode -ne 0) { throw "D3DCompile failed (exit $($shaderTest.ExitCode))" }
+      - name: Test D3D11 and D3D12 shared texture using Windows WARP
+        shell: pwsh
+        run: |
+          $interop = Start-Process -FilePath "$env:RUNNER_TEMP/dlssg-build/Release/ExternalDLSSG.exe" -ArgumentList "--interop-test" -Wait -PassThru
+          if ($interop.ExitCode -ne 0) { throw "Cross-API shared resource validation failed (exit $($interop.ExitCode))" }
       - name: Package executable and NVIDIA runtime
         shell: pwsh
         run: |
