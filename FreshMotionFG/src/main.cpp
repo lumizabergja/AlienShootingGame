@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cmath>
 #include <condition_variable>
+#include <cstdlib>
 #include <filesystem>
 #include <mutex>
 #include <stdexcept>
@@ -24,6 +25,7 @@
 #include <utility>
 #include <cstring>
 #include <cwchar>
+#include <exception>
 #include "nvfbc_capture.h"
 #include "mailbox.h"
 
@@ -32,6 +34,39 @@
 extern "C" {
     __declspec(dllexport) extern const UINT D3D12SDKVersion = 620;
     __declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\";
+}
+
+static void startupLog(const std::wstring& message){
+    static std::mutex fileMutex;
+    std::lock_guard<std::mutex> guard(fileMutex);
+    wchar_t exePath[MAX_PATH]{};
+    GetModuleFileNameW(nullptr,exePath,MAX_PATH);
+    std::wstring path(exePath);
+    auto lastSlash=path.find_last_of(L"\\/");
+    if(lastSlash!=std::wstring::npos)path.resize(lastSlash+1);
+    else path.clear();
+    path+=L"FreshMotionFG-Diagnostic.log";
+    SYSTEMTIME now{};GetLocalTime(&now);
+    wchar_t stamp[48]{};
+    swprintf_s(stamp,L"[%02u:%02u:%02u.%03u] ",now.wHour,now.wMinute,now.wSecond,now.wMilliseconds);
+    std::wstring line=std::wstring(stamp)+message+L"\r\n";
+    int size=WideCharToMultiByte(CP_UTF8,0,line.c_str(),int(line.size()),nullptr,0,nullptr,nullptr);
+    if(size<=0)return;
+    std::string utf8(size,'\0');
+    WideCharToMultiByte(CP_UTF8,0,line.c_str(),int(line.size()),utf8.data(),size,nullptr,nullptr);
+    HANDLE output=CreateFileW(path.c_str(),FILE_APPEND_DATA,FILE_SHARE_READ|FILE_SHARE_WRITE,
+                              nullptr,OPEN_ALWAYS,FILE_ATTRIBUTE_NORMAL,nullptr);
+    if(output!=INVALID_HANDLE_VALUE){
+        DWORD written=0;WriteFile(output,utf8.data(),DWORD(utf8.size()),&written,nullptr);
+        CloseHandle(output);
+    }
+}
+static LONG WINAPI unhandledCrash(EXCEPTION_POINTERS* exception){
+    wchar_t code[80]{};
+    swprintf_s(code,L"Uncaught Windows exception 0x%08X",
+               exception&&exception->ExceptionRecord?exception->ExceptionRecord->ExceptionCode:0);
+    startupLog(code);
+    return EXCEPTION_CONTINUE_SEARCH;
 }
 
 using Microsoft::WRL::ComPtr;
@@ -208,6 +243,13 @@ public:
         constants.clipToLensClip=identity;
         constants.cameraUp={0,1,0};constants.cameraRight={1,0,0};
         constants.cameraFwd={0,0,1};
+        // Every Streamline common constant must be initialized explicitly.
+        // The previous build left these invalid; the supplied startup log
+        // reported all four immediately before the application exited.
+        constants.jitterOffset={0,0};
+        constants.cameraPinholeOffset={0,0};
+        constants.cameraPos={0,0,0};
+        constants.depthInverted=sl::eFalse;
         constants.cameraNear=.1f;constants.cameraFar=1000;
         constants.cameraFOV=1.5707963f;
         constants.cameraAspectRatio=float(width)/height;
@@ -325,14 +367,17 @@ class Capture {
     }
 public:
     void preflight(Display& display,HWND overlay,DWORD pid) {
+        startupLog(L"Starting NvFBC PID CUDA preflight");
         std::wstring error;
         if(!backend.Init(overlay,pid,MonitorFromWindow(overlay,MONITOR_DEFAULTTONEAREST),
                          display.rect,display.rect,display.width,display.height,error))
             fail(L"NvFBC CUDA PID initialization",error);
         width=backend.Width();height=backend.Height();
         if(!width||!height)throw std::runtime_error("NvFBC returned zero capture dimensions");
+        startupLog(L"NvFBC PID preflight passed: "+std::to_wstring(width)+L"x"+std::to_wstring(height));
     }
     void bind(ID3D12Device* d3d12){
+        startupLog(L"Binding NvFBC CUDA to the D3D12 shared buffer");
         if(backend.Pitch()<width*4 || backend.Pitch()%D3D12_TEXTURE_DATA_PITCH_ALIGNMENT)
             throw std::runtime_error("NvFBC row pitch cannot use a D3D12 copy footprint");
         check(d3d12->CreateFence(0,D3D12_FENCE_FLAG_SHARED,IID_PPV_ARGS(&cudaReady)),
@@ -362,6 +407,7 @@ public:
                   "Create mailbox copy list");
             check(copyCommands[i]->Close(),"Close mailbox copy list");
         }
+        startupLog(L"NvFBC copy queue and color mailbox ready");
     }
     NvFbcGrabResult next(UINT slot,UINT64& fenceValue) {
         LARGE_INTEGER timestamp{};std::wstring error;
@@ -575,6 +621,7 @@ class Presenter {
         // A first NvFBC PID grab must succeed before Streamline is initialized.
         capture.preflight(display,overlay,cfg.pid);
         dlss.initialize();
+        startupLog(L"Streamline initialization passed");
         check(dlss.makeFactory(IID_PPV_ARGS(&factory)),"Streamline DXGI factory");
         check(dlss.makeDevice(display.adapter.Get(),D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&device)),
               "Streamline D3D12 device");
@@ -620,8 +667,10 @@ class Presenter {
         check(device->CreateDescriptorHeap(&h,IID_PPV_ARGS(&heap)),"Shader descriptor heap");
         descriptorSize=device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         dlss.configure(display.adapter.Get(),display.width,display.height,cfg.factor);
+        startupLog(L"DX12 compositor and Streamline DLSS-G configuration passed");
     }
     void createPipelines() {
+        startupLog(L"Compiling shader-motion HLSL pipelines");
         D3D12_DESCRIPTOR_RANGE ranges[2]{};
         ranges[0].RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
         ranges[0].NumDescriptors=4;ranges[0].BaseShaderRegister=0;
@@ -685,6 +734,7 @@ class Presenter {
         draw.NumRenderTargets=1;draw.RTVFormats[0]=DXGI_FORMAT_B8G8R8A8_UNORM;
         draw.SampleDesc.Count=1;
         check(device->CreateGraphicsPipelineState(&draw,IID_PPV_ARGS(&drawPSO)),"Draw PSO");
+        startupLog(L"GPU shader-motion HLSL pipelines ready");
     }
     void prepareSlots() {
         analysisW=std::max<UINT>(16,(capture.Width()*cfg.analysisPercent+99)/100);
@@ -702,6 +752,7 @@ class Presenter {
                   s.allocator.Get(),nullptr,IID_PPV_ARGS(&s.commands)),"Command list");
             check(s.commands->Close(),"Close initial list");
         }
+        startupLog(L"Motion and depth surfaces allocated");
     }
     void setDescriptors(UINT slot,UINT current,UINT previous) {
         UINT base=cpuOffset(slot);
@@ -732,6 +783,7 @@ public:
         if(overlay)DestroyWindow(overlay);
     }
     void render(UINT current,UINT previous,UINT64 ready,bool first) {
+        if(frameCount==0)startupLog(L"First render: waiting on CUDA copy fence and recording GPU commands");
         auto slotIndex=UINT(frameCount%slots.size());
         auto& s=slots[slotIndex];
         waitFence(finished.Get(),s.finishedValue);
@@ -819,17 +871,21 @@ public:
         check(list->Close(),"Close render commands");
         ID3D12CommandList* commands[]={list};
         queue->ExecuteCommandLists(1,commands);
+        if(frameCount==0)startupLog(L"First render: GPU command list submitted");
         check(queue->Signal(finished.Get(),++fenceSerial),"Render fence");
         s.finishedValue=fenceSerial;
         dlss.marker(sl::PCLMarker::eRenderSubmitEnd);
         dlss.marker(sl::PCLMarker::ePresentStart);
         check(swap->Present(0,0),"Present");
+        if(frameCount==0)startupLog(L"First render: Present returned successfully");
         dlss.marker(sl::PCLMarker::ePresentEnd);
         auto consumed=dlss.consumed();
+        if(frameCount==0)startupLog(L"First render: DLSS-G state query passed");
         s.fgFence=consumed.first;s.fgFenceValue=consumed.second;
         ++frameCount;
     }
     void run() {
+        startupLog(L"Starting FreshMotionFG V39-mailbox session");
         display.find(cfg.game);
         createOverlay();
         setStatus(L"Starting V39-style NvFBC mailbox + shader DLSS-G...");
@@ -838,6 +894,7 @@ public:
         shaderPath=(std::filesystem::path(module).parent_path()/L"motion.hlsl").wstring();
         createPipelines();prepareSlots();
         captureThread=std::thread([this]{captureLoop();});
+        startupLog(L"Independent NvFBC capture producer started");
         setStatus(L"Ready. CUDA producer and latest-frame mailbox active.");
         int previous=-1;
         uint64_t previousEpoch=0;
@@ -880,7 +937,9 @@ public:
             int current=mailbox.take(&selected);
             if(current<0)continue;
             bool reset=previous<0||selected.epoch!=previousEpoch;
+            if(previous<0)startupLog(L"First image selected from color mailbox");
             dlss.begin(reset);
+            if(previous<0)startupLog(L"First Streamline frame token and constants accepted");
             // Last chance to latch a newer completed capture before rendering.
             if(mailbox.retakeLatest(current,&selected)){
                 bool newerReset=previous<0||selected.epoch!=previousEpoch;
@@ -948,6 +1007,7 @@ static void startWorker(){
             presenter.run();
         }catch(const std::exception& ex){
             auto message=widen(ex.what());
+            startupLog(L"FATAL: "+message);
             setStatus(L"ERROR: "+message);
             MessageBoxW(controller,message.c_str(),L"FreshMotionFG error",MB_OK|MB_ICONERROR);
         }
@@ -1016,6 +1076,9 @@ static LRESULT CALLBACK controllerProc(HWND h,UINT msg,WPARAM w,LPARAM l){
     }
 }
 int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,LPWSTR,int show){
+    SetUnhandledExceptionFilter(unhandledCrash);
+    std::set_terminate([]{startupLog(L"FATAL: std::terminate called");std::abort();});
+    startupLog(L"FreshMotionFG application process launched");
     INITCOMMONCONTROLSEX controls{sizeof(controls),ICC_STANDARD_CLASSES};
     InitCommonControlsEx(&controls);
     WNDCLASSEXW desc{sizeof(desc)};
