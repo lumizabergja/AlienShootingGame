@@ -20,6 +20,8 @@ Controls:
 
 The original EXE window will still say NvOFA. The launcher selects the
 underlying backend via V39_MOTION for this experimental proxy.
+After starting, see V39ShaderProxy.log beside the EXE to confirm which
+backend was selected. Save this log if the app reports an error or closes.
 
 Limitations and known risks:
   * There is no NVIDIA/RTX hardware in the Windows CI runner, so shader
