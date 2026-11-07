@@ -1,0 +1,67 @@
+name: Fresh Motion FG Windows x64
+on:
+  workflow_dispatch:
+  push:
+    branches: ['experiment/fresh-motion-fg-*']
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Obtain official Streamline headers
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          git clone --depth 1 --branch v2.14.16 https://github.com/NVIDIA-RTX/Streamline.git "$env:RUNNER_TEMP\Streamline"
+          if ($LASTEXITCODE -ne 0) { throw 'Streamline clone failed' }
+      - name: Build EXE
+        shell: pwsh
+        run: |
+          cmake -S FreshMotionFG -B build-fresh -A x64 -DSTREAMLINE_INCLUDE="$env:RUNNER_TEMP\Streamline\include"
+          if ($LASTEXITCODE -ne 0) { throw 'CMake configure failed' }
+          cmake --build build-fresh --config Release --parallel
+          if ($LASTEXITCODE -ne 0) { throw 'Windows C++ compile failed' }
+      - name: Validate HLSL shaders
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $fxc=Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Recurse -Filter fxc.exe -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match '[\\/]x64[\\/]fxc.exe$' } | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $fxc) { throw 'fxc.exe not found' }
+          foreach ($item in @(@('EstimateForward','cs_5_1'),@('EstimateReverse','cs_5_1'),@('ExpandMotion','cs_5_1'),@('VSMain','vs_5_0'),@('PSMain','ps_5_0'))) {
+            & $fxc.FullName /nologo /T $item[1] /E $item[0] /Fo "$env:RUNNER_TEMP\$($item[0]).cso" FreshMotionFG/shaders/motion.hlsl
+            if ($LASTEXITCODE -ne 0) { throw "Shader compile failed: $($item[0])" }
+          }
+      - name: Fetch signed Streamline binaries
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $archive="$env:RUNNER_TEMP\streamline.zip"
+          curl.exe -fSL --retry 3 -o $archive https://github.com/NVIDIA-RTX/Streamline/releases/download/v2.14.16/streamline-sdk-v2.14.16.zip
+          if ($LASTEXITCODE -ne 0) { throw 'Official Streamline release download failed' }
+          Expand-Archive -LiteralPath $archive -DestinationPath "$env:RUNNER_TEMP\sdk" -Force
+      - name: Package complete runtime
+        shell: pwsh
+        run: |
+          $ErrorActionPreference='Stop'
+          $output=Join-Path $PWD 'FreshMotionFG-NoNvOFA-Windows-x64'
+          New-Item -ItemType Directory -Force -Path $output | Out-Null
+          Copy-Item build-fresh/Release/FreshMotionFG.exe $output
+          Copy-Item FreshMotionFG/shaders/motion.hlsl (Join-Path $output 'motion.hlsl')
+          Copy-Item FreshMotionFG/README.md $output
+          $required=@('sl.interposer.dll','sl.common.dll','sl.dlss_g.dll','sl.reflex.dll','sl.pcl.dll','nvngx_dlssg.dll')
+          foreach ($dll in $required) {
+            $found=@(Get-ChildItem "$env:RUNNER_TEMP\sdk" -Recurse -File -Filter $dll)
+            if (-not $found.Count) { throw "Required NVIDIA runtime missing: $dll" }
+            $prefer=$found | Where-Object { $_.FullName -match '[\\/]bin[\\/]x64[\\/]' } | Select-Object -First 1
+            if (-not $prefer) { $prefer=$found | Select-Object -First 1 }
+            Copy-Item -LiteralPath $prefer.FullName -Destination (Join-Path $output $dll)
+          }
+          Compress-Archive -Path "$output/*" -DestinationPath 'FreshMotionFG-NoNvOFA-Windows-x64.zip' -Force
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FreshMotionFG-NoNvOFA-Windows-x64
+          path: FreshMotionFG-NoNvOFA-Windows-x64.zip
+          retention-days: 14
