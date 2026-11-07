@@ -8,7 +8,7 @@ on:
 
 jobs:
   compile:
-    runs-on: windows-2025
+    runs-on: windows-2022
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -21,7 +21,7 @@ jobs:
       - name: Configure Windows x64
         shell: pwsh
         run: |
-          cmake -S upstream -B build -G "Visual Studio 17 2022" -A x64 -DWINSDK_VER=10.0.26100.0
+          cmake -S upstream -B build -G "Visual Studio 17 2022" -A x64 "-DWINSDK_VER:STRING=10.0.26100.0"
       - name: Build executable
         shell: pwsh
         run: |
