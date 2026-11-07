@@ -1,4 +1,4 @@
-# FreshMotionFG — independent no-NvOFA prototype
+# FreshMotionFG — V39-style mailbox, no-NvOFA experiment
 
 An **experimental** Windows 11 x64 application that captures a selected game's
 PID through legacy Windows NvFBC CUDA, derives motion vectors entirely on the GPU,
@@ -6,15 +6,24 @@ provides a conservative flat depth surface, and invokes **real NVIDIA DLSS-G**
 through NVIDIA's public Streamline SDK.
 
 The core shader, Streamline pipeline, and presenter are newly written. With the
-user's permission, its NvFBC/CUDA PID capture module was adapted from the earlier
-NvFBC source in the repository. This is **not** a patch to V39 itself and it is
-not verified to be byte-identical to V39's capture implementation.
+user's permission, its NvFBC/CUDA PID capture and latest-mailbox ownership code
+were adapted from earlier source in the repository. This is **not** a patch to
+the supplied V39 executable; its original source was not in the ZIP.
 
 ## What it is
 
-- Capture: legacy **Windows NvFBC CUDA PID** capture with GPU-resident
-  D3D12 shared raw buffers and a CUDA→D3D12 shared fence. HLSL reads the
-  raw BGRA buffer directly without a copy-to-texture stage.
+- Capture: legacy **Windows NvFBC CUDA PID** with GPU-resident shared raw
+  buffers. A dedicated D3D12 copy queue waits on the CUDA fence, copies the
+  native-resolution BGRA frame into a three-slot D3D12 color mailbox, and
+  signals a separate GPU-ready fence. There is no CPU image readback.
+- Timing: an independent capture producer fills a latest-frame mailbox while
+  the presenter paces GPU work; obsolete unconsumed frames are dropped. The
+  presenter latches the newest available image late, then uses the previous
+  displayed source for optical-flow estimation.
+- Focus: Alt+Tab pauses capture publication, drains base rendering, temporarily
+  disables DLSS-G, clears old motion history, and resumes with a fresh frame.
+- D3D12 Agility SDK: 1.620.1 (SDK version 620), matching the supplied V39
+  bundle; its signed D3D12Core.dll must live in D3D12/ next to the EXE.
 - 4:3 game frames: preserve NvFBC-reported game dimensions and pitch, then
   stretch to the monitor output (for example 1280×960 → 1920×1080).
 - Motion: bidirectional image-to-image 4x4 block matching in HLSL, forward/
@@ -31,8 +40,12 @@ not verified to be byte-identical to V39's capture implementation.
 
 ## Important caveats
 
-1. **This is not V39.** The capture implementation is an earlier legacy NvFBC
-   CUDA PID module reused with permission. NVIDIA does **not** officially
+1. **This is not the original V39 binary or source.** Its build documentation
+   describes a similar three-slot CUDA→D3D12 copy architecture, but the exact
+   V39 scheduling, pre-recorded copy commands, NvOFA coupling and swapchain
+   behavior cannot be copied byte-for-byte from a compiled executable. The
+   capture module is an earlier legacy NvFBC CUDA PID implementation reused
+   with permission. NVIDIA does **not** officially
    support Windows NvFBC on current drivers. It may fail to initialize and
    reports an error; there is **no DXGI/WGC fallback**.
 2. No external display-capture API exposes game-authored motion vectors,
@@ -61,9 +74,10 @@ not verified to be byte-identical to V39's capture implementation.
 3. Run the game on the NVIDIA-connected monitor and select its game PID in the UI.
 4. Start FreshMotionFG.exe, choose the game window, choose 2x/3x/4x and
    begin with **25% GPU motion analysis**. Use Start.
-5. Alt+Tab hides the presenter while another process is focused. If NvFBC's
-   PID session invalidates or the capture resolution changes, the app reports
-   the error; press Stop and restart. Automatic recovery is not yet validated.
+5. Alt+Tab pauses and hides the presenter, resets frame history, then resumes
+   capture/DLSS-G when the selected game regains focus. CUDA PID sessions that
+   invalidate are recreated using the same interface. Resolution changes still
+   require Stop and Start. **Real Alt+Tab recovery is unverified until tested.**
 6. Compare against your original V39 separately. Test a moving camera, moving
    enemies, UI stability, true present rate, and click-to-photon latency.
 
@@ -82,6 +96,7 @@ Place the official signed Streamline x64 runtime DLLs from NVIDIA's SDK release
 beside the executable, including nvngx_dlssg.dll, sl.interposer.dll,
 sl.common.dll, sl.dlss_g.dll, sl.reflex.dll, and sl.pcl.dll.
 Keep shaders/motion.hlsl next to the executable as motion.hlsl.
+Place the Microsoft D3D12 Agility SDK 1.620.1 x64 D3D12Core.dll in D3D12/.
 
 ## Verification target
 
