@@ -12,7 +12,9 @@
 #include <cstdint>
 #include <filesystem>
 #include <mutex>
+#include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 using Microsoft::WRL::ComPtr;
@@ -106,9 +108,25 @@ static std::filesystem::path ApplicationDirectory() {
 }
 
 static void Diagnostic(const wchar_t* s) {
-    OutputDebugStringW(L"[V39 Shader Proxy] ");
-    OutputDebugStringW(s);
-    OutputDebugStringW(L"\n");
+    static std::mutex logMutex;
+    std::lock_guard<std::mutex> lock(logMutex);
+    const std::wstring line = std::wstring(L"[V39 Shader Proxy] ") + s + L"\r\n";
+    OutputDebugStringW(line.c_str());
+    const int length = WideCharToMultiByte(CP_UTF8, 0, line.c_str(),
+                                           int(line.size()), nullptr, 0, nullptr, nullptr);
+    if (length <= 0) return;
+    std::string encoded(size_t(length), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, line.c_str(), int(line.size()),
+                        encoded.data(), length, nullptr, nullptr);
+    const auto path = ApplicationDirectory() / L"V39ShaderProxy.log";
+    HANDLE file = CreateFileW(path.c_str(), FILE_APPEND_DATA,
+                              FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                              OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file != INVALID_HANDLE_VALUE) {
+        DWORD written = 0;
+        WriteFile(file, encoded.data(), DWORD(encoded.size()), &written, nullptr);
+        CloseHandle(file);
+    }
 }
 
 static bool SetupCompute(ShaderDevice& state) {
@@ -371,7 +389,10 @@ NvOFAPICreateInstanceD3D12(uint32_t version, NvofFunctionList* funcs) {
     wchar_t mode[20]{};
     GetEnvironmentVariableW(L"V39_MOTION", mode, DWORD(std::size(mode)));
     gShaderMode = (_wcsicmp(mode, L"SHADER") == 0);
-    if (!gShaderMode) return status;
+    if (!gShaderMode) {
+        Diagnostic(L"Native NVIDIA NvOFA selected. Function table forwarded unchanged.");
+        return status;
+    }
     gOriginal = *funcs;
     if (!gOriginal.create || !gOriginal.registerResource || !gOriginal.unregisterResource ||
         !gOriginal.execute || !gOriginal.destroy) return kFailure;
