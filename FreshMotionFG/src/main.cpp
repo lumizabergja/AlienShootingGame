@@ -1,6 +1,5 @@
 #include <windows.h>
 #include <commctrl.h>
-#include <d3d11_4.h>
 #include <d3d12.h>
 #include <d3dcompiler.h>
 #include <dcomp.h>
@@ -23,6 +22,7 @@
 #include <utility>
 #include <cstring>
 #include <cwchar>
+#include "nvfbc_capture.h"
 
 using Microsoft::WRL::ComPtr;
 static void check(HRESULT code,const char* label) {
@@ -283,85 +283,58 @@ struct Display {
     }
 };
 
-// Public DXGI Desktop Duplication; monitor capture, not game-PID capture.
-// Shared NT textures and a cross-API fence keep the image on the GPU.
+// Legacy NvFBC PID -> CUDA -> shared D3D12 raw buffer. No DXGI/WGC fallback.
+// The HLSL shader reads the raw BGRA buffer directly, eliminating a copy.
 class Capture {
-    ComPtr<ID3D11Device> device11;
-    ComPtr<ID3D11Device5> device5;
-    ComPtr<ID3D11DeviceContext> context11;
-    ComPtr<ID3D11DeviceContext4> context4;
-    ComPtr<IDXGIOutputDuplication> duplication;
-    ComPtr<ID3D11Fence> readyFence11;
-    ComPtr<ID3D12Fence> readyFence12;
-    std::array<ComPtr<ID3D11Texture2D>,3> source11;
-    std::array<ComPtr<ID3D12Resource>,3> source12;
+    NvFbcCaptureBackend backend;
+    ComPtr<ID3D12Fence> ready;
+    std::array<ComPtr<ID3D12Resource>,4> source;
     UINT64 readyValue{};
-public:
-    void initialize(Display& display,ID3D12Device* d3d12) {
-        D3D_FEATURE_LEVEL achieved{};
-        D3D_FEATURE_LEVEL requested[]={D3D_FEATURE_LEVEL_11_1,D3D_FEATURE_LEVEL_11_0};
-        check(D3D11CreateDevice(display.adapter.Get(),D3D_DRIVER_TYPE_UNKNOWN,nullptr,
-              D3D11_CREATE_DEVICE_BGRA_SUPPORT,requested,2,D3D11_SDK_VERSION,
-              &device11,&achieved,&context11),"D3D11 capture device");
-        check(device11.As(&device5),"D3D11Device5 required");
-        check(context11.As(&context4),"D3D11Context4 required");
-        ComPtr<IDXGIOutput1> output1;
-        check(display.output.As(&output1),"Output1 interface");
-        check(output1->DuplicateOutput(device11.Get(),&duplication),"DuplicateOutput");
-        DXGI_OUTDUPL_DESC info{};duplication->GetDesc(&info);
-        if(info.ModeDesc.Width!=display.width||info.ModeDesc.Height!=display.height)
-            throw std::runtime_error("Duplicated monitor has unexpected dimensions");
-
-        check(d3d12->CreateFence(0,D3D12_FENCE_FLAG_SHARED,IID_PPV_ARGS(&readyFence12)),
-              "Create shared ready fence");
-        HANDLE sharedFence{};
-        check(d3d12->CreateSharedHandle(readyFence12.Get(),nullptr,GENERIC_ALL,nullptr,&sharedFence),
-              "Share capture fence");
-        HRESULT opened=device5->OpenSharedFence(sharedFence,IID_PPV_ARGS(&readyFence11));
-        CloseHandle(sharedFence);check(opened,"Open capture fence on D3D11");
-
-        D3D11_TEXTURE2D_DESC td{};
-        td.Width=display.width;td.Height=display.height;td.MipLevels=1;td.ArraySize=1;
-        td.Format=DXGI_FORMAT_B8G8R8A8_UNORM;td.SampleDesc.Count=1;
-        td.Usage=D3D11_USAGE_DEFAULT;td.BindFlags=D3D11_BIND_SHADER_RESOURCE;
-        td.MiscFlags=D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
-        for(UINT i=0;i<3;i++){
-            check(device11->CreateTexture2D(&td,nullptr,&source11[i]),"Shared capture texture");
-            ComPtr<IDXGIResource1> shared;
-            check(source11[i].As(&shared),"IDXGIResource1");
-            HANDLE handle{};
-            check(shared->CreateSharedHandle(nullptr,DXGI_SHARED_RESOURCE_READ|DXGI_SHARED_RESOURCE_WRITE,
-                                             nullptr,&handle),"CreateSharedHandle");
-            HRESULT hr=d3d12->OpenSharedHandle(handle,IID_PPV_ARGS(&source12[i]));
-            CloseHandle(handle);check(hr,"Open shared texture in D3D12");
-        }
+    UINT width{},height{};
+    [[noreturn]] static void fail(const std::wstring& operation,const std::wstring& error){
+        throw std::runtime_error(std::string(operation.begin(),operation.end())+": "+
+                                 std::string(error.begin(),error.end()));
     }
-    // Returns false if no new monitor present; no frame is silently duplicated.
+public:
+    void preflight(Display& display,HWND overlay,DWORD pid) {
+        std::wstring error;
+        if(!backend.Init(overlay,pid,MonitorFromWindow(overlay,MONITOR_DEFAULTTONEAREST),
+                         display.rect,display.rect,display.width,display.height,error))
+            fail(L"NvFBC CUDA PID initialization",error);
+        width=backend.Width();height=backend.Height();
+        if(!width||!height)throw std::runtime_error("NvFBC returned zero capture dimensions");
+    }
+    void bind(ID3D12Device* d3d12){
+        check(d3d12->CreateFence(0,D3D12_FENCE_FLAG_SHARED,IID_PPV_ARGS(&ready)),
+              "Create NvFBC CUDA ready fence");
+        ID3D12Resource* resources[4]{};
+        std::wstring error;
+        if(!backend.Bind(d3d12,ready.Get(),resources,error))fail(L"NvFBC CUDA-D3D12 bind",error);
+        for(UINT i=0;i<4;i++)source[i].Attach(resources[i]);
+    }
     bool next(UINT slot,UINT64& fenceValue) {
-        DXGI_OUTDUPL_FRAME_INFO info{};
-        ComPtr<IDXGIResource> resource;
-        HRESULT hr=duplication->AcquireNextFrame(7,&info,&resource);
-        if(hr==DXGI_ERROR_WAIT_TIMEOUT)return false;
-        if(hr==DXGI_ERROR_ACCESS_LOST)throw std::runtime_error("Desktop duplication lost (Alt-Tab or mode change). Stop and restart.");
-        check(hr,"AcquireNextFrame");
-        ComPtr<ID3D11Texture2D> frame;
-        check(resource.As(&frame),"Captured texture");
-        context11->CopyResource(source11[slot].Get(),frame.Get());
-        check(context4->Signal(readyFence11.Get(),++readyValue),"Signal D3D11 copy completion");
-        context11->Flush();
-        duplication->ReleaseFrame();
+        LARGE_INTEGER timestamp{};std::wstring error;
+        auto result=backend.Grab(slot,timestamp,error);
+        if(result==NvFbcGrabResult::Timeout)return false;
+        if(result!=NvFbcGrabResult::Frame)fail(L"NvFBC capture",error);
+        if(backend.Width()!=width||backend.Height()!=height)
+            throw std::runtime_error("Game capture resolution changed. Stop and restart.");
+        if(!backend.Signal(++readyValue,error))fail(L"CUDA fence signal",error);
         fenceValue=readyValue;
         return true;
     }
-    ID3D12Resource* image(UINT slot)const{return source12[slot].Get();}
-    ID3D12Fence* readyFence()const{return readyFence12.Get();}
+    ID3D12Resource* image(UINT slot)const{return source[slot].Get();}
+    ID3D12Fence* readyFence()const{return ready.Get();}
+    UINT Width()const{return width;}
+    UINT Height()const{return height;}
+    UINT Pitch()const{return backend.Pitch();}
 };
 
 struct alignas(4) MotionConstants {
     UINT imageWidth{},imageHeight{},analysisWidth{},analysisHeight{};
     UINT flowWidth{},flowHeight{},firstFrame{},outputWidth{};
     UINT outputHeight{};float mouseX{},mouseY{},cameraGain{};
-    float tanHalfFovX{},confidenceCutoff{},pad0{},pad1{};
+    float tanHalfFovX{},confidenceCutoff{};UINT capturePitchBytes{};float pad1{};
 };
 static_assert(sizeof(MotionConstants)==16*sizeof(UINT));
 struct RenderSlot {
@@ -410,6 +383,15 @@ class Presenter {
         d.Texture2D.MipLevels=1;
         device->CreateShaderResourceView(source,&d,cpu(index));
     }
+    void rawSrv(UINT index,ID3D12Resource* source){
+        D3D12_SHADER_RESOURCE_VIEW_DESC d{};
+        d.Format=DXGI_FORMAT_R32_TYPELESS;
+        d.ViewDimension=D3D12_SRV_DIMENSION_BUFFER;
+        d.Shader4ComponentMapping=D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
+        d.Buffer.NumElements=UINT(source->GetDesc().Width/4);
+        d.Buffer.Flags=D3D12_BUFFER_SRV_FLAG_RAW;
+        device->CreateShaderResourceView(source,&d,cpu(index));
+    }
     void uav(UINT index,ID3D12Resource* source,DXGI_FORMAT format) {
         D3D12_UNORDERED_ACCESS_VIEW_DESC d{};
         d.Format=format;d.ViewDimension=D3D12_UAV_DIMENSION_TEXTURE2D;
@@ -427,6 +409,8 @@ class Presenter {
             throw std::runtime_error("Windows could not exclude presenter from capture");
     }
     void createGraphics() {
+        // A first NvFBC PID grab must succeed before Streamline is initialized.
+        capture.preflight(display,overlay,cfg.pid);
         dlss.initialize();
         check(dlss.makeFactory(IID_PPV_ARGS(&factory)),"Streamline DXGI factory");
         check(dlss.makeDevice(display.adapter.Get(),D3D_FEATURE_LEVEL_11_0,IID_PPV_ARGS(&device)),
@@ -439,7 +423,7 @@ class Presenter {
             check(device->CreateCommandQueue(&q,IID_PPV_ARGS(&queue)),"Command queue");
         }
         check(device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&finished)),"GPU completion fence");
-        capture.initialize(display,device.Get());
+        capture.bind(device.Get());
 
         DXGI_SWAP_CHAIN_DESC1 d{};
         d.Width=display.width;d.Height=display.height;
@@ -508,16 +492,14 @@ class Presenter {
         D3D12_DESCRIPTOR_RANGE drawRange{};
         drawRange.RangeType=D3D12_DESCRIPTOR_RANGE_TYPE_SRV;
         drawRange.NumDescriptors=1;drawRange.BaseShaderRegister=0;
-        D3D12_ROOT_PARAMETER drawParam{};
-        drawParam.ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
-        drawParam.DescriptorTable={1,&drawRange};
-        drawParam.ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
-        D3D12_STATIC_SAMPLER_DESC sampler{};
-        sampler.Filter=D3D12_FILTER_MIN_MAG_MIP_LINEAR;
-        sampler.AddressU=sampler.AddressV=sampler.AddressW=D3D12_TEXTURE_ADDRESS_MODE_CLAMP;
-        sampler.ShaderRegister=0;sampler.ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
-        desc={};desc.NumParameters=1;desc.pParameters=&drawParam;
-        desc.NumStaticSamplers=1;desc.pStaticSamplers=&sampler;
+        D3D12_ROOT_PARAMETER drawParam[2]{};
+        drawParam[0].ParameterType=D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+        drawParam[0].DescriptorTable={1,&drawRange};
+        drawParam[0].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
+        drawParam[1].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;
+        drawParam[1].Constants={0,0,16};
+        drawParam[1].ShaderVisibility=D3D12_SHADER_VISIBILITY_PIXEL;
+        desc={};desc.NumParameters=2;desc.pParameters=drawParam;
         desc.Flags=D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
         blob.Reset();
         check(D3D12SerializeRootSignature(&desc,D3D_ROOT_SIGNATURE_VERSION_1,
@@ -542,8 +524,8 @@ class Presenter {
         check(device->CreateGraphicsPipelineState(&draw,IID_PPV_ARGS(&drawPSO)),"Draw PSO");
     }
     void prepareSlots() {
-        analysisW=std::max<UINT>(16,(display.width*cfg.analysisPercent+99)/100);
-        analysisH=std::max<UINT>(16,(display.height*cfg.analysisPercent+99)/100);
+        analysisW=std::max<UINT>(16,(capture.Width()*cfg.analysisPercent+99)/100);
+        analysisH=std::max<UINT>(16,(capture.Height()*cfg.analysisPercent+99)/100);
         flowW=(analysisW+3)/4;flowH=(analysisH+3)/4;
         for(UINT i=0;i<slots.size();i++){
             auto& s=slots[i];
@@ -560,16 +542,16 @@ class Presenter {
     }
     void setDescriptors(UINT slot,UINT current,UINT previous) {
         UINT base=cpuOffset(slot);
-        srv(base+0,capture.image(current),DXGI_FORMAT_B8G8R8A8_UNORM);
-        srv(base+1,capture.image(previous),DXGI_FORMAT_B8G8R8A8_UNORM);
+        rawSrv(base+0,capture.image(current));
+        rawSrv(base+1,capture.image(previous));
         srv(base+2,slots[slot].forwardFlow.Get(),DXGI_FORMAT_R16G16B16A16_FLOAT);
         srv(base+3,slots[slot].reverseFlow.Get(),DXGI_FORMAT_R16G16B16A16_FLOAT);
         uav(base+4,slots[slot].forwardFlow.Get(),DXGI_FORMAT_R16G16B16A16_FLOAT);
         uav(base+5,slots[slot].motion.Get(),DXGI_FORMAT_R16G16_FLOAT);
         uav(base+6,slots[slot].depth.Get(),DXGI_FORMAT_R32_FLOAT);
-        srv(base+7,capture.image(current),DXGI_FORMAT_B8G8R8A8_UNORM);
-        srv(base+8,capture.image(previous),DXGI_FORMAT_B8G8R8A8_UNORM);
-        srv(base+9,capture.image(current),DXGI_FORMAT_B8G8R8A8_UNORM);
+        rawSrv(base+7,capture.image(current));
+        rawSrv(base+8,capture.image(previous));
+        rawSrv(base+9,capture.image(current));
         srv(base+10,slots[slot].forwardFlow.Get(),DXGI_FORMAT_R16G16B16A16_FLOAT);
         srv(base+11,slots[slot].reverseFlow.Get(),DXGI_FORMAT_R16G16B16A16_FLOAT);
         uav(base+12,slots[slot].reverseFlow.Get(),DXGI_FORMAT_R16G16B16A16_FLOAT);
@@ -595,10 +577,10 @@ public:
         check(queue->Wait(capture.readyFence(),ready),"D3D12 waits for capture");
         ID3D12DescriptorHeap* heaps[]={heap.Get()};
         list->SetDescriptorHeaps(1,heaps);
-        barrier(list,capture.image(current),D3D12_RESOURCE_STATE_COMMON,
-                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-        if(current!=previous)barrier(list,capture.image(previous),D3D12_RESOURCE_STATE_COMMON,
-                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        constexpr auto readStates=D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE|
+                                  D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
+        barrier(list,capture.image(current),D3D12_RESOURCE_STATE_COMMON,readStates);
+        if(current!=previous)barrier(list,capture.image(previous),D3D12_RESOURCE_STATE_COMMON,readStates);
         if(s.finishedValue) {
             barrier(list,s.motion.Get(),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -606,7 +588,7 @@ public:
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         }
         MotionConstants constants{};
-        constants.imageWidth=display.width;constants.imageHeight=display.height;
+        constants.imageWidth=capture.Width();constants.imageHeight=capture.Height();
         constants.analysisWidth=analysisW;constants.analysisHeight=analysisH;
         constants.flowWidth=flowW;constants.flowHeight=flowH;
         constants.firstFrame=first?1u:0u;
@@ -614,6 +596,7 @@ public:
         constants.cameraGain=0;constants.mouseX=0;constants.mouseY=0; // no prediction
         constants.tanHalfFovX=std::tan(cfg.fovX*3.14159265f/360.f);
         constants.confidenceCutoff=.08f;
+        constants.capturePitchBytes=capture.Pitch();
 
         list->SetComputeRootSignature(computeRoot.Get());
         list->SetComputeRoot32BitConstants(2,16,&constants,0);
@@ -658,14 +641,14 @@ public:
         list->RSSetViewports(1,&vp);list->RSSetScissorRects(1,&sc);
         list->SetGraphicsRootSignature(drawRoot.Get());
         list->SetGraphicsRootDescriptorTable(0,gpu(cpuOffset(slotIndex)+7));
+        list->SetGraphicsRoot32BitConstants(1,16,&constants,0);
         list->SetPipelineState(drawPSO.Get());
         list->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         list->DrawInstanced(3,1,0,0);
         barrier(list,back,D3D12_RESOURCE_STATE_RENDER_TARGET,D3D12_RESOURCE_STATE_PRESENT);
-        barrier(list,capture.image(current),D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                D3D12_RESOURCE_STATE_COMMON);
+        barrier(list,capture.image(current),readStates,D3D12_RESOURCE_STATE_COMMON);
         if(current!=previous)barrier(list,capture.image(previous),
-                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,D3D12_RESOURCE_STATE_COMMON);
+                readStates,D3D12_RESOURCE_STATE_COMMON);
         dlss.tag(list,s.motion.Get(),s.depth.Get(),back,display.width,display.height);
         check(list->Close(),"Close render commands");
         ID3D12CommandList* commands[]={list};
@@ -683,7 +666,7 @@ public:
     void run() {
         display.find(cfg.game);
         createOverlay();
-        setStatus(L"Starting DXGI GPU capture and DLSS-G...");
+        setStatus(L"Starting NvFBC PID CUDA capture and DLSS-G...");
         createGraphics();
         wchar_t module[MAX_PATH]{};GetModuleFileNameW(nullptr,module,MAX_PATH);
         shaderPath=(std::filesystem::path(module).parent_path()/L"motion.hlsl").wstring();
@@ -806,7 +789,7 @@ static LRESULT CALLBACK controllerProc(HWND h,UINT msg,WPARAM w,LPARAM l){
     switch(msg) {
         case WM_CREATE:{
             controller=h;
-            text(h,L"Game window (monitor capture):",18,14,350);
+            text(h,L"Game window (NvFBC CUDA PID):",18,14,350);
             gamePicker=combo(h,ID_GAME,18,40,375);
             CreateWindowExW(0,L"BUTTON",L"Refresh",WS_CHILD|WS_VISIBLE,399,40,80,28,
                             h,(HMENU)(INT_PTR)ID_REFRESH,GetModuleHandleW(nullptr),nullptr);
