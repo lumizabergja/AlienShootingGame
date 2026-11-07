@@ -1,0 +1,31 @@
+name: Build V39 experimental GPU shader proxy
+on:
+  push:
+    branches:
+      - experiment/v39-gpu-shader-proxy-20261107
+    paths:
+      - 'V39ShaderExperiment/**'
+      - '.github/workflows/build-v39-shader-proxy.yml'
+  workflow_dispatch:
+jobs:
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S V39ShaderExperiment -B build -A x64
+      - name: Compile
+        run: cmake --build build --config Release --parallel 2
+      - name: Stage artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item build/Release/nvofapi64.dll dist/
+          Copy-Item V39ShaderExperiment/shaders/block_motion.hlsl dist/
+          Copy-Item 'V39ShaderExperiment/Run V39 - NvOFA.cmd' dist/
+          Copy-Item 'V39ShaderExperiment/Run V39 - GPU Shader.cmd' dist/
+          Copy-Item V39ShaderExperiment/README-EXPERIMENT.txt dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: V39-GPU-Shader-Proxy-x64-Experimental
+          path: dist
