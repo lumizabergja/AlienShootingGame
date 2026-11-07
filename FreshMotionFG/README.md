@@ -1,5 +1,19 @@
 # FreshMotionFG — V39-style mailbox, no-NvOFA experiment
 
+## Startup fix (2026-11-07)
+
+The first user log showed CUDA PID capture, CUDA/D3D12 sharing, and Streamline
+initialization working, followed by four invalid Streamline camera/common
+constants warnings. This build now explicitly supplies zero jitter, zero
+camera-pinhole offset, zero camera position and non-inverted depth. These were
+missing before; the change is not hardware-runtime-verified.
+
+A new `FreshMotionFG-Diagnostic.log` is written next to the EXE. If Start closes
+or fails, attach this file plus the `sl(...)` and `FrameGeneration-Capture(...)`
+logs. A fatal C++ exception is also displayed instead of silently changing
+capture or motion mode. If a GPU driver crash prevents it, the last startup
+checkpoint remains in the diagnostic log.
+
 An **experimental** Windows 11 x64 application that captures a selected game's
 PID through legacy Windows NvFBC CUDA, derives motion vectors entirely on the GPU,
 provides a conservative flat depth surface, and invokes **real NVIDIA DLSS-G**
