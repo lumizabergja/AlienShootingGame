@@ -2,6 +2,17 @@
 
 ## Startup fix (2026-11-07)
 
+**Present crash fix:** The follow-up diagnostic log proved CUDA capture,
+shared-buffer interop, shader compilation, and the first D3D12 frame submission
+all succeeded, then Windows raised access violation `0xC0000005` inside the
+first `Present` call. The app had been using a DirectComposition swapchain,
+which was not among the CreateSwapChain hooks registered by Streamline DLSS-G.
+This revision switches to `CreateSwapChainForHwnd` with a normal flip-discard
+swapchain, the presentation path documented by NVIDIA for Streamline. The
+output is a full-screen opaque mirror window with click-through styles, not
+a transparency-composited DirectComposition surface. Runtime success and
+click-through behavior still require testing on the user's Windows machine.
+
 The first user log showed CUDA PID capture, CUDA/D3D12 sharing, and Streamline
 initialization working, followed by four invalid Streamline camera/common
 constants warnings. This build now explicitly supplies zero jitter, zero
@@ -46,8 +57,8 @@ the supplied V39 executable; its original source was not in the ZIP.
 - Depth: a coherent flat R32_FLOAT plane (not invented or game-engine depth).
 - Frame generation: Streamline DLSS-G, with multipliers Off/2x/3x/4x/5x/6x
   when permitted by the hardware/driver and supporting Reflex.
-- Output: separate DX12 DirectComposition display on a topmost click-through
-  window. It uses Windows' documented WDA_EXCLUDEFROMCAPTURE setting to request
+- Output: DX12 HWND flip-discard swapchain on a topmost, non-activating,
+  click-through mirror window. It uses WDA_EXCLUDEFROMCAPTURE to request
   self-exclusion; failure is reported as an error.
 - No NvOFA SDK, no mouse-motion prediction, no game process injection,
   no game memory access, and no bypass/fallback if an API fails.
@@ -70,7 +81,7 @@ the supplied V39 executable; its original source was not in the ZIP.
 3. NVIDIA's Streamline library and GPU driver choose the active FG model.
    The application does **not** claim that Preset C is active without driver
    verification. Configure a supported application in NVIDIA App if available.
-4. The DirectComposition presenter can be composited by Windows and may drop
+4. The HWND flip-model presenter can still be composited by Windows and may drop
    or pace generated frames. A frame multiplier is not proof that every frame
    reached the monitor.
 5. Windows CI can compile and package the app, but cannot exercise NvFBC/DLSS-G on
