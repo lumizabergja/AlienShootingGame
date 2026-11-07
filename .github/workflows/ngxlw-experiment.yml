@@ -17,7 +17,7 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/wealdly/JustFlow.git upstream
           git -C upstream checkout 99bf6484484345096ba5f044db057f3a8a86d6dc
-          git -C upstream apply "$env:GITHUB_WORKSPACE\justflow-ngx-stack.patch"
+          git -C upstream apply "$env:GITHUB_WORKSPACE\justflow-ngx-stack-v39ui.patch"
       - name: Configure Windows x64
         shell: pwsh
         run: |
@@ -25,12 +25,13 @@ jobs:
       - name: Build executable
         shell: pwsh
         run: |
-          cmake --build build --config Release --target justflow --parallel 4
+          cmake --build build --config Release --target justflow v39_ngx_controls --parallel 4
       - name: Package self-contained application shell
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path artifact -Force | Out-Null
           Copy-Item "build\Release\justflow.exe" artifact\
+          Copy-Item "build\Release\V39-UI-NGX-Experiment.exe" artifact\
           Copy-Item "build\Release\nvngx.dll_justflow.dll" artifact\
           Copy-Item "upstream\RUN-NGX-STACK-CS2.cmd" artifact\
           Copy-Item "upstream\NGX-STACK-EXPERIMENT.md" artifact\
