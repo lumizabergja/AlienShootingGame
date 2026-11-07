@@ -12,3 +12,7 @@ add_custom_command(TARGET nvofapi64 POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_if_different
   "${CMAKE_CURRENT_SOURCE_DIR}/shaders/block_motion.hlsl"
   "$<TARGET_FILE_DIR:nvofapi64>/block_motion.hlsl")
+enable_testing()
+add_executable(shader_check tests/shader_check.cpp)
+target_link_libraries(shader_check PRIVATE d3dcompiler)
+add_test(NAME ShaderCompiles COMMAND shader_check "${CMAKE_CURRENT_SOURCE_DIR}/shaders/block_motion.hlsl")
