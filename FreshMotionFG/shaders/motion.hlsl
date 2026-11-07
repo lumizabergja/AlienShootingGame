@@ -2,12 +2,12 @@ cbuffer Params : register(b0) {
     uint2 imageSize; uint2 analysisSize;
     uint2 flowSize; uint firstFrame; uint outputWidth;
     uint outputHeight; float mouseX; float mouseY; float cameraGain;
-    float tanHalfFovX; float confidenceCutoff; float pad0; float pad1;
+    float tanHalfFovX; float confidenceCutoff; uint capturePitchBytes; float pad1;
 };
 #define outputSize float2(outputWidth,outputHeight)
 #define mouseDelta float2(mouseX,mouseY)
-Texture2D<float4> currentFrame : register(t0);
-Texture2D<float4> previousFrame : register(t1);
+ByteAddressBuffer currentFrame : register(t0);
+ByteAddressBuffer previousFrame : register(t1);
 Texture2D<float4> coarseFlow : register(t2);
 Texture2D<float4> reverseFlow : register(t3);
 RWTexture2D<float4> blockVectors : register(u0);
@@ -16,8 +16,14 @@ RWTexture2D<float> depthSurface : register(u2);
 
 float grey(float3 rgb) { return dot(rgb, float3(.2126,.7152,.0722)); }
 int2 clampPixel(int2 p) { return clamp(p,int2(0,0),int2(imageSize)-1); }
-float luma(Texture2D<float4> img,int2 p) {
-    return grey(img.Load(int3(clampPixel(p),0)).rgb);
+float4 loadFrame(ByteAddressBuffer src,int2 p) {
+    int2 coord=clampPixel(p);
+    uint bgra=src.Load(uint(coord.y)*capturePitchBytes+uint(coord.x)*4);
+    return float4(float((bgra>>16)&255u),float((bgra>>8)&255u),
+                  float(bgra&255u),float((bgra>>24)&255u))*(1.0/255.0);
+}
+float luma(ByteAddressBuffer img,int2 p) {
+    return grey(loadFrame(img,p).rgb);
 }
 float2 pixelAtAnalysis(float2 p) { return (p+0.5)*float2(imageSize)/float2(analysisSize); }
 
@@ -79,14 +85,14 @@ void ExpandMotion(uint3 tid:SV_DispatchThreadID) {
     float2 average=0;
     float weight=0;
     float consistency=0;
-    float3 pixelColor=currentFrame.Load(int3(clampPixel(int2(sourcePixel)),0)).rgb;
+    float3 pixelColor=loadFrame(currentFrame,int2(sourcePixel)).rgb;
     [unroll] for(int y=0;y<2;y++){
       [unroll] for(int x=0;x<2;x++){
         int2 q=clamp(base+int2(x,y),0,int2(flowSize)-1);
         float4 f=coarseFlow.Load(int3(q,0));
         float w=(x==0?1-fracPart.x:fracPart.x)*(y==0?1-fracPart.y:fracPart.y);
         float2 origin=(float2(q)*4+2)*float2(imageSize)/float2(analysisSize);
-        float3 blockColor=currentFrame.Load(int3(clampPixel(int2(origin)),0)).rgb;
+        float3 blockColor=loadFrame(currentFrame,int2(origin)).rgb;
         float colorDist=length(blockColor-pixelColor);
         w*=max(.025,f.z)/(1+12*colorDist);
         average+=f.xy*w;weight+=w;
@@ -111,8 +117,7 @@ void ExpandMotion(uint3 tid:SV_DispatchThreadID) {
     depthSurface[tid.xy]=.5; // intentionally flat; inferred depth is not native depth
 }
 
-Texture2D<float4> scene : register(t0);
-SamplerState linearSampler : register(s0);
+ByteAddressBuffer scene : register(t0);
 struct VOut{float4 pos:SV_Position;float2 uv:TEXCOORD0;};
 VOut VSMain(uint id:SV_VertexID){
     VOut v;
@@ -120,4 +125,13 @@ VOut VSMain(uint id:SV_VertexID){
     v.pos=float4(uv.x*2-1,1-uv.y*2,0,1);v.uv=uv;
     return v;
 }
-float4 PSMain(VOut v):SV_Target {return scene.Sample(linearSampler,v.uv);}
+float4 PSMain(VOut v):SV_Target {
+    // The game PID capture may be 4:3 while the desktop presenter is 16:9.
+    // Sampling in normalized coordinates deliberately stretches it to fill.
+    float2 src=v.uv*float2(imageSize)-0.5;
+    int2 first=int2(floor(src));
+    float2 blend=saturate(frac(src));
+    float4 a=lerp(loadFrame(scene,first),loadFrame(scene,first+int2(1,0)),blend.x);
+    float4 b=lerp(loadFrame(scene,first+int2(0,1)),loadFrame(scene,first+int2(1,1)),blend.x);
+    return lerp(a,b,blend.y);
+}
