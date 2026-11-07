@@ -1,0 +1,28 @@
+name: Build V39 4x3 Direct NGX
+on:
+  push:
+    branches:
+      - v39-4x3-direct-ngx-framewarp-20261107
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure MSVC compiler
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Unpack exact V39 source
+        shell: pwsh
+        run: Expand-Archive -Path v39-direct-ngx-source.zip -DestinationPath . -Force
+      - name: Build V39 native UI + direct NVIDIA NGX
+        shell: cmd
+        working-directory: v39_direct_ngx_experiment
+        run: call build-v39.cmd
+      - name: Upload compiled EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: V39-4x3-Direct-NGX-FrameWarp-EXE
+          path: v39_direct_ngx_experiment/bin/NvFBC-DX12-V39-4x3-Fix.exe
+          if-no-files-found: error
