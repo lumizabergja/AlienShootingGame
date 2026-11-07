@@ -6,8 +6,8 @@ cbuffer Params : register(b0) {
 };
 #define outputSize float2(outputWidth,outputHeight)
 #define mouseDelta float2(mouseX,mouseY)
-ByteAddressBuffer currentFrame : register(t0);
-ByteAddressBuffer previousFrame : register(t1);
+Texture2D<float4> currentFrame : register(t0);
+Texture2D<float4> previousFrame : register(t1);
 Texture2D<float4> coarseFlow : register(t2);
 Texture2D<float4> reverseFlow : register(t3);
 RWTexture2D<float4> blockVectors : register(u0);
@@ -16,13 +16,11 @@ RWTexture2D<float> depthSurface : register(u2);
 
 float grey(float3 rgb) { return dot(rgb, float3(.2126,.7152,.0722)); }
 int2 clampPixel(int2 p) { return clamp(p,int2(0,0),int2(imageSize)-1); }
-float4 loadFrame(ByteAddressBuffer src,int2 p) {
+float4 loadFrame(Texture2D<float4> src,int2 p) {
     int2 coord=clampPixel(p);
-    uint bgra=src.Load(uint(coord.y)*capturePitchBytes+uint(coord.x)*4);
-    return float4(float((bgra>>16)&255u),float((bgra>>8)&255u),
-                  float(bgra&255u),float((bgra>>24)&255u))*(1.0/255.0);
+    return src.Load(int3(coord,0));
 }
-float luma(ByteAddressBuffer img,int2 p) {
+float luma(Texture2D<float4> img,int2 p) {
     return grey(loadFrame(img,p).rgb);
 }
 float2 pixelAtAnalysis(float2 p) { return (p+0.5)*float2(imageSize)/float2(analysisSize); }
@@ -117,7 +115,7 @@ void ExpandMotion(uint3 tid:SV_DispatchThreadID) {
     depthSurface[tid.xy]=.5; // intentionally flat; inferred depth is not native depth
 }
 
-ByteAddressBuffer scene : register(t0);
+Texture2D<float4> scene : register(t0);
 struct VOut{float4 pos:SV_Position;float2 uv:TEXCOORD0;};
 VOut VSMain(uint id:SV_VertexID){
     VOut v;
