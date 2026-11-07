@@ -12,7 +12,9 @@
 #include <atomic>
 #include <array>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <filesystem>
 #include <mutex>
 #include <stdexcept>
@@ -23,6 +25,14 @@
 #include <cstring>
 #include <cwchar>
 #include "nvfbc_capture.h"
+#include "mailbox.h"
+
+// Match the D3D12 Agility runtime version documented in the supplied V39 ZIP.
+// D3D12/D3D12Core.dll must be packaged next to the executable.
+extern "C" {
+    __declspec(dllexport) extern const UINT D3D12SDKVersion = 620;
+    __declspec(dllexport) extern const char* D3D12SDKPath = ".\\D3D12\\";
+}
 
 using Microsoft::WRL::ComPtr;
 static void check(HRESULT code,const char* label) {
@@ -105,6 +115,7 @@ class StreamlineFG {
     uint32_t frameNumber{};
     sl::ViewportHandle viewport{0};
     sl::Constants constants{};
+    sl::DLSSGOptions activeOptions{};
     sl::Extent region{};
     PFun_slInit* slInitFn{};
     PFun_slShutdown* slShutdownFn{};
@@ -186,6 +197,7 @@ public:
         checkSL(setReflex(reflex),"Enable Reflex");
         options.mode=sl::DLSSGMode::eOn;
         checkSL(setOptions(viewport,options),"Enable DLSS-G");
+        activeOptions=options;
         sl::float4x4 identity{};
         identity[0]={1,0,0,0};identity[1]={0,1,0,0};
         identity[2]={0,0,1,0};identity[3]={0,0,0,1};
@@ -205,17 +217,27 @@ public:
         constants.orthographicProjection=sl::eTrue;
         constants.motionVectorsInvalidValue=65504;
     }
+    void pause(bool paused){
+        if(!enabled)return;
+        auto options=activeOptions;
+        options.mode=paused?sl::DLSSGMode::eOff:sl::DLSSGMode::eOn;
+        checkSL(setOptions(viewport,options),paused?"Pause DLSS-G":"Resume DLSS-G");
+    }
     void marker(sl::PCLMarker value) {
         if(enabled)checkSL(setMarker(value,*frameToken),"PCL marker");
     }
     void begin(bool reset) {
         if(!enabled)return;
         checkSL(newToken(frameToken,&frameNumber),"Frame token");++frameNumber;
-        constants.reset=reset?sl::eTrue:sl::eFalse;
-        checkSL(setConstants(constants,*frameToken,viewport),"FG frame constants");
+        resetFrame(reset);
         marker(sl::PCLMarker::eSimulationStart);
         marker(sl::PCLMarker::eSimulationEnd);
         marker(sl::PCLMarker::eRenderSubmitStart);
+    }
+    void resetFrame(bool reset){
+        if(!enabled)return;
+        constants.reset=reset?sl::eTrue:sl::eFalse;
+        checkSL(setConstants(constants,*frameToken,viewport),"FG frame constants");
     }
     void tag(ID3D12GraphicsCommandList* cmd,ID3D12Resource* motion,
              ID3D12Resource* depth,ID3D12Resource* color,UINT width,UINT height) {
@@ -283,13 +305,19 @@ struct Display {
     }
 };
 
-// Legacy NvFBC PID -> CUDA -> shared D3D12 raw buffer. No DXGI/WGC fallback.
-// The HLSL shader reads the raw BGRA buffer directly, eliminating a copy.
+// NvFBC PID -> CUDA shared raw buffers -> dedicated DX12 copy queue -> color
+// mailbox. Matches the *architecture* described by V39's build validation;
+// its compiled binary was not available as modifiable source.
 class Capture {
     NvFbcCaptureBackend backend;
-    ComPtr<ID3D12Fence> ready;
-    std::array<ComPtr<ID3D12Resource>,4> source;
-    UINT64 readyValue{};
+    ComPtr<ID3D12Fence> cudaReady,copyReady;
+    ComPtr<ID3D12CommandQueue> copyQueue;
+    std::array<ComPtr<ID3D12Resource>,4> raw;
+    std::array<ComPtr<ID3D12Resource>,3> color;
+    std::array<ComPtr<ID3D12CommandAllocator>,3> allocators;
+    std::array<ComPtr<ID3D12GraphicsCommandList>,3> copyCommands;
+    std::array<UINT64,3> slotCopyDone{};
+    UINT64 cudaSerial{},copySerial{};
     UINT width{},height{};
     [[noreturn]] static void fail(const std::wstring& operation,const std::wstring& error){
         throw std::runtime_error(std::string(operation.begin(),operation.end())+": "+
@@ -305,26 +333,75 @@ public:
         if(!width||!height)throw std::runtime_error("NvFBC returned zero capture dimensions");
     }
     void bind(ID3D12Device* d3d12){
-        check(d3d12->CreateFence(0,D3D12_FENCE_FLAG_SHARED,IID_PPV_ARGS(&ready)),
+        if(backend.Pitch()<width*4 || backend.Pitch()%D3D12_TEXTURE_DATA_PITCH_ALIGNMENT)
+            throw std::runtime_error("NvFBC row pitch cannot use a D3D12 copy footprint");
+        check(d3d12->CreateFence(0,D3D12_FENCE_FLAG_SHARED,IID_PPV_ARGS(&cudaReady)),
               "Create NvFBC CUDA ready fence");
+        check(d3d12->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&copyReady)),
+              "Create color-mailbox copy ready fence");
         ID3D12Resource* resources[4]{};
         std::wstring error;
-        if(!backend.Bind(d3d12,ready.Get(),resources,error))fail(L"NvFBC CUDA-D3D12 bind",error);
-        for(UINT i=0;i<4;i++)source[i].Attach(resources[i]);
+        if(!backend.Bind(d3d12,cudaReady.Get(),resources,error))fail(L"NvFBC CUDA-D3D12 bind",error);
+        for(UINT i=0;i<4;i++)raw[i].Attach(resources[i]);
+        D3D12_COMMAND_QUEUE_DESC cq{};cq.Type=D3D12_COMMAND_LIST_TYPE_COPY;
+        check(d3d12->CreateCommandQueue(&cq,IID_PPV_ARGS(&copyQueue)),
+              "Create dedicated NvFBC copy queue");
+        D3D12_RESOURCE_DESC d{};d.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        d.Width=width;d.Height=height;d.DepthOrArraySize=1;d.MipLevels=1;
+        d.Format=DXGI_FORMAT_B8G8R8A8_UNORM;d.SampleDesc.Count=1;
+        d.Flags=D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS;
+        D3D12_HEAP_PROPERTIES hp{};hp.Type=D3D12_HEAP_TYPE_DEFAULT;
+        for(UINT i=0;i<color.size();i++) {
+            check(d3d12->CreateCommittedResource(&hp,D3D12_HEAP_FLAG_NONE,&d,
+                  D3D12_RESOURCE_STATE_COMMON,nullptr,IID_PPV_ARGS(&color[i])),
+                  "Allocate V39-style color mailbox");
+            check(d3d12->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COPY,
+                  IID_PPV_ARGS(&allocators[i])),"Create mailbox copy allocator");
+            check(d3d12->CreateCommandList(0,D3D12_COMMAND_LIST_TYPE_COPY,
+                  allocators[i].Get(),nullptr,IID_PPV_ARGS(&copyCommands[i])),
+                  "Create mailbox copy list");
+            check(copyCommands[i]->Close(),"Close mailbox copy list");
+        }
     }
-    bool next(UINT slot,UINT64& fenceValue) {
+    NvFbcGrabResult next(UINT slot,UINT64& fenceValue) {
         LARGE_INTEGER timestamp{};std::wstring error;
         auto result=backend.Grab(slot,timestamp,error);
-        if(result==NvFbcGrabResult::Timeout)return false;
+        if(result==NvFbcGrabResult::Timeout||result==NvFbcGrabResult::Recreate)
+            return result;
         if(result!=NvFbcGrabResult::Frame)fail(L"NvFBC capture",error);
         if(backend.Width()!=width||backend.Height()!=height)
             throw std::runtime_error("Game capture resolution changed. Stop and restart.");
-        if(!backend.Signal(++readyValue,error))fail(L"CUDA fence signal",error);
-        fenceValue=readyValue;
-        return true;
+        UINT64 cudaValue=cudaSerial+1;
+        if(!backend.Signal(cudaValue,error))fail(L"CUDA fence signal",error);
+        cudaSerial=cudaValue;
+        // All copy queue waits are on GPU; no CPU readback or bridge API.
+        check(copyQueue->Wait(cudaReady.Get(),cudaValue),"Copy queue waits for CUDA frame");
+        if(copyReady->GetCompletedValue()<slotCopyDone[slot])
+            throw std::runtime_error("Attempted to overwrite in-flight color mailbox slot");
+        check(allocators[slot]->Reset(),"Reset reusable mailbox copy allocator");
+        check(copyCommands[slot]->Reset(allocators[slot].Get(),nullptr),
+              "Reset reusable mailbox copy command list");
+        D3D12_TEXTURE_COPY_LOCATION src{};
+        src.pResource=raw[slot].Get();src.Type=D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        src.PlacedFootprint.Footprint.Format=DXGI_FORMAT_B8G8R8A8_UNORM;
+        src.PlacedFootprint.Footprint.Width=width;
+        src.PlacedFootprint.Footprint.Height=height;
+        src.PlacedFootprint.Footprint.Depth=1;
+        src.PlacedFootprint.Footprint.RowPitch=backend.Pitch();
+        D3D12_TEXTURE_COPY_LOCATION dst{};
+        dst.pResource=color[slot].Get();dst.Type=D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        copyCommands[slot]->CopyTextureRegion(&dst,0,0,0,&src,nullptr);
+        check(copyCommands[slot]->Close(),"Close CUDA-to-color copy list");
+        ID3D12CommandList* copy[]={copyCommands[slot].Get()};
+        copyQueue->ExecuteCommandLists(1,copy);
+        check(copyQueue->Signal(copyReady.Get(),++copySerial),"Signal color mailbox ready");
+        slotCopyDone[slot]=copySerial;
+        fenceValue=copySerial;
+        return NvFbcGrabResult::Frame;
     }
-    ID3D12Resource* image(UINT slot)const{return source[slot].Get();}
-    ID3D12Fence* readyFence()const{return ready.Get();}
+    void recreate(){std::wstring error;if(!backend.RecreateSession(error))fail(L"NvFBC PID recreate",error);}
+    ID3D12Resource* image(UINT slot)const{return color[slot].Get();}
+    ID3D12Fence* readyFence()const{return copyReady.Get();}
     UINT Width()const{return width;}
     UINT Height()const{return height;}
     UINT Pitch()const{return backend.Pitch();}
@@ -367,6 +444,92 @@ class Presenter {
     UINT descriptorSize{},rtvSize{},analysisW{},analysisH{},flowW{},flowH{};
     UINT64 fenceSerial{},frameCount{};
     std::wstring shaderPath;
+    LatestMailbox<3> mailbox;
+    std::thread captureThread;
+    std::atomic<bool> stopCapture{false},pauseCapture{false},producerPaused{false},producerFailed{false};
+    std::mutex producerMutex;
+    std::condition_variable producerWake;
+    std::string producerError;
+    void captureLoop(){
+        uint64_t sequence=0,epoch=1;
+        bool wasPaused=false;
+        try {
+            while(!stopCapture.load(std::memory_order_acquire)&&
+                  !quitting.load(std::memory_order_acquire)){
+                if(pauseCapture.load(std::memory_order_acquire)){
+                    producerPaused.store(true,std::memory_order_release);
+                    wasPaused=true;
+                    std::unique_lock<std::mutex> lock(producerMutex);
+                    producerWake.wait_for(lock,std::chrono::milliseconds(12),[&]{
+                        return stopCapture.load()||!pauseCapture.load()||quitting.load();
+                    });
+                    continue;
+                }
+                producerPaused.store(false,std::memory_order_release);
+                if(wasPaused){++epoch;wasPaused=false;}
+                UINT64 copyDone=capture.readyFence()->GetCompletedValue();
+                UINT64 renderDone=finished->GetCompletedValue();
+                if(copyDone==UINT64_MAX||renderDone==UINT64_MAX)
+                    throw std::runtime_error("GPU device removed during capture");
+                int candidate=mailbox.reserve([&](unsigned,const auto& state){
+                    return copyDone>=state.ready&&renderDone>=state.release;
+                });
+                if(candidate<0){
+                    std::unique_lock<std::mutex> lock(producerMutex);
+                    producerWake.wait_for(lock,std::chrono::milliseconds(2));
+                    continue;
+                }
+                UINT64 copyValue=0;
+                auto result=capture.next(UINT(candidate),copyValue);
+                if(result!=NvFbcGrabResult::Frame){
+                    mailbox.cancel(candidate);
+                    if(result==NvFbcGrabResult::Recreate){capture.recreate();++epoch;}
+                    continue;
+                }
+                mailbox.publish(UINT(candidate),++sequence,copyValue,epoch,0);
+                producerWake.notify_all();
+            }
+        }catch(const std::exception& ex){
+            {
+                std::lock_guard<std::mutex> lock(producerMutex);
+                producerError=ex.what();
+            }
+            producerFailed.store(true,std::memory_order_release);
+            producerWake.notify_all();
+        }
+        producerPaused.store(true,std::memory_order_release);
+    }
+    void throwProducerError(){
+        if(producerFailed.load(std::memory_order_acquire)){
+            std::lock_guard<std::mutex> lock(producerMutex);
+            throw std::runtime_error("NvFBC producer: "+producerError);
+        }
+    }
+    void changeFocus(bool focused){
+        if(!focused){
+            pauseCapture.store(true,std::memory_order_release);
+            producerWake.notify_all();
+            const auto deadline=GetTickCount64()+2500;
+            while(!producerPaused.load(std::memory_order_acquire)){
+                throwProducerError();
+                if(GetTickCount64()>deadline)
+                    throw std::runtime_error("Alt-Tab capture pause acknowledgement timed out");
+                Sleep(2);
+            }
+            waitFence(finished.Get(),fenceSerial);
+            dlss.pause(true);
+            mailbox.clear();
+            ShowWindow(overlay,SW_HIDE);
+        }else{
+            // First frame after Alt-Tab resets history and cannot interpolate
+            // against a frame from the old visibility/capture epoch.
+            mailbox.clear();
+            dlss.pause(false);
+            ShowWindow(overlay,SW_SHOWNOACTIVATE);
+            pauseCapture.store(false,std::memory_order_release);
+            producerWake.notify_all();
+        }
+    }
     UINT cpuOffset(UINT index)const{return index*15;}
     D3D12_CPU_DESCRIPTOR_HANDLE cpu(UINT index) {
         auto handle=heap->GetCPUDescriptorHandleForHeapStart();
@@ -542,16 +705,16 @@ class Presenter {
     }
     void setDescriptors(UINT slot,UINT current,UINT previous) {
         UINT base=cpuOffset(slot);
-        rawSrv(base+0,capture.image(current));
-        rawSrv(base+1,capture.image(previous));
+        srv(base+0,capture.image(current),DXGI_FORMAT_B8G8R8A8_UNORM);
+        srv(base+1,capture.image(previous),DXGI_FORMAT_B8G8R8A8_UNORM);
         srv(base+2,slots[slot].forwardFlow.Get(),DXGI_FORMAT_R16G16B16A16_FLOAT);
         srv(base+3,slots[slot].reverseFlow.Get(),DXGI_FORMAT_R16G16B16A16_FLOAT);
         uav(base+4,slots[slot].forwardFlow.Get(),DXGI_FORMAT_R16G16B16A16_FLOAT);
         uav(base+5,slots[slot].motion.Get(),DXGI_FORMAT_R16G16_FLOAT);
         uav(base+6,slots[slot].depth.Get(),DXGI_FORMAT_R32_FLOAT);
-        rawSrv(base+7,capture.image(current));
-        rawSrv(base+8,capture.image(previous));
-        rawSrv(base+9,capture.image(current));
+        srv(base+7,capture.image(current),DXGI_FORMAT_B8G8R8A8_UNORM);
+        srv(base+8,capture.image(previous),DXGI_FORMAT_B8G8R8A8_UNORM);
+        srv(base+9,capture.image(current),DXGI_FORMAT_B8G8R8A8_UNORM);
         srv(base+10,slots[slot].forwardFlow.Get(),DXGI_FORMAT_R16G16B16A16_FLOAT);
         srv(base+11,slots[slot].reverseFlow.Get(),DXGI_FORMAT_R16G16B16A16_FLOAT);
         uav(base+12,slots[slot].reverseFlow.Get(),DXGI_FORMAT_R16G16B16A16_FLOAT);
@@ -561,6 +724,9 @@ class Presenter {
 public:
     explicit Presenter(Settings config):cfg(config){}
     ~Presenter(){
+        stopCapture.store(true,std::memory_order_release);
+        producerWake.notify_all();
+        if(captureThread.joinable())captureThread.join();
         try{waitFence(finished.Get(),fenceSerial);}catch(...){}
         dlss.close();
         if(overlay)DestroyWindow(overlay);
@@ -666,18 +832,16 @@ public:
     void run() {
         display.find(cfg.game);
         createOverlay();
-        setStatus(L"Starting NvFBC PID CUDA capture and DLSS-G...");
+        setStatus(L"Starting V39-style NvFBC mailbox + shader DLSS-G...");
         createGraphics();
         wchar_t module[MAX_PATH]{};GetModuleFileNameW(nullptr,module,MAX_PATH);
         shaderPath=(std::filesystem::path(module).parent_path()/L"motion.hlsl").wstring();
         createPipelines();prepareSlots();
-        setStatus(L"Ready. Click the game to show frame generation.");
-        UINT previous=0;
-        bool first=true;
-        UINT64 priorReady=0;
-        std::array<UINT64,3> rawDone{};
-        std::array<ComPtr<ID3D12Fence>,3> rawFgFences;
-        std::array<UINT64,3> rawFgValues{};
+        captureThread=std::thread([this]{captureLoop();});
+        setStatus(L"Ready. CUDA producer and latest-frame mailbox active.");
+        int previous=-1;
+        uint64_t previousEpoch=0;
+        bool paused=false;
         while(!quitting.load(std::memory_order_acquire)){
             MSG msg{};
             while(PeekMessageW(&msg,nullptr,0,0,PM_REMOVE)){
@@ -686,28 +850,49 @@ public:
             }
             if(quitting)break;
             if(!IsWindow(cfg.game))throw std::runtime_error("Selected game window closed");
+            throwProducerError();
             DWORD foregroundPID=0;
             GetWindowThreadProcessId(GetForegroundWindow(),&foregroundPID);
             if(foregroundPID!=cfg.pid) {
-                ShowWindow(overlay,SW_HIDE);
-                first=true;Sleep(7);continue;
+                if(!paused){
+                    changeFocus(false);
+                    paused=true;previous=-1;
+                    setStatus(L"Paused on Alt-Tab. NvFBC capture and DLSS-G suspended.");
+                }
+                Sleep(8);continue;
             }
-            ShowWindow(overlay,SW_SHOWNOACTIVATE);
-            UINT current=UINT(frameCount%3);
-            waitFence(finished.Get(),rawDone[current]);
-            waitFence(rawFgFences[current].Get(),rawFgValues[current]);
-            UINT64 ready=0;
-            if(!capture.next(current,ready))continue;
-            dlss.begin(first);
-            render(current,first?current:previous,ready,first);
-            rawDone[current]=fenceSerial;
-            rawDone[first?current:previous]=fenceSerial;
-            rawFgFences[current]=slots[(frameCount-1)%3].fgFence;
-            rawFgValues[current]=slots[(frameCount-1)%3].fgFenceValue;
+            if(paused){
+                changeFocus(true);
+                paused=false;previous=-1;
+                setStatus(L"Resumed. Waiting for a fresh NvFBC PID frame.");
+            }
+            if(!mailbox.available()){
+                std::unique_lock<std::mutex> lock(producerMutex);
+                producerWake.wait_for(lock,std::chrono::milliseconds(4));
+                continue;
+            }
+            // Recycle renderer/FG resources before selecting the newest source.
+            // The NvFBC producer keeps acquiring frames during these waits.
+            auto& slot=slots[frameCount%slots.size()];
+            waitFence(finished.Get(),slot.finishedValue);
+            waitFence(slot.fgFence.Get(),slot.fgFenceValue);
+            LatestMailbox<3>::Slot selected{};
+            int current=mailbox.take(&selected);
+            if(current<0)continue;
+            bool reset=previous<0||selected.epoch!=previousEpoch;
+            dlss.begin(reset);
+            // Last chance to latch a newer completed capture before rendering.
+            if(mailbox.retakeLatest(current,&selected)){
+                bool newerReset=previous<0||selected.epoch!=previousEpoch;
+                if(newerReset!=reset)dlss.resetFrame(newerReset);
+                reset=newerReset;
+            }
+            render(UINT(current),reset?UINT(current):UINT(previous),selected.ready,reset);
+            mailbox.commit(UINT(current),previous,fenceSerial);
+            producerWake.notify_all();
             previous=current;
-            if(first)setStatus(L"Generating frames. No NvOFA. No mouse prediction.");
-            first=false;
-            priorReady=ready;
+            previousEpoch=selected.epoch;
+            if(reset)setStatus(L"Generating frames. Latest NvFBC mailbox, no NvOFA.");
         }
         setStatus(L"Stopped");
     }
