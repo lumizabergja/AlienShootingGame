@@ -16,6 +16,8 @@ jobs:
         run: cmake -S V39ShaderExperiment -B build -A x64
       - name: Compile
         run: cmake --build build --config Release --parallel 2
+      - name: Validate HLSL shader
+        run: ctest --test-dir build --build-config Release --output-on-failure
       - name: Stage artifact
         shell: pwsh
         run: |
