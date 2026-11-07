@@ -2,7 +2,6 @@
 #include <commctrl.h>
 #include <d3d12.h>
 #include <d3dcompiler.h>
-#include <dcomp.h>
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 #include <sl.h>
@@ -62,10 +61,21 @@ static void startupLog(const std::wstring& message){
     }
 }
 static LONG WINAPI unhandledCrash(EXCEPTION_POINTERS* exception){
-    wchar_t code[80]{};
-    swprintf_s(code,L"Uncaught Windows exception 0x%08X",
-               exception&&exception->ExceptionRecord?exception->ExceptionRecord->ExceptionCode:0);
+    auto record=exception?exception->ExceptionRecord:nullptr;
+    wchar_t code[150]{};
+    swprintf_s(code,L"Uncaught Windows exception 0x%08X at %p",
+               record?record->ExceptionCode:0,record?record->ExceptionAddress:nullptr);
     startupLog(code);
+    if(record&&record->ExceptionAddress){
+        HMODULE module{};
+        if(GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|
+            GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(record->ExceptionAddress),&module)){
+            wchar_t path[MAX_PATH]{};
+            if(GetModuleFileNameW(module,path,MAX_PATH))
+                startupLog(L"Crashing module: "+std::wstring(path));
+        }
+    }
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
@@ -478,9 +488,6 @@ class Presenter {
     ComPtr<ID3D12Device> device;
     ComPtr<ID3D12CommandQueue> queue;
     ComPtr<IDXGISwapChain3> swap;
-    ComPtr<IDCompositionDevice> composition;
-    ComPtr<IDCompositionTarget> target;
-    ComPtr<IDCompositionVisual> visual;
     ComPtr<ID3D12Fence> finished;
     std::array<RenderSlot,3> slots;
     ComPtr<ID3D12DescriptorHeap> heap,rtvs;
@@ -607,12 +614,13 @@ class Presenter {
         device->CreateUnorderedAccessView(source,nullptr,&d,cpu(index));
     }
     void createOverlay() {
-        overlay=CreateWindowExW(WS_EX_TOPMOST|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE|WS_EX_LAYERED|WS_EX_TRANSPARENT,
+        // This is an opaque mirror presenter, not an alpha-composited overlay.
+        // Use a real HWND flip swap chain so Streamline can intercept Present.
+        // WS_EX_TRANSPARENT and HTTRANSPARENT keep the window click-through.
+        overlay=CreateWindowExW(WS_EX_TOPMOST|WS_EX_TOOLWINDOW|WS_EX_NOACTIVATE|WS_EX_TRANSPARENT,
             L"FreshMotionFGOverlay",L"FreshMotionFG Output",WS_POPUP,display.rect.left,display.rect.top,
             display.width,display.height,nullptr,nullptr,GetModuleHandleW(nullptr),nullptr);
         if(!overlay)throw std::runtime_error("Create presenter window failed");
-        if(!SetLayeredWindowAttributes(overlay,0,255,LWA_ALPHA))
-            throw std::runtime_error("Set click-through alpha failed");
         ShowWindow(overlay,SW_SHOWNOACTIVATE);
         if(!SetWindowDisplayAffinity(overlay,WDA_EXCLUDEFROMCAPTURE))
             throw std::runtime_error("Windows could not exclude presenter from capture");
@@ -639,18 +647,14 @@ class Presenter {
         d.Width=display.width;d.Height=display.height;
         d.Format=DXGI_FORMAT_B8G8R8A8_UNORM;
         d.BufferUsage=DXGI_USAGE_RENDER_TARGET_OUTPUT;d.BufferCount=2;
-        d.SampleDesc.Count=1;d.SwapEffect=DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
-        d.Scaling=DXGI_SCALING_STRETCH;d.AlphaMode=DXGI_ALPHA_MODE_PREMULTIPLIED;
+        d.SampleDesc.Count=1;d.SwapEffect=DXGI_SWAP_EFFECT_FLIP_DISCARD;
+        d.Scaling=DXGI_SCALING_STRETCH;d.AlphaMode=DXGI_ALPHA_MODE_IGNORE;
         ComPtr<IDXGISwapChain1> s;
-        check(factory->CreateSwapChainForComposition(queue.Get(),&d,nullptr,&s),
-              "DX12 composition swapchain");
+        check(factory->CreateSwapChainForHwnd(queue.Get(),overlay,&d,nullptr,nullptr,&s),
+              "DX12 Streamline HWND flip swapchain");
         check(s.As(&swap),"Swapchain interface");
-        check(DCompositionCreateDevice(nullptr,IID_PPV_ARGS(&composition)),"DComposition device");
-        check(composition->CreateTargetForHwnd(overlay,TRUE,&target),"Composition target");
-        check(composition->CreateVisual(&visual),"Composition visual");
-        check(visual->SetContent(s.Get()),"Composition content");
-        check(target->SetRoot(visual.Get()),"Composition root");
-        check(composition->Commit(),"Composition commit");
+        check(factory->MakeWindowAssociation(overlay,DXGI_MWA_NO_ALT_ENTER),
+              "Disable implicit DXGI fullscreen transitions");
         D3D12_DESCRIPTOR_HEAP_DESC h{};
         h.Type=D3D12_DESCRIPTOR_HEAP_TYPE_RTV;h.NumDescriptors=2;
         check(device->CreateDescriptorHeap(&h,IID_PPV_ARGS(&rtvs)),"RTV heap");
@@ -667,7 +671,7 @@ class Presenter {
         check(device->CreateDescriptorHeap(&h,IID_PPV_ARGS(&heap)),"Shader descriptor heap");
         descriptorSize=device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
         dlss.configure(display.adapter.Get(),display.width,display.height,cfg.factor);
-        startupLog(L"DX12 compositor and Streamline DLSS-G configuration passed");
+        startupLog(L"DX12 HWND flip presenter and Streamline DLSS-G configuration passed");
     }
     void createPipelines() {
         startupLog(L"Compiling shader-motion HLSL pipelines");
@@ -876,6 +880,7 @@ public:
         s.finishedValue=fenceSerial;
         dlss.marker(sl::PCLMarker::eRenderSubmitEnd);
         dlss.marker(sl::PCLMarker::ePresentStart);
+        if(frameCount==0)startupLog(L"First render: entering HWND Streamline Present");
         check(swap->Present(0,0),"Present");
         if(frameCount==0)startupLog(L"First render: Present returned successfully");
         dlss.marker(sl::PCLMarker::ePresentEnd);
