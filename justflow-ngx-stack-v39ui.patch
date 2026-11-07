@@ -1,0 +1,708 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 483e16d..194a145 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -59,8 +59,10 @@ target_include_directories(justflow_spike PRIVATE src third_party/ngx/include)
+ target_link_directories(justflow_spike PRIVATE third_party/ngx/lib)
+ target_link_libraries(justflow_spike PRIVATE d3d12 dxgi nvsdk_ngx_d)
+ add_custom_command(TARGET justflow_spike POST_BUILD
+-    COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:nvngx_dll_justflow> $<TARGET_FILE_DIR:justflow_spike>
+-    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/runtime/nvngx_dlssnr.dll $<TARGET_FILE_DIR:justflow_spike>)
++    COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:nvngx_dll_justflow> $<TARGET_FILE_DIR:justflow_spike>)
++if(EXISTS ${CMAKE_SOURCE_DIR}/runtime/nvngx_dlssnr.dll)
++    add_custom_command(TARGET justflow_spike POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/runtime/nvngx_dlssnr.dll $<TARGET_FILE_DIR:justflow_spike>)
++endif()
+ 
+ # ---- the app ------------------------------------------------------------------------------------
+ add_executable(justflow
+@@ -74,14 +76,25 @@ target_link_libraries(justflow PRIVATE d3d11 d3d12 dxgi dwmapi winmm user32 gdi3
+ target_compile_options(justflow PRIVATE /await:strict)   # C++/WinRT coroutine keywords are not used, but the headers want it on 14.44
+ set_target_properties(justflow PROPERTIES WIN32_EXECUTABLE ON)    # tray app: no console window; attaches to a parent console when launched from one
+ 
++# The user's familiar V39 control layout, preserved as an honest launcher for this separate
++# direct-NGX feasibility backend. Its captions identify DXGI and camera-fit confidence rather
++# than claiming that V39's NvFBC PID/Cost pipeline has already been ported.
++add_executable(v39_ngx_controls WIN32 src/v39_ui_frontend.cpp)
++target_link_libraries(v39_ngx_controls PRIVATE user32 comctl32 shell32)
++set_target_properties(v39_ngx_controls PROPERTIES OUTPUT_NAME "V39-UI-NGX-Experiment")
++
+ add_custom_command(TARGET justflow POST_BUILD
+     COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:nvngx_dll_justflow> $<TARGET_FILE_DIR:justflow>
+     COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:justflow>/profiles
+     COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_SOURCE_DIR}/profiles -DDEST=$<TARGET_FILE_DIR:justflow>/profiles -P ${CMAKE_SOURCE_DIR}/cmake/seed_ini.cmake
+     # pristine copies for the tray's "Reset to defaults": never live config, so ALWAYS refreshed
+     COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/profiles $<TARGET_FILE_DIR:justflow>/profiles/defaults
+-    COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_SOURCE_DIR} -DDEST=$<TARGET_FILE_DIR:justflow> -P ${CMAKE_SOURCE_DIR}/cmake/seed_ini.cmake
+-    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/runtime/nvngx_dlssnr.dll ${CMAKE_SOURCE_DIR}/runtime/nvngx_dlssg.dll $<TARGET_FILE_DIR:justflow>)
++    COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_SOURCE_DIR} -DDEST=$<TARGET_FILE_DIR:justflow> -P ${CMAKE_SOURCE_DIR}/cmake/seed_ini.cmake)
++foreach(runtime_dll nvngx_dlssnr.dll nvngx_dlssg.dll)
++    if(EXISTS ${CMAKE_SOURCE_DIR}/runtime/${runtime_dll})
++        add_custom_command(TARGET justflow POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/runtime/${runtime_dll} $<TARGET_FILE_DIR:justflow>)
++    endif()
++endforeach()
+ if(EXISTS ${CMAKE_SOURCE_DIR}/runtime/nvngx_latewarp.dll)   # optional: Frame Warp (not redistributable, see NOTICE)
+     add_custom_command(TARGET justflow POST_BUILD COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CMAKE_SOURCE_DIR}/runtime/nvngx_latewarp.dll $<TARGET_FILE_DIR:justflow>)
+ endif()
+diff --git a/NGX-STACK-EXPERIMENT.md b/NGX-STACK-EXPERIMENT.md
+new file mode 100644
+index 0000000..adebe80
+--- /dev/null
++++ b/NGX-STACK-EXPERIMENT.md
+@@ -0,0 +1,61 @@
++# Experimental direct NGX DLSS-G + NVIDIA NGX Frame Warp
++
++This experiment combines **two actual NVIDIA NGX features** in the JustFlow
++presenter: direct-NGX DLSS Frame Generation (`NVSDK_NGX_Feature_FrameGeneration`)
++and NGX Frame Warp (`NVSDK_NGX_Feature_Reserved15`). Each presented real or
++generated frame can be registered and warped, subject to a strict quality gate.
++
++It is *not* an official NVIDIA Reflex 2 implementation and is **not yet a V39
++port**. It uses JustFlow's WGC/DXGI capture rather than V39's NvFBC PID CUDA
++capture and does not claim V39's NvOFA confidence-cost handling or Preset C.
++
++The first experiment is specifically intended to determine whether direct NGX
++DLSS-G and the NGX Frame Warp feature coexist on a real RTX 50-series GPU.
++
++## V39 control panel
++
++Start `V39-UI-NGX-Experiment.exe` for the familiar 600x405 V39 control layout:
++game/PID selection, Off-6x FG, 10/25/50/100% NvOFA input, START and STOP.
++The panel generates a game profile and starts the direct-NGX test engine without
++showing JustFlow's settings UI. F10 stops only the test engine. It does **not**
++launch V39's original NvFBC renderer, and explicitly labels its DXGI capture.
++V39's Confidence Cost ON remains **unported**; "confidence" here means the
++strict learned camera-fit threshold, not Nvidia's cost-output buffer.
++5x and 6x are experimental in the direct NGX interface: NVIDIA may reject them.
++
++## Strict quality settings
++
++- Real input samples only: recorded raw mouse deltas up to the current refresh;
++  no guesses about future mouse input.
++- Camera fit must have R² >= 0.92 and >= 40 observations.
++- Capture-to-warp age <= 60 ms.
++- Horizontal/vertical warp vector is clipped to 2 output pixels total.
++- No-warp mask is built using the existing optical-flow path; recorded HUD
++  rectangles are copied back after warp.
++- A failed Frame Warp feature creation or evaluation is logged and causes the
++  experimental pipeline to stop. No shader fallback is labelled Reflex 2.
++- Valid calibrations with less than 0.35 pixel of motion skip the warp entirely.
++
++## Runtime files
++
++Place `nvngx_dlssg.dll` and `nvngx_latewarp.dll` (NVIDIA signed runtimes,
++**not included in the public build**) next to `justflow.exe`.
++Use `RUN-NGX-STACK-CS2.cmd` for CS2; this sets `JF_NGX_STACK_LW=1`.
++Keep the original V39 application separate and compare latency with the
++experiment. The NVIDIA feature may reject this combination or add latency.
++
++## Testing
++
++1. Start CS2 in borderless windowed mode at 1920x1080.
++2. Run `RUN-NGX-STACK-CS2.cmd`.
++3. Confirm log messages report *both* NGX DLSS-G and `feature created` for
++   Latewarp. Then move the mouse for camera-fit calibration.
++4. Only after the log shows `NGX Frame Warp applied to real+generated output`
++   should the experiment be considered active.
++5. Compare latency against V39 at the same base and displayed FPS. Do not use
++   this in anti-cheat games before checking their overlay policies.
++
++## License
++
++Derived from [JustFlow](https://github.com/wealdly/JustFlow) by wealdly,
++copyright (c) 2026, licensed MIT. Retain the repository's LICENSE and NOTICE.
+diff --git a/RUN-NGX-STACK-CS2.cmd b/RUN-NGX-STACK-CS2.cmd
+new file mode 100644
+index 0000000..7552fed
+--- /dev/null
++++ b/RUN-NGX-STACK-CS2.cmd
+@@ -0,0 +1,16 @@
++@echo off
++setlocal
++cd /d "%~dp0"
++set JF_NGX_STACK_LW=1
++if not exist nvngx_latewarp.dll (
++    echo NVIDIA nvngx_latewarp.dll is required next to this launcher.
++    pause
++    exit /b 1
++)
++if not exist nvngx_dlssg.dll (
++    echo NVIDIA nvngx_dlssg.dll is required next to this launcher.
++    pause
++    exit /b 1
++)
++start "" "justflow.exe" --ini "profiles\cs2_ngx_test.ini"
++endlocal
+diff --git a/profiles/cs2_ngx_test.ini b/profiles/cs2_ngx_test.ini
+new file mode 100644
+index 0000000..9adf6ef
+--- /dev/null
++++ b/profiles/cs2_ngx_test.ini
+@@ -0,0 +1,37 @@
++; Experimental native-looking NVIDIA NGX DLSS-G + NGX Frame Warp test.
++; This is a JustFlow-based feasibility build, NOT the original NvFBC V39 pipeline.
++; Select borderless-windowed CS2; there is no injection or game memory access.
++[capture]
++mode=dda
++window_title=Counter-Strike 2
++window_class=
++cursor=0
++border=0
++
++[nr]
++work=1920x1080
++max_fps=0
++
++[filters]
++sharpen=0
++saturation=1
++
++[ofa]
++input=960x540
++grid=4
++zero_below=0.5
++
++[ui]
++mask=0
++feather=0
++
++[fg]
++engine=dlssg
++multiplier=4
++pacing=vblank
++lw_fov=60
++min_gain=0
++max_input_fps=0
++
++[log]
++file=justflow.ngx-stack-cs2.log
+diff --git a/src/config.h b/src/config.h
+index 4b50c81..b43dd73 100644
+--- a/src/config.h
++++ b/src/config.h
+@@ -79,7 +79,7 @@ struct Config
+     int   hud_scale = 3;
+     // [fg]
+     bool  fg_enabled = true;               // on by default, the cheapest layer; a game with its own FG should switch ours off (F8)
+-    int   fg_multiplier = 2;               // presented frames per rendered frame, 2..4
++    int   fg_multiplier = 2;               // presented frames per rendered frame, 2..6 experimental
+     bool  fg_pacing_vblank = true;         // pacing=vblank | timer
+     int   fg_engine = 0;                   // FgEngine, [fg] engine=dlssg | warp | latewarp
+     float fg_lw_vfov = 60.0f;              // [fg] lw_fov: vertical field of view (deg) the latewarp engine assumes (edge geometry only)
+diff --git a/src/fg.cpp b/src/fg.cpp
+index 921b446..7075bc8 100644
+--- a/src/fg.cpp
++++ b/src/fg.cpp
+@@ -33,7 +33,7 @@ static NVSDK_NGX_Result NVSDK_CONV FgEvalBridge(ID3D12GraphicsCommandList* cl, c
+ #include "nvsdk_ngx_helpers_dlssg.h"
+ #undef NVSDK_NGX_D3D12_EvaluateFeature_C
+ 
+-static const int kSlots = 4, kMaxGen = 3;   // 4: engine=video holds three real frames while the pipeline writes a fourth
++static const int kSlots = 4, kMaxGen = 5;   // experimental: up to five generated images (6x); runtime may reject unsupported modes
+ 
+ // Rest states: real CSRC, gen[] CSRC, mv/depth NPSR, disable UAV. state: 0 free, 1 writing
+ // (producer), 2 ready, 3 presenting; guarded by Fg::mu.
+@@ -71,7 +71,10 @@ struct Fg
+     int      gens = 1;                       // frames each DLSS-G evaluate makes: count; engine=video kMaxGen (0 = no DLSS-G)
+     bool     warp = false;                   // engine=warp: the pipeline extrapolates into s->gen, no DLSS-G
+     bool     lw = false;                     // engine=latewarp: every refresh re-projects the newest frame to the mouse (Reproject)
++    bool     stacked_lw = false;             // experimental: genuine NGX Frame Warp of each direct-NGX DLSS-G frame
+     Latewarp* lwf = nullptr; ID3D12Resource* lw_final[2] = {}; float lw_vfov = 1.0472f; ID3D12Resource* lw_last = nullptr;   // lw_last: bench
++    unsigned lw_next = 0;
++    unsigned lw_warped = 0, lw_skipped = 0;
+     bool     video = false;                  // engine=video: VideoPresent; lw_final/lw_last hold its interpolated frames
+     Shaders* sh = nullptr;                   // engine=video: CsVideoInterp on the FG queue
+     bool     vblank = true;
+@@ -163,9 +166,53 @@ static bool PresentAfter(Fg* f, ID3D12Resource* src, const FgSlot* s, bool real,
+ }
+ 
+ // After the slot's evaluate on the FG queue, or (not evaluated) after its render fence.
++static void CopyRects(Fg* f, ID3D12GraphicsCommandList* cl, const FgSlot* s, ID3D12Resource* src_tex, ID3D12Resource* dst_tex);
+ static bool Present(Fg* f, ID3D12Resource* src, const FgSlot* s, bool real, bool evaluated = true)
+ {
+-    return evaluated ? PresentAfter(f, src, s, real, f->ctx.fence, s->eval_fence) : PresentAfter(f, src, s, real, f->g->fence, s->fence);
++    ID3D12Fence* const ready_fence = evaluated ? f->ctx.fence : f->g->fence;
++    const UINT64 ready_value = evaluated ? s->eval_fence : s->fence;
++    if (!f->stacked_lw) return PresentAfter(f, src, s, real, ready_fence, ready_value);
++
++    // Fail closed when NGX Frame Warp is unavailable: never pass off a shader as Reflex 2.
++    if (!f->lwf || !f->lw_final[0] || !f->lw_final[1]) return Fail(f, "NGX Frame Warp missing");
++    LARGE_INTEGER now; QueryPerformanceCounter(&now);
++    float sx = 0.0f, sy = 0.0f;
++    // Only use actual mouse counts accumulated since the photographed frame, calibrated against
++    // NvOFA optical flow. Do not estimate future input or extrapolate scene/object movement.
++    const bool reliable = s->cap_qpc && MouseMeasuredShiftStrict(s->cap_qpc, now.QuadPart, sx, sy);
++    const float magnitude = hypotf(sx, sy);
++    constexpr float kMinWarpPx = 0.35f;
++    constexpr float kMaxWarpPx = 2.0f;  // native-quality priority, at 1080p
++    if (!reliable || magnitude < kMinWarpPx || !std::isfinite(magnitude))
++    {
++        ++f->lw_skipped;
++        return PresentAfter(f, src, s, real, ready_fence, ready_value);
++    }
++    if (magnitude > kMaxWarpPx) { const float factor = kMaxWarpPx / magnitude; sx *= factor; sy *= factor; }
++
++    Gpu& g = *f->g;
++    if (!GpuCtxBegin(g, f->ctx)) return Fail(f, "NGX Frame Warp queue begin");
++    ID3D12GraphicsCommandList* cl = f->ctx.list;
++    ID3D12Resource* dst = f->lw_final[f->lw_next++ & 1];
++    OverlayGuard(f->ov, f->ctx.queue);  // previous present has stopped reading the output buffer
++    GpuBarrier(cl, src, CSRC, NPSR);
++    GpuBarrier(cl, dst, CSRC, UAV);
++    const float focal = f->h * 0.5f / tanf(f->lw_vfov * 0.5f);
++    // Every generated output is registered as a fresh image before warping; source and destination
++    // live on the same D3D12 device. This is not a second capture or a second compositor.
++    const bool ok = LatewarpEvaluate(f->lwf, cl, src, dst, true,
++        atanf(-sx / focal), atanf(-sy / focal), 0.0f, f->lw_vfov, s->mask_ok ? s->mask : nullptr);
++    GpuBarrier(cl, dst, UAV, CSRC);
++    GpuBarrier(cl, src, NPSR, CSRC);
++    if (ok) CopyRects(f, cl, s, src, dst);  // keep fonts, crosshair, UI crisp
++    f->ctx.queue->Wait(ready_fence, ready_value);
++    const UINT64 warp_done = GpuCtxEnd(f->ctx);
++    if (!ok || !warp_done) return Fail(f, "genuine NGX Frame Warp evaluation failed");
++    ++f->lw_warped;
++    if (f->lw_warped % 240 == 1)
++        Log("[fg] NGX Frame Warp applied to real+generated output: warped=%u skipped=%u clamp=%.1fpx",
++            f->lw_warped, f->lw_skipped, kMaxWarpPx);
++    return PresentAfter(f, dst, s, real, f->ctx.fence, warp_done);
+ }
+ 
+ // The slot's UI rects copied from src into dst (both COPY_SOURCE at rest): the UI never moves with
+@@ -726,8 +773,8 @@ static const char* SetupDlssg(Fg* f, const wchar_t* dir)
+     f->mv = GpuMakeTex(g, mv_w, mv_h, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_NONE, NPSR, L"fg_mv");   // zeros, for good: see Evaluate
+     const std::vector<uint32_t> zero((size_t)mv_w * mv_h, 0);
+     if (!f->mv || !GpuUploadTex(g, f->mv, zero.data(), mv_w, mv_h, 4, NPSR)) return "mv texture";
+-    f->disable = GpuMakeBuffer(g, 16, D3D12_HEAP_TYPE_DEFAULT, UAV, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, L"fg_disable");
+-    f->disable_rb = GpuMakeBuffer(g, 16, D3D12_HEAP_TYPE_READBACK, CDST, D3D12_RESOURCE_FLAG_NONE, L"fg_disable_rb");
++    f->disable = GpuMakeBuffer(g, 32, D3D12_HEAP_TYPE_DEFAULT, UAV, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, L"fg_disable");
++    f->disable_rb = GpuMakeBuffer(g, 32, D3D12_HEAP_TYPE_READBACK, CDST, D3D12_RESOURCE_FLAG_NONE, L"fg_disable_rb");
+     if (!f->disable || !f->disable_rb) return "disable buffers";
+     return nullptr;
+ }
+@@ -736,8 +783,11 @@ Fg* FgCreate(Gpu& g, Shaders* sh, Overlay* ov, const wchar_t* dir, UINT out_w, U
+ {
+     Fg* f = new Fg;
+     f->g = &g; f->sh = sh; f->ov = ov; f->w = out_w; f->h = out_h; f->mw = mv_w; f->mh = mv_h;
+-    f->count = std::clamp(multiplier, 1, 4) - 1;
++    f->count = std::clamp(multiplier, 1, 6) - 1;
+     f->vblank = vblank_pacing; f->warp = engine == FG_WARP; f->lw = engine == FG_LATEWARP; f->video = engine == FG_VIDEO; f->lw_vfov = lw_vfov;
++    char requested[8] = {};
++    f->stacked_lw = engine == FG_DLSSG && multiplier > 1 &&
++                    GetEnvironmentVariableA("JF_NGX_STACK_LW", requested, sizeof requested) && requested[0] == '1';
+     auto fail = [&](const char* why) { Fail(f, why); FgDestroy(f); return (Fg*)nullptr; };
+ 
+     // ponytail: passthrough keeps the ctx too (its event is what the presenter waits on) - one code path.
+@@ -763,19 +813,20 @@ Fg* FgCreate(Gpu& g, Shaders* sh, Overlay* ov, const wchar_t* dir, UINT out_w, U
+     for (auto& s : f->slots)
+     {
+         if (f->video && !(s.flow = GpuMakeTex(g, mv_w, mv_h, DXGI_FORMAT_R16G16_FLOAT, D3D12_RESOURCE_FLAG_NONE, NPSR, L"fg_flow"))) return fail("video flow textures");
+-        if (f->lw && !(s.mask = GpuMakeTex(g, (mv_w + 3) / 4, (mv_h + 3) / 4, DXGI_FORMAT_R8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, NPSR, L"lw_mask"))) return fail("latewarp mask");
++        if ((f->lw || f->stacked_lw) && !(s.mask = GpuMakeTex(g, (mv_w + 3) / 4, (mv_h + 3) / 4, DXGI_FORMAT_R8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, NPSR, L"lw_mask"))) return fail("latewarp mask");
+         for (int i = 0; i < f->gens; ++i)
+             if (!(s.gen[i] = GpuMakeTex(g, out_w, out_h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, CSRC, L"fg_gen"))) return fail("slot textures");
+     }
+-    if (f->lw && !(f->lwf = LatewarpCreate(g, dir, out_w, out_h, mv_w, mv_h))) return fail("Frame Warp unavailable (nvngx_latewarp.dll next to the exe?)");
+-    if (f->lw || f->video)
++    if ((f->lw || f->stacked_lw) && !(f->lwf = LatewarpCreate(g, dir, out_w, out_h, mv_w, mv_h))) return fail("Frame Warp unavailable (nvngx_latewarp.dll next to the exe?)");
++    if (f->lw || f->video || f->stacked_lw)
+     {
+-        for (auto& t : f->lw_final) t = GpuMakeTex(g, out_w, out_h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, CSRC, f->lw ? L"lw_final" : L"video_out");
+-        if (!f->lw_final[0] || !f->lw_final[1]) return fail(f->lw ? "latewarp textures" : "video textures");
++        for (auto& t : f->lw_final) t = GpuMakeTex(g, out_w, out_h, DXGI_FORMAT_R8G8B8A8_UNORM, D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS, CSRC, (f->lw || f->stacked_lw) ? L"lw_final" : L"video_out");
++        if (!f->lw_final[0] || !f->lw_final[1]) return fail((f->lw || f->stacked_lw) ? "latewarp textures" : "video textures");
+     }
+     StartPresenter(f, f->lw ? Reproject : f->video ? VideoPresent : Presenter);
+     if (f->lw || f->video) Log("[fg] %s %ux%u pacing=%s", f->lw ? "latewarp engine (Frame Warp to the mouse)" : f->gens ? "video engine (DLSS-G frames on the content clock)" : "video engine (flow interpolation on the content clock)", out_w, out_h, vblank_pacing ? "vblank" : "timer");
+     else Log("[fg] %s %ux%u multiplier %d pacing=%s", f->warp ? "warp engine (extrapolation)" : "feature created", out_w, out_h, f->count + 1, vblank_pacing ? "vblank" : "timer");
++    if (f->stacked_lw) Log("[fg] EXPERIMENTAL: direct NGX DLSS-G + genuine NGX Frame Warp on each presented real/generated texture (<=2px, no future-input prediction)");
+     return f;
+ }
+ 
+@@ -842,7 +893,7 @@ ID3D12Resource* FgDebugReal(Fg* f) { return (f && f->dbg) ? f->dbg->real : nullp
+ 
+ ID3D12Resource* FgMaskTarget(Fg* f)
+ {
+-    if (!f->lw || !f->pending) return nullptr;
++    if (!(f->lw || f->stacked_lw) || !f->pending) return nullptr;
+     f->pending->mask_ok = true;   // the caller writes it in this list
+     return f->pending->mask;
+ }
+diff --git a/src/fg.h b/src/fg.h
+index 713826a..82e1ec5 100644
+--- a/src/fg.h
++++ b/src/fg.h
+@@ -39,7 +39,7 @@
+ struct Fg;
+ 
+ // vblank_pacing: false = CPU timer schedule.
+-Fg*  FgCreate(Gpu& g, Shaders* sh, Overlay* ov, const wchar_t* dir, UINT out_w, UINT out_h, UINT mv_w, UINT mv_h, int multiplier /* 1 = passthrough, 2..4 */,
++Fg*  FgCreate(Gpu& g, Shaders* sh, Overlay* ov, const wchar_t* dir, UINT out_w, UINT out_h, UINT mv_w, UINT mv_h, int multiplier /* 1 = passthrough, 2..6 experimental */,
+               bool vblank_pacing, int engine /* 0 DLSS-G, 1 warp (CsWarp extrapolation), 2 latewarp (Frame Warp to the mouse), 3 video */,
+               float lw_vfov = 1.0472f /* radians, engine 2 */);
+ void FgDestroy(Fg* f);   // stops the presenter (drains the GPU), releases the feature and textures
+diff --git a/src/main.cpp b/src/main.cpp
+index 7b18f78..e825e78 100644
+--- a/src/main.cpp
++++ b/src/main.cpp
+@@ -558,7 +558,11 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
+     const bool async = c.nr_async && model_on && !p->model_failed;
+     // Motion vectors feed the model and the warp/latewarp/video engines. Not DLSS-G: it measures motion
+     // itself (our flow, zeros and a field 50 px wrong score identically), so DLSS-G alone skips the flow.
+-    const bool warp_fg = c.fg_enabled && c.fg_engine == FG_WARP, lw_fg = c.fg_enabled && c.fg_engine == FG_LATEWARP;   // lw: the mouse model learns from the flow
++    char stack_warp_env[8] = {};
++    const bool ngx_stack_lw = c.fg_enabled && c.fg_engine == FG_DLSSG &&
++        GetEnvironmentVariableA("JF_NGX_STACK_LW", stack_warp_env, sizeof stack_warp_env) && stack_warp_env[0] == '1';
++    const bool warp_fg = c.fg_enabled && c.fg_engine == FG_WARP,
++               lw_fg = c.fg_enabled && (c.fg_engine == FG_LATEWARP || ngx_stack_lw); // mouse model learns from NvOFA
+     const bool vid_fg = c.fg_enabled && c.fg_engine == FG_VIDEO;   // video: interpolates along the flow
+     const bool fg_flow = warp_fg || lw_fg || vid_fg;
+     if (lw_fg) MouseStart(); else MouseStop();
+@@ -579,14 +583,14 @@ bool PipelineFrame(Pipeline* p, ID3D12Resource* cap, ID3D12Fence* wait_fence, UI
+         const int want = c.fg_enabled ? c.fg_multiplier : 1;
+         if (p->fg && FgFailed(p->fg))
+         {
+-            if (FgMultiplier(p->fg) == 1) { Log("[fg] passthrough presenter failed"); return false; }
++            if (FgMultiplier(p->fg) == 1 || ngx_stack_lw) { Log("[fg] NGX feature / presenter failure (no silent fallback)"); return false; }
+             p->cfg.fg_enabled = false; PipelineToast(p, "FG disabled: presenter failed");
+         }
+         if (p->fg && (FgFailed(p->fg) || FgMultiplier(p->fg) != want)) DropFg(p);
+         if (!p->fg)
+         {
+             p->fg = FgCreate(g, p->sh, p->ov, ExeDir().c_str(), p->w, p->h, p->ww, p->wh, want, c.fg_pacing_vblank, c.fg_engine, c.fg_lw_vfov * 3.14159265f / 180.0f);
+-            if (!p->fg && want > 1) { p->cfg.fg_enabled = false; PipelineToast(p, "FG disabled: create failed"); p->fg = FgCreate(g, p->sh, p->ov, ExeDir().c_str(), p->w, p->h, p->ww, p->wh, 1, c.fg_pacing_vblank, 0); }
++            if (!p->fg && want > 1 && !ngx_stack_lw) { p->cfg.fg_enabled = false; PipelineToast(p, "FG disabled: create failed"); p->fg = FgCreate(g, p->sh, p->ov, ExeDir().c_str(), p->w, p->h, p->ww, p->wh, 1, c.fg_pacing_vblank, 0); }
+             if (!p->fg) { Log("[fg] passthrough presenter create failed"); return false; }
+         }
+         FgSetTiming(p->fg, c.fg_phase_ms, c.fg_min_gain, c.fg_max_in_fps);   // ponytail: one atomic store per frame, no reload plumbing
+diff --git a/src/mouse.cpp b/src/mouse.cpp
+index 06a74b4..7a571a1 100644
+--- a/src/mouse.cpp
++++ b/src/mouse.cpp
+@@ -170,3 +170,29 @@ bool MousePredict(LONGLONG t_frame, LONGLONG t_now, float& sx, float& sy)
+     for (int k = 0; k < 2; ++k) if (fit[k].ok) { sx += (float)(fit[k].gx * c[k][0]); sy += (float)(fit[k].gy * c[k][1]); }
+     return true;
+ }
++
++bool MouseMeasuredShiftStrict(LONGLONG t_frame, LONGLONG t_now, float& sx, float& sy)
++{
++    sx = sy = 0;
++    if (!t_frame || t_now <= t_frame) return false;
++    const double age_ms = 1000.0 * (t_now - t_frame) / QpcFreq();
++    if (age_ms > 60.0) return false; // captured frame is too old for a conservative correction
++    std::lock_guard<std::mutex> lk(mu);
++    constexpr double kMinimumR2 = 0.92;
++    constexpr int kMinimumObservations = 40;
++    const bool trusted[2] = {
++        fit[0].ok && fit[0].r2 >= kMinimumR2 && fit[0].n >= kMinimumObservations,
++        fit[1].ok && fit[1].r2 >= kMinimumR2 && fit[1].n >= kMinimumObservations
++    };
++    if (!trusted[0] && !trusted[1]) return false;
++    double c[2][2];
++    Sum(t_frame - (LONGLONG)(delay_ms * QpcFreq() / 1000.0), t_now, c);
++    // Never borrow movement from a class whose fit is not trustworthy. This avoids cursor movements
++    // in third-person games becoming false camera rotations.
++    for (int k = 0; k < 2; ++k) if (trusted[k])
++    {
++        sx += (float)(fit[k].gx * c[k][0]);
++        sy += (float)(fit[k].gy * c[k][1]);
++    }
++    return true;
++}
+diff --git a/src/mouse.h b/src/mouse.h
+index c28a8df..affea7e 100644
+--- a/src/mouse.h
++++ b/src/mouse.h
+@@ -20,5 +20,8 @@ void MouseObserve(LONGLONG t0, LONGLONG t1, float mx, float my);
+ // The content shift the input since the frame at `t_frame` will have caused by `t_now`: false while
+ // the model has not learned a reliable fit (then: do not warp).
+ bool MousePredict(LONGLONG t_frame, LONGLONG t_now, float& sx, float& sy);
++// Native-quality NGX FG+FrameWarp experiment: require a stronger camera-motion fit than the
++// standalone latewarp mode. No prediction of future mouse movements; only observed raw counts.
++bool MouseMeasuredShiftStrict(LONGLONG t_frame, LONGLONG t_now, float& sx, float& sy);
+ // Synthetic input with a known gain and delay through the real fit; leaves the model empty. ([log] selftest=1)
+ bool MouseSelfTest();
+diff --git a/src/settings.cpp b/src/settings.cpp
+index cf2a677..d833190 100644
+--- a/src/settings.cpp
++++ b/src/settings.cpp
+@@ -96,7 +96,7 @@ const Setting kSettings[] = {
+     // so the multiplier and the governor mean nothing to it: they grey out (SyncFgRows).
+     { 2, L"fg", L"engine",            L"Engine",             Enum,  L"dlssg|warp|latewarp|video", L"dlssg",
+       L"dlssg = NVIDIA DLSS frame generation: interpolates between two frames - the smoothest, adds about half a frame of latency. warp = pushes the newest frame ahead along its motion: no added latency, more artefacts in fast motion. latewarp = NVIDIA Frame Warp re-aims the newest frame to your mouse at every refresh: lowest latency (needs nvngx_latewarp.dll). video = for video and other 2D content: every refresh shows the exact in-between moment the video's own clock calls for (24 fps on 240 Hz = 10 steps per frame), one frame late - smooth, no stutter at 23.976, but not for games." },
+-    { 2, L"fg", L"multiplier",        L"Multiplier",         Enum,  L"2|3|4", L"2",
++    { 2, L"fg", L"multiplier",        L"Multiplier",         Enum,  L"2|3|4|5|6", L"2",
+       L"Frames shown per frame the game draws: 2 = double. The display has to keep up: 60 fps x4 needs 240 Hz." },
+     { 2, L"fg", L"min_gain",          L"Pause below gain",   Float, nullptr, L"1.5",
+       L"Frame generation pauses when it is not paying off - shown frames per game frame below this for 2 s (the GPU cannot keep up). 0 = never pause." },
+diff --git a/src/v39_ui_frontend.cpp b/src/v39_ui_frontend.cpp
+new file mode 100644
+index 0000000..eadd901
+--- /dev/null
++++ b/src/v39_ui_frontend.cpp
+@@ -0,0 +1,267 @@
++// Experimental V39-style control panel for the direct-NGX feasibility engine.
++// Preserves V39's control geometry and controls JustFlow's isolated test process.
++// It does NOT claim to provide V39's NvFBC PID capture or cost-output support.
++#define UNICODE
++#define _UNICODE
++#define NOMINMAX
++#define WIN32_LEAN_AND_MEAN
++#include <windows.h>
++#include <commctrl.h>
++#include <algorithm>
++#include <filesystem>
++#include <fstream>
++#include <string>
++#include <vector>
++
++namespace {
++constexpr wchar_t kWndClass[] = L"V39NativeControlsNgxExperiment";
++constexpr wchar_t kWndTitle[] = L"V39 Controls | Experimental NGX DLSS-G + NVIDIA Frame Warp";
++enum { IDC_TARGET = 2001, IDC_REFRESH, IDC_MULTIPLIER, IDC_NVOF_RESOLUTION, IDC_START, IDC_STOP, IDC_STATUS };
++
++std::wstring ExeDir()
++{
++    wchar_t p[MAX_PATH] = {};
++    GetModuleFileNameW(nullptr, p, MAX_PATH);
++    return std::filesystem::path(p).parent_path().wstring();
++}
++std::string Utf8(const std::wstring& text)
++{
++    int n = WideCharToMultiByte(CP_UTF8, 0, text.data(), (int)text.size(), nullptr, 0, nullptr, nullptr);
++    std::string v((size_t)n, '\0');
++    if (n) WideCharToMultiByte(CP_UTF8, 0, text.data(), (int)text.size(), v.data(), n, nullptr, nullptr);
++    return v;
++}
++std::wstring CleanTitle(std::wstring title)
++{
++    for (wchar_t& c : title) if (c == L'\r' || c == L'\n' || c == L'=' || c == L'[' || c == L']') c = L' ';
++    return title;
++}
++
++class V39ControlPanel
++{
++public:
++    int Run(HINSTANCE instance)
++    {
++        hinst = instance;
++        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
++        WNDCLASSEXW wc{sizeof wc};
++        wc.hInstance = hinst;
++        wc.lpfnWndProc = &V39ControlPanel::WindowProc;
++        wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
++        wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
++        wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
++        wc.lpszClassName = kWndClass;
++        if (!RegisterClassExW(&wc)) return 1;
++        hwnd = CreateWindowExW(WS_EX_APPWINDOW, kWndClass, kWndTitle,
++            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
++            CW_USEDEFAULT, CW_USEDEFAULT, 600, 405, nullptr, nullptr, hinst, this);
++        if (!hwnd) return 2;
++        CreateControls();
++        ShowWindow(hwnd, SW_SHOW);
++        UpdateWindow(hwnd);
++        RegisterHotKey(hwnd, 1, MOD_NOREPEAT, VK_F10);
++        MSG m{};
++        while (GetMessageW(&m, nullptr, 0, 0) > 0) { TranslateMessage(&m); DispatchMessageW(&m); }
++        Stop();
++        return (int)m.wParam;
++    }
++private:
++    HINSTANCE hinst = nullptr;
++    HWND hwnd = nullptr, target_combo = nullptr, status = nullptr;
++    PROCESS_INFORMATION child{};
++    bool running = false;
++
++    HWND Label(const wchar_t* s, int x, int y, int w, int h)
++    {
++        return CreateWindowW(L"STATIC", s, WS_CHILD | WS_VISIBLE, x, y, w, h,
++            hwnd, nullptr, hinst, nullptr);
++    }
++    void CreateControls()
++    {
++        InitCommonControls();
++        Label(L"Game", 18, 16, 70, 22);
++        target_combo = CreateWindowW(WC_COMBOBOXW, nullptr,
++            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
++            18, 40, 440, 240, hwnd, (HMENU)IDC_TARGET, hinst, nullptr);
++        CreateWindowW(L"BUTTON", L"Refresh", WS_CHILD | WS_VISIBLE,
++            468, 39, 105, 28, hwnd, (HMENU)IDC_REFRESH, hinst, nullptr);
++
++        Label(L"FG multiplier", 18, 86, 95, 22);
++        HWND multiplier = CreateWindowW(WC_COMBOBOXW, nullptr,
++            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
++            120, 81, 120, 150, hwnd, (HMENU)IDC_MULTIPLIER, hinst, nullptr);
++        for (const wchar_t* option : {L"Off", L"2x", L"3x", L"4x", L"5x", L"6x"})
++            SendMessageW(multiplier, CB_ADDSTRING, 0, (LPARAM)option);
++        SendMessageW(multiplier, CB_SETCURSEL, 1, 0);
++
++        Label(L"Motion resolution", 260, 86, 117, 22);
++        HWND of_res = CreateWindowW(WC_COMBOBOXW, nullptr,
++            WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
++            375, 81, 198, 160, hwnd, (HMENU)IDC_NVOF_RESOLUTION, hinst, nullptr);
++        for (const wchar_t* option : {L"10%", L"25%", L"50%", L"100%"})
++            SendMessageW(of_res, CB_ADDSTRING, 0, (LPARAM)option);
++        SendMessageW(of_res, CB_SETCURSEL, 0, 0);
++
++        Label(L"Motion: NVIDIA Optical Flow Accelerator 4x4 FAST", 18, 127, 420, 24);
++        Label(L"Confidence: camera-fit gate ON", 385, 127, 192, 24);
++        Label(L"DXGI capture (test)  |  DX12  |  Genuine NVIDIA Frame Warp", 18, 169, 560, 22);
++
++        CreateWindowW(L"BUTTON", L"START", WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON,
++            18, 206, 180, 38, hwnd, (HMENU)IDC_START, hinst, nullptr);
++        CreateWindowW(L"BUTTON", L"STOP", WS_CHILD | WS_VISIBLE | WS_DISABLED,
++            210, 206, 120, 38, hwnd, (HMENU)IDC_STOP, hinst, nullptr);
++        status = Label(L"Select a game, FG multiplier and motion resolution, then Start.", 18, 258, 555, 52);
++        Label(L"F10 stops  |  Strict camera-fit confidence  |  Warp limit: 2 pixels", 18, 331, 555, 22);
++        RefreshTargets();
++        SetTimer(hwnd, 2, 750, nullptr);
++    }
++    static BOOL CALLBACK Enumerate(HWND candidate, LPARAM userdata)
++    {
++        V39ControlPanel* self = reinterpret_cast<V39ControlPanel*>(userdata);
++        if (!IsWindowVisible(candidate) || candidate == self->hwnd) return TRUE;
++        DWORD pid = 0;
++        GetWindowThreadProcessId(candidate, &pid);
++        if (!pid || pid == GetCurrentProcessId()) return TRUE;
++        if (GetWindowLongPtrW(candidate, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) return TRUE;
++        wchar_t title[512]{};
++        GetWindowTextW(candidate, title, 512);
++        if (!title[0]) return TRUE;
++        wchar_t entry[640]{};
++        swprintf_s(entry, L"%s  [PID %lu]", title, pid);
++        const LRESULT pos = SendMessageW(self->target_combo, CB_ADDSTRING, 0, (LPARAM)entry);
++        SendMessageW(self->target_combo, CB_SETITEMDATA, pos, (LPARAM)candidate);
++        if (std::wstring(title).find(L"Counter-Strike") != std::wstring::npos ||
++            std::wstring(title).find(L"League of Legends") != std::wstring::npos)
++            SendMessageW(self->target_combo, CB_SETCURSEL, pos, 0);
++        return TRUE;
++    }
++    void RefreshTargets()
++    {
++        SendMessageW(target_combo, CB_RESETCONTENT, 0, 0);
++        EnumWindows(Enumerate, (LPARAM)this);
++        if (SendMessageW(target_combo, CB_GETCURSEL, 0, 0) == CB_ERR &&
++            SendMessageW(target_combo, CB_GETCOUNT, 0, 0) > 0)
++            SendMessageW(target_combo, CB_SETCURSEL, 0, 0);
++    }
++    void SetRunning(bool is_running)
++    {
++        running = is_running;
++        for (int id : {IDC_TARGET, IDC_REFRESH, IDC_MULTIPLIER, IDC_NVOF_RESOLUTION, IDC_START})
++            EnableWindow(GetDlgItem(hwnd, id), !running);
++        EnableWindow(GetDlgItem(hwnd, IDC_STOP), running);
++    }
++    void Start()
++    {
++        if (running) return;
++        LRESULT selected = SendMessageW(target_combo, CB_GETCURSEL, 0, 0);
++        if (selected == CB_ERR) { SetWindowTextW(status, L"Select the game window first."); return; }
++        HWND target = (HWND)SendMessageW(target_combo, CB_GETITEMDATA, selected, 0);
++        if (!IsWindow(target)) { RefreshTargets(); SetWindowTextW(status, L"Game closed. Refresh and select again."); return; }
++        wchar_t raw_title[512]{};
++        GetWindowTextW(target, raw_title, 512);
++        const std::wstring game_title = CleanTitle(raw_title);
++        const LRESULT mi = SendDlgItemMessageW(hwnd, IDC_MULTIPLIER, CB_GETCURSEL, 0, 0);
++        const LRESULT ri = SendDlgItemMessageW(hwnd, IDC_NVOF_RESOLUTION, CB_GETCURSEL, 0, 0);
++        if (mi < 0 || mi > 5 || ri < 0 || ri > 3) { SetWindowTextW(status, L"Choose valid FG and motion options."); return; }
++        const int multiplier = mi == 0 ? 1 : (int)mi + 1;
++        const int percents[] = {10, 25, 50, 100};
++        RECT rect{};
++        if (!GetClientRect(target, &rect)) { SetWindowTextW(status, L"Game resolution unavailable."); return; }
++        int w = (int)(rect.right - rect.left), h = (int)(rect.bottom - rect.top);
++        if (w < 320 || h < 240) { SetWindowTextW(status, L"Select an open game window, not a launcher."); return; }
++        w = std::max(64, ((w * percents[ri] / 100 + 7) / 8) * 8);
++        h = std::max(64, ((h * percents[ri] / 100 + 7) / 8) * 8);
++
++        const std::filesystem::path dir = ExeDir();
++        const auto engine = dir / L"justflow.exe";
++        const auto dlss = dir / L"nvngx_dlssg.dll";
++        const auto warp = dir / L"nvngx_latewarp.dll";
++        if (!std::filesystem::exists(engine) || !std::filesystem::exists(dlss) || !std::filesystem::exists(warp))
++        {
++            SetWindowTextW(status, L"Missing engine or NVIDIA signed runtime DLLs beside this EXE."); return;
++        }
++        const auto profile = dir / L"profiles" / L"v39_ui_active.ini";
++        std::ofstream out(profile, std::ios::binary | std::ios::trunc);
++        if (!out) { SetWindowTextW(status, L"Cannot write the experimental game profile."); return; }
++        out << "[capture]\nmode=dda\nwindow_title=" << Utf8(game_title)
++            << "\nwindow_class=\ncursor=0\nborder=0\n\n"
++            << "[nr]\nwork=1920x1080\nmax_fps=0\n\n"
++            << "[filters]\nsharpen=0\nsaturation=1\n\n"
++            << "[ofa]\ninput=" << w << "x" << h << "\ngrid=4\nzero_below=0.5\n\n"
++            << "[ui]\nmask=0\nfeather=0\n\n"
++            << "[fg]\nengine=dlssg\nmultiplier=" << multiplier
++            << "\npacing=vblank\nlw_fov=60\nmin_gain=0\nmax_input_fps=0\n\n"
++            << "[log]\nfile=v39-ui-ngx-framewarp.log\n";
++        out.close();
++        SetEnvironmentVariableW(L"JF_NGX_STACK_LW", L"1");
++        std::wstring cmd = L"\"" + engine.wstring() + L"\" --ini \"" + profile.wstring() + L"\"";
++        STARTUPINFOW si{sizeof si};
++        if (!CreateProcessW(engine.c_str(), cmd.data(), nullptr, nullptr, FALSE,
++            CREATE_NO_WINDOW, nullptr, dir.c_str(), &si, &child))
++        {
++            SetWindowTextW(status, L"Experimental NGX engine failed to launch. Check Windows security.");
++            return;
++        }
++        SetRunning(true);
++        SetWindowTextW(status, L"NGX experimental engine started. Calibrating NvOFA + mouse; see v39-ui-ngx-framewarp.log for TRUE Frame Warp state.");
++    }
++    void Stop()
++    {
++        if (!running) return;
++        // Only the specific child we started can be stopped; no game process is touched.
++        if (child.hProcess)
++        {
++            PostThreadMessageW(child.dwThreadId, WM_QUIT, 0, 0);
++            if (WaitForSingleObject(child.hProcess, 1200) == WAIT_TIMEOUT)
++                TerminateProcess(child.hProcess, 0);
++            CloseHandle(child.hProcess);
++            CloseHandle(child.hThread);
++            child = {};
++        }
++        SetRunning(false);
++        SetWindowTextW(status, L"Stopped. Your game remains untouched. Select options and Start to test again.");
++    }
++    void Poll()
++    {
++        if (running && child.hProcess && WaitForSingleObject(child.hProcess, 0) == WAIT_OBJECT_0)
++        {
++            CloseHandle(child.hProcess);
++            CloseHandle(child.hThread);
++            child = {};
++            SetRunning(false);
++            SetWindowTextW(status, L"NGX engine stopped or failed. Open v39-ui-ngx-framewarp.log to see the real result.");
++        }
++    }
++    static LRESULT CALLBACK WindowProc(HWND win, UINT msg, WPARAM wparam, LPARAM lparam)
++    {
++        V39ControlPanel* self = (V39ControlPanel*)GetWindowLongPtrW(win, GWLP_USERDATA);
++        if (msg == WM_NCCREATE)
++        {
++            self = (V39ControlPanel*)((CREATESTRUCTW*)lparam)->lpCreateParams;
++            SetWindowLongPtrW(win, GWLP_USERDATA, (LONG_PTR)self);
++        }
++        if (!self) return DefWindowProcW(win, msg, wparam, lparam);
++        switch (msg)
++        {
++        case WM_COMMAND:
++            switch (LOWORD(wparam))
++            {
++            case IDC_REFRESH: self->RefreshTargets(); return 0;
++            case IDC_START: self->Start(); return 0;
++            case IDC_STOP: self->Stop(); return 0;
++            }
++            break;
++        case WM_HOTKEY: if (wparam == 1) { self->Stop(); return 0; } break;
++        case WM_TIMER: if (wparam == 2) { self->Poll(); return 0; } break;
++        case WM_DESTROY: self->Stop(); PostQuitMessage(0); return 0;
++        }
++        return DefWindowProcW(win, msg, wparam, lparam);
++    }
++};
++}
++
++int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int)
++{
++    V39ControlPanel panel;
++    return panel.Run(instance);
++}
