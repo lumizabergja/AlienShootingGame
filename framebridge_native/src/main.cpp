@@ -1,5 +1,5 @@
 // FrameBridgeNative: a strictly external, GPU-resident capture/presenter probe.
-// This does not claim to be DLSS-G or NVIDIA Reflex 2 Frame Warp.
+// NVIDIA Frame Warp is deliberately absent until the actual SDK is integrated.
 // Copyright (c) 2026. MIT-style project; see README.md.
 #include <windows.h>
 #include <d3d11.h>
@@ -21,18 +21,12 @@
 
 using Microsoft::WRL::ComPtr;
 
-constexpr int kHotkeyWarp = 1;
 constexpr int kHotkeyPause = 2;
 constexpr int kHotkeyExit = 3;
-
-struct Params {
-    float warpX, warpY, enabled, unused;
-};
 
 static const char* kShader = R"(
 Texture2D imageTex : register(t0);
 SamplerState samp : register(s0);
-cbuffer FrameParams : register(b0) { float2 warpUV; float enabled; float unused; }
 struct Out { float4 position : SV_Position; float2 uv : TEXCOORD0; };
 Out VS(uint id : SV_VertexID) {
     Out o;
@@ -42,8 +36,7 @@ Out VS(uint id : SV_VertexID) {
     return o;
 }
 float4 PS(Out i) : SV_Target {
-    float2 uv = i.uv + (enabled > 0.5 ? warpUV : float2(0, 0));
-    return imageTex.Sample(samp, saturate(uv));
+    return imageTex.Sample(samp, saturate(i.uv));
 }
 )";
 
@@ -51,11 +44,9 @@ struct App {
     HWND window{};
     bool debugWindow = false;
     bool paused = false;
-    bool warp = false;
     bool tearing = false;
     bool excluded = false;
     bool running = true;
-    float rawDx = 0, rawDy = 0;
     unsigned captureCount = 0, presentedCount = 0;
     LARGE_INTEGER qpcFreq{};
     LARGE_INTEGER lastGrabTime{};
@@ -73,7 +64,6 @@ struct App {
     ComPtr<ID3D11VertexShader> vertexShader;
     ComPtr<ID3D11PixelShader> pixelShader;
     ComPtr<ID3D11SamplerState> sampler;
-    ComPtr<ID3D11Buffer> constants;
     UINT width{}, height{};
     RECT desktopRect{};
 
@@ -102,29 +92,9 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam) {
     case WM_MOUSEACTIVATE:
         if (gApp && !gApp->debugWindow) return MA_NOACTIVATE;
         break;
-    case WM_INPUT:
-        if (gApp) {
-            UINT size = 0;
-            GetRawInputData(reinterpret_cast<HRAWINPUT>(lparam), RID_INPUT, nullptr, &size, sizeof(RAWINPUTHEADER));
-            if (size && size <= 4096) {
-                alignas(RAWINPUT) BYTE bytes[4096];
-                if (GetRawInputData(reinterpret_cast<HRAWINPUT>(lparam), RID_INPUT, bytes, &size, sizeof(RAWINPUTHEADER)) == size) {
-                    auto* raw = reinterpret_cast<RAWINPUT*>(bytes);
-                    if (raw->header.dwType == RIM_TYPEMOUSE && !(raw->data.mouse.usFlags & MOUSE_MOVE_ABSOLUTE)) {
-                        gApp->rawDx += static_cast<float>(raw->data.mouse.lLastX);
-                        gApp->rawDy += static_cast<float>(raw->data.mouse.lLastY);
-                    }
-                }
-            }
-        }
-        return 0;
     case WM_HOTKEY:
         if (gApp) {
-            if (wparam == kHotkeyWarp) {
-                gApp->warp = !gApp->warp;
-                gApp->rawDx = gApp->rawDy = 0;
-                gApp->log(gApp->warp ? "[experimental 2D translation] ON\n" : "[experimental 2D translation] OFF\n");
-            } else if (wparam == kHotkeyPause) {
+            if (wparam == kHotkeyPause) {
                 gApp->paused = !gApp->paused;
                 gApp->log(gApp->paused ? "[presenter] PAUSED\n" : "[presenter] RESUMED\n");
                 ShowWindow(hwnd, gApp->paused ? SW_HIDE : SW_SHOWNOACTIVATE);
@@ -272,21 +242,9 @@ bool App::initialize() {
     samp.AddressU = samp.AddressV = samp.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
     samp.MaxLOD = D3D11_FLOAT32_MAX;
     if (FAILED(device->CreateSamplerState(&samp, &sampler))) return false;
-    D3D11_BUFFER_DESC cbd{};
-    cbd.ByteWidth = sizeof(Params);
-    cbd.Usage = D3D11_USAGE_DEFAULT;
-    cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-    if (FAILED(device->CreateBuffer(&cbd, nullptr, &constants))) return false;
-    RAWINPUTDEVICE rid{};
-    rid.usUsagePage = 0x01;
-    rid.usUsage = 0x02;
-    rid.dwFlags = RIDEV_INPUTSINK;
-    rid.hwndTarget = window;
-    if (!RegisterRawInputDevices(&rid, 1, sizeof(rid))) log("[input] raw input unavailable\n");
-    RegisterHotKey(window, kHotkeyWarp, MOD_ALT | MOD_NOREPEAT, VK_F8);
     RegisterHotKey(window, kHotkeyPause, MOD_ALT | MOD_NOREPEAT, VK_F9);
     RegisterHotKey(window, kHotkeyExit, MOD_ALT | MOD_NOREPEAT, VK_F10);
-    log("[ready] ALT+F8 2D warp | ALT+F9 pause | ALT+F10 exit\n");
+    log("[ready] ALT+F9 pause | ALT+F10 exit; no custom warp is installed\n");
     log("[features] NVIDIA DLSS-G: NOT INTEGRATED; Reflex 2 Frame Warp: SDK UNAVAILABLE\n");
     return true;
 }
@@ -312,7 +270,6 @@ bool App::grab() {
             context->Flush(); // Submit GPU copy before returning the duplication frame.
             lastGrabTime = frame.LastPresentTime;
             ++captureCount;
-            rawDx = rawDy = 0; // Warp offsets accumulate only after this source frame.
         } else {
             restart = true; // Mode switch/Alt+Tab: reacquire with new dimensions.
         }
@@ -334,16 +291,9 @@ void App::draw() {
     const float black[4]{};
     context->OMSetRenderTargets(1, rtv.GetAddressOf(), nullptr);
     context->ClearRenderTargetView(rtv.Get(), black);
-    // Experimental flat 2D translation ONLY. This is not 3D reprojection/Reflex 2.
-    Params params{};
-    params.enabled = warp ? 1.f : 0.f;
-    params.warpX = std::clamp(rawDx / (static_cast<float>(width) * 10.f), -0.03f, 0.03f);
-    params.warpY = std::clamp(rawDy / (static_cast<float>(height) * 10.f), -0.03f, 0.03f);
-    context->UpdateSubresource(constants.Get(), 0, nullptr, &params, 0, 0);
     context->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     context->VSSetShader(vertexShader.Get(), nullptr, 0);
     context->PSSetShader(pixelShader.Get(), nullptr, 0);
-    context->PSSetConstantBuffers(0, 1, constants.GetAddressOf());
     context->PSSetShaderResources(0, 1, captureView.GetAddressOf());
     context->PSSetSamplers(0, 1, sampler.GetAddressOf());
     context->Draw(3, 0);
@@ -363,8 +313,8 @@ void App::report() {
     double ageMs = (qpcFreq.QuadPart && lastGrabTime.QuadPart)
         ? (qpc.QuadPart - lastGrabTime.QuadPart) * 1000.0 / qpcFreq.QuadPart : -1.0;
     char line[256];
-    std::snprintf(line, sizeof(line), "[stats] acquired %.1f/s, presented %.1f/s, last frame age %.2fms, warp %s\n",
-        captureCount / elapsed, presentedCount / elapsed, ageMs, warp ? "experimental" : "off");
+    std::snprintf(line, sizeof(line), "[stats] acquired %.1f/s, presented %.1f/s, last frame age %.2fms\n",
+        captureCount / elapsed, presentedCount / elapsed, ageMs);
     log(line);
     captureCount = presentedCount = 0;
     reportStart = now;
@@ -386,7 +336,6 @@ void App::loop() {
         } else Sleep(10);
         report();
     }
-    UnregisterHotKey(window, kHotkeyWarp);
     UnregisterHotKey(window, kHotkeyPause);
     UnregisterHotKey(window, kHotkeyExit);
     duplication.Reset();
