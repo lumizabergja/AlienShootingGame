@@ -1,0 +1,54 @@
+name: FrameBridge genuine NVIDIA Streamline SDK probe
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - framebridge-native-fresh-20261108
+
+jobs:
+  windows-sdk-probe:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download NVIDIA Streamline SDK 2.14.16 from official release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $url = 'https://github.com/NVIDIA-RTX/Streamline/releases/download/v2.14.16/streamline-sdk-v2.14.16.zip'
+          Invoke-WebRequest -Uri $url -OutFile 'streamline-official.zip'
+          Expand-Archive -Path 'streamline-official.zip' -DestinationPath 'sdk'
+          $header = Get-ChildItem 'sdk' -Filter 'sl.h' -Recurse -File | Select-Object -First 1
+          $lib = Get-ChildItem 'sdk' -Filter 'sl.interposer.lib' -Recurse -File | Where-Object { $_.FullName -match '[\\/]x64[\\/]' } | Select-Object -First 1
+          $dll = Get-ChildItem 'sdk' -Filter 'sl.interposer.dll' -Recurse -File | Where-Object { $_.FullName -match '[\\/]bin[\\/]x64[\\/]' -and $_.FullName -notmatch 'development|debug' } | Select-Object -First 1
+          if (-not $header -or -not $lib -or -not $dll) { throw 'Missing official NVIDIA SDK header, x64 import library or production DLL' }
+          "SL_INCLUDE=$(Split-Path $header.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "SL_LIB=$($lib.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "SL_BIN=$(Split-Path $dll.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Configure both Windows executables
+        shell: pwsh
+        run: |
+          cmake -S framebridge_native -B build -G 'Visual Studio 17 2022' -A x64 '-DFRAMEBRIDGE_BUILD_NVIDIA_PROBE=ON' "-DFRAMEBRIDGE_SL_INCLUDE_DIR=$env:SL_INCLUDE" "-DFRAMEBRIDGE_SL_INTERPOSER_LIB=$env:SL_LIB"
+
+      - name: Compile
+        shell: pwsh
+        run: cmake --build build --config Release --parallel
+
+      - name: Package genuine NVIDIA SDK dependencies
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Copy-Item 'build/Release/FrameBridgeNative.exe' 'dist/FrameBridgeNative.exe'
+          Copy-Item 'build/Release/FrameBridgeNvidiaProbe.exe' 'dist/FrameBridgeNvidiaProbe.exe'
+          Copy-Item 'framebridge_native/README.md' 'dist/README.md'
+          Get-ChildItem -Path $env:SL_BIN -Filter '*.dll' -File | ForEach-Object { Copy-Item $_.FullName -Destination 'dist' }
+          $essential = @('sl.interposer.dll', 'sl.common.dll', 'sl.dlss_g.dll')
+          foreach ($name in $essential) { if (-not (Test-Path "dist/$name")) { throw "Missing $name from production SDK" } }
+          Compress-Archive -Path 'dist/*' -DestinationPath 'FrameBridgeNative-SDK-Probe-Windows-x64.zip'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: FrameBridgeNative-SDK-Probe-Windows-x64
+          path: FrameBridgeNative-SDK-Probe-Windows-x64.zip
